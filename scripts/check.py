@@ -18,7 +18,9 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     runtime = args.runtime.resolve()
     pin = json.loads((root / "dependency-pins.json").read_text())["industrial-agent-runtime"]
-    git = ["git", "-c", f"safe.directory={runtime}", "-C", str(runtime)]
+    # Git for Windows compares safe.directory using slash-normalized paths.
+    git_path = runtime.as_posix()
+    git = ["git", "-c", f"safe.directory={git_path}", "-C", git_path]
     actual = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
     if actual != pin:
         print(f"Dependency pin mismatch: expected {pin}, got {actual}", flush=True)
