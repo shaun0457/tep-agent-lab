@@ -8,7 +8,7 @@ the canonical result, rather than being copied into an ExperimentRecord.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -29,6 +29,12 @@ class _Record:
     def __post_init__(self):
         for item in fields(self):
             value = getattr(self, item.name)
+            if (not item.name.endswith("_ref")
+                    and not item.name.endswith("_refs")
+                    and _contains_information_ref(value)):
+                raise ValueError(
+                    f"{item.name} must use explicit InformationRef fields"
+                )
             if str(item.type).startswith("Mapping"):
                 if not isinstance(value, Mapping):
                     raise ValueError(f"{item.name} requires a mapping")
@@ -99,6 +105,21 @@ class ExperimentRecord(_Record):
 Record = InvestigationReport | DecisionRecord | ExperimentRecord
 
 
+def _contains_information_ref(value: Any) -> bool:
+    if isinstance(value, InformationRef):
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_information_ref(key)
+                   or _contains_information_ref(child)
+                   for key, child in value.items())
+    if isinstance(value, (tuple, list)):
+        return any(_contains_information_ref(child) for child in value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return any(_contains_information_ref(getattr(value, item.name))
+                   for item in fields(value))
+    return False
+
+
 def _validate(record: Record) -> tuple[InformationRef, ...]:
     references: list[InformationRef] = []
     for item in fields(record):
@@ -117,7 +138,9 @@ def _validate(record: Record) -> tuple[InformationRef, ...]:
         elif item.name in ("state_revision", "generated_from_state_revision"):
             if type(value) is not int or value < 0:
                 raise ValueError("Record state revision must be a nonnegative integer")
-        elif str(item.type) == "str":
+        elif str(item.type) in ("str", "str | None"):
+            if value is None and "None" in str(item.type):
+                continue
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{item.name} requires nonempty text")
         elif str(item.type).startswith("tuple[str"):
@@ -178,6 +201,9 @@ class EngineeringArchive:
             if (supersedes.ref_id != record_id or supersedes.kind != kind
                     or not any(e["ref"] == to_jsonable(supersedes) for e in existing)):
                 raise ValueError("Superseded version must exist in this run")
+        if (isinstance(record, InvestigationReport)
+                and RecordStatus(record.status) is not RecordStatus.DRAFT):
+            raise ValueError("Only a DRAFT report can enter verification")
         if isinstance(record, InvestigationReport):
             record = replace(record, status=RecordStatus.VERIFIED)
         artifact = self.log.put_artifact(to_jsonable(record))

@@ -93,6 +93,39 @@ class EngineeringRecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.archive.store(self.report(investigation_id="other-run"), version="1")
 
+    def test_report_status_cannot_silently_escalate(self):
+        rejected = self.report(status=RecordStatus.REJECTED)
+        with self.assertRaisesRegex(ValueError, "Only a DRAFT"):
+            self.archive.store(rejected, version="1")
+        self.assertEqual((), self.log.events())
+
+    def test_optional_strings_reject_mutable_or_non_string_values(self):
+        mutable = {"secret": []}
+        with self.assertRaisesRegex(ValueError, "case_id requires nonempty text"):
+            self.report(case_id=mutable)
+        mutable["secret"].append("changed")
+        with self.assertRaisesRegex(ValueError, "accepted_rejected_neutral"):
+            ExperimentRecord(
+                record_id="er-bad", experiment_ref=self.refs["experiment"],
+                hypothesis_refs=(), prediction_refs=(),
+                run_spec_ref=self.refs["run-spec"], result_ref=self.refs["result"],
+                outcome_summary="Bad optional field", actual_budget_usage={},
+                artifact_refs=(), provenance={"status": "FAILED"},
+                created_at="2026-09-17", accepted_rejected_neutral=mutable,
+            )
+
+    def test_nested_information_ref_cannot_bypass_visibility_validation(self):
+        hidden = replace(self.refs["evidence"], visibility=Visibility.EVALUATOR)
+        with self.assertRaisesRegex(ValueError, "explicit InformationRef fields"):
+            ExperimentRecord(
+                record_id="er-hidden", experiment_ref=self.refs["experiment"],
+                hypothesis_refs=(), prediction_refs=(),
+                run_spec_ref=self.refs["run-spec"], result_ref=self.refs["result"],
+                outcome_summary="Must reject hidden provenance ref",
+                actual_budget_usage={}, artifact_refs=(),
+                provenance={"input": {"ref": hidden}}, created_at="2026-09-17",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
