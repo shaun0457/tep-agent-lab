@@ -1,6 +1,6 @@
 # C1 resume handoff
 
-Branch: `feat/investigation-state-v0-resume`  
+Branch: `feat/investigation-state-v0-resume`
 Implementation commit: `4e546f3`
 
 ## Delivered
