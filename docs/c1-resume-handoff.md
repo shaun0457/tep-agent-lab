@@ -2,7 +2,7 @@
 
 Branch: `feat/investigation-state-v0-resume`
 Implementation base commit: `4e546f3`
-Contract-closure commit: recorded in the coordinator handoff after commit
+Contract-closure implementation commit: `74d3d60`
 
 ## Delivered
 
