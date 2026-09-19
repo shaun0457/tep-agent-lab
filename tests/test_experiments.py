@@ -251,7 +251,14 @@ class ExperimentContractTests(unittest.TestCase):
                          [delta.target_ref_or_path for delta in deltas])
         self.assertTrue(all(delta.producer == "MODEL" and delta.proposed_base_revision == 7
                             for delta in deltas))
-        self.assertEqual({"conclusion_summary", "residual_uncertainty"}, set(deltas[3].value_or_ref))
+        self.assertEqual({"leading_hypothesis_ref", "current_rank_or_score_summary",
+                          "key_evidence_link_refs", "key_counterevidence_link_refs",
+                          "remaining_uncertainties"}, set(deltas[3].value_or_ref))
+        self.assertEqual("Candidate remains plausible",
+                         deltas[3].value_or_ref["current_rank_or_score_summary"])
+        self.assertEqual(("Ambiguous",),
+                         deltas[3].value_or_ref["remaining_uncertainties"])
+        self.assertNotIn("last_updated_revision", deltas[3].value_or_ref)
         with self.assertRaises(TypeError):
             deltas[0].value_or_ref["relation"] = "CONTRADICT"
         # Pure mapping preserves the original revision even if called much later.

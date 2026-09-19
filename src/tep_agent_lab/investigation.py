@@ -35,7 +35,6 @@ INGESTION_OPERATIONS = frozenset({
     "REGISTER_OBSERVATION", "REGISTER_COMPLETED_EXPERIMENT",
     "REGISTER_SUBTASK_RESULT", "REGISTER_ARTIFACT_REF",
 })
-RUNTIME_OPERATIONS = frozenset({"SET_GENERIC_STATUS"})
 
 
 def _text(value: Any, name: str) -> str:
@@ -118,14 +117,12 @@ class OpenQuestion:
 
 
 @dataclass(frozen=True, kw_only=True)
-class WorkingExplanation:
+class WorkingExplanationUpdate:
     leading_hypothesis_ref: InformationRef | None
     current_rank_or_score_summary: str | None
     key_evidence_link_refs: tuple[InformationRef, ...]
     key_counterevidence_link_refs: tuple[InformationRef, ...]
     remaining_uncertainties: tuple[str, ...]
-    last_updated_revision: int
-
     def __post_init__(self) -> None:
         if self.leading_hypothesis_ref is not None:
             object.__setattr__(self, "leading_hypothesis_ref",
@@ -142,6 +139,14 @@ class WorkingExplanation:
             raise ValueError("remaining uncertainties must be immutable text")
         object.__setattr__(self, "remaining_uncertainties",
                            tuple(self.remaining_uncertainties))
+
+
+@dataclass(frozen=True, kw_only=True)
+class WorkingExplanation(WorkingExplanationUpdate):
+    last_updated_revision: int
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
         if type(self.last_updated_revision) is not int or self.last_updated_revision < 0:
             raise ValueError("last_updated_revision must be a nonnegative integer")
 
@@ -249,6 +254,23 @@ def _working_explanation(value: Any) -> WorkingExplanation:
     if set(value) != required:
         raise ValueError("WorkingExplanation must match the canonical schema")
     return WorkingExplanation(**dict(value))
+
+
+def _working_explanation_update(value: Any) -> WorkingExplanationUpdate:
+    if isinstance(value, WorkingExplanationUpdate):
+        if isinstance(value, WorkingExplanation):
+            raise ValueError("proposal update must not supply a materialized revision")
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("WorkingExplanationUpdate object required")
+    required = {
+        "leading_hypothesis_ref", "current_rank_or_score_summary",
+        "key_evidence_link_refs", "key_counterevidence_link_refs",
+        "remaining_uncertainties",
+    }
+    if set(value) != required:
+        raise ValueError("WorkingExplanationUpdate must match the canonical schema")
+    return WorkingExplanationUpdate(**dict(value))
 
 
 def _hypothesis(value: Any) -> Hypothesis:
@@ -395,7 +417,9 @@ class RcaStateStore:
                     resolve: Callable[[InformationRef], InformationRef] | None = None
                     ) -> "RcaStateStore":
         accepted = [event for event in log.events()
-                    if event["type"] in {"RCA_STATE_INITIALIZED", "RCA_STATE_UPDATE_ACCEPTED"}]
+                    if event["type"] in {"RCA_STATE_INITIALIZED",
+                                         "RCA_STATE_UPDATE_ACCEPTED",
+                                         "RCA_STATUS_TRANSITION_ACCEPTED"}]
         if not accepted:
             raise ValueError("run log has no RCA state snapshot")
         snapshot = log.read_artifact(accepted[-1]["payload"]["snapshot_checksum"])
@@ -510,6 +534,47 @@ class RcaStateStore:
                 "deltas": to_jsonable(batch)})
             raise
 
+    def transition_status(self, status: TaskStatus,
+                          expected_revision: int | str) -> int:
+        """Apply one runtime-owned lifecycle transition atomically."""
+        try:
+            if type(expected_revision) is not int or expected_revision != self.revision():
+                raise ValueError("stale expected revision")
+            next_status = TaskStatus(status)
+            terminal = {TaskStatus.DONE, TaskStatus.FAILED,
+                        TaskStatus.EXHAUSTED, TaskStatus.CANCELLED}
+            current = self._state.generic_status
+            if next_status not in terminal:
+                raise ValueError("transition_status accepts terminal status only")
+            if current in terminal:
+                if next_status == current:
+                    self.log.append("RCA_STATUS_TRANSITION_IDEMPOTENT", {
+                        "expected_revision": expected_revision,
+                        "current_revision": self.revision(),
+                        "status": current.value})
+                    return self.revision()
+                raise ValueError("terminal status cannot be overwritten")
+            resulting_revision = self.revision() + 1
+            state = replace(self._state, generic_status=next_status,
+                            revision=resulting_revision)
+            artifact = self.log.put_artifact(self._snapshot(state, self._objects))
+            self.log.append("RCA_STATUS_TRANSITION_ACCEPTED", {
+                "expected_revision": expected_revision,
+                "resulting_revision": resulting_revision,
+                "from_status": current.value,
+                "to_status": next_status.value,
+                "snapshot_checksum": artifact})
+            self._state = state
+            return resulting_revision
+        except Exception as exc:
+            self.log.append("RCA_STATUS_TRANSITION_REJECTED", {
+                "expected_revision": expected_revision,
+                "current_revision": self.revision(),
+                "requested_status": (status.value if isinstance(status, TaskStatus)
+                                     else str(status)),
+                "reason": str(exc)})
+            raise
+
     def _apply_one(self, state: RcaState, objects: dict[tuple[Any, ...], Any],
                    delta: StateDelta, revision: int) -> RcaState:
         operation = delta.operation
@@ -519,9 +584,6 @@ class RcaStateStore:
         elif delta.producer == "RESULT_INGESTION":
             if operation not in INGESTION_OPERATIONS:
                 raise ValueError("operation is not deterministic result ingestion")
-        elif delta.producer == "RUNTIME":
-            if operation not in RUNTIME_OPERATIONS:
-                raise ValueError("operation is not runtime-controlled")
         else:
             raise ValueError("unknown StateDelta producer")
         _text(delta.target_ref_or_path, "delta target")
@@ -539,6 +601,12 @@ class RcaStateStore:
             if key in objects and to_jsonable(objects[key]) != to_jsonable(value):
                 raise ValueError("immutable object ref cannot be rewritten")
             objects[key] = freeze_json(value)
+
+        def active(ref: InformationRef,
+                   active_refs: Sequence[InformationRef]) -> bool:
+            # Every ref was exact-resolved by known(). Model deltas in one atomic
+            # batch still refer to the common pre-update projection version.
+            return any(item.ref_id == ref.ref_id for item in active_refs)
 
         if delta.reason_ref is not None:
             known(_ref(delta.reason_ref))
@@ -575,7 +643,7 @@ class RcaStateStore:
                 raise ValueError("evidence-link target must be its hypothesis")
             known(obj.hypothesis_ref)
             known(obj.observation_ref)
-            if obj.hypothesis_ref not in state.hypothesis_refs:
+            if not active(obj.hypothesis_ref, state.hypothesis_refs):
                 raise ValueError("evidence must link a current hypothesis")
             if obj.observation_ref not in state.observation_refs:
                 raise ValueError("evidence must link a registered observation")
@@ -595,7 +663,7 @@ class RcaStateStore:
                 raise ValueError("ADD/UPDATE question existence mismatch")
             for ref in obj.related_hypotheses:
                 known(ref)
-                if ref not in state.hypothesis_refs:
+                if not active(ref, state.hypothesis_refs):
                     raise ValueError("question references an inactive hypothesis ref")
             questions = tuple(item for item in state.open_questions
                               if item.question_id != obj.question_id) + (obj,)
@@ -608,7 +676,8 @@ class RcaStateStore:
                 raise ValueError("experiment already planned")
             for ref in (*obj.hypothesis_refs, *obj.prediction_refs, *obj.required_input_refs):
                 known(ref)
-            if any(ref not in state.hypothesis_refs for ref in obj.hypothesis_refs):
+            if any(not active(ref, state.hypothesis_refs)
+                   for ref in obj.hypothesis_refs):
                 raise ValueError("experiment references an inactive hypothesis ref")
             ref = _object_ref(obj.experiment_id, "ExperimentProposal", obj, revision)
             put(ref, obj)
@@ -637,12 +706,17 @@ class RcaStateStore:
         if operation == "UPDATE_WORKING_EXPLANATION":
             if delta.target_ref_or_path != "current_best_explanation":
                 raise ValueError("working explanation target mismatch")
-            obj = _working_explanation(value)
-            if obj.last_updated_revision != expected_model_revision(delta):
-                raise ValueError("working explanation revision must match proposal revision")
+            update = _working_explanation_update(value)
+            obj = WorkingExplanation(
+                leading_hypothesis_ref=update.leading_hypothesis_ref,
+                current_rank_or_score_summary=update.current_rank_or_score_summary,
+                key_evidence_link_refs=update.key_evidence_link_refs,
+                key_counterevidence_link_refs=update.key_counterevidence_link_refs,
+                remaining_uncertainties=update.remaining_uncertainties,
+                last_updated_revision=revision)
             for ref in ((obj.leading_hypothesis_ref,) if obj.leading_hypothesis_ref else ()):
                 known(ref)
-                if ref not in state.hypothesis_refs:
+                if not active(ref, state.hypothesis_refs):
                     raise ValueError("working explanation references an inactive hypothesis")
             for ref in (*obj.key_evidence_link_refs, *obj.key_counterevidence_link_refs):
                 known(ref)
@@ -713,21 +787,6 @@ class RcaStateStore:
             if ref in state.artifact_refs:
                 return state
             return replace(state, artifact_refs=state.artifact_refs + (ref,))
-        if operation == "SET_GENERIC_STATUS":
-            if delta.target_ref_or_path != "generic_status":
-                raise ValueError("status target mismatch")
-            status = TaskStatus(value)
-            allowed = {
-                TaskStatus.RUNNING: {TaskStatus.WAITING, TaskStatus.READY, TaskStatus.FAILED,
-                                     TaskStatus.DONE, TaskStatus.EXHAUSTED,
-                                     TaskStatus.CANCELLED},
-                TaskStatus.WAITING: {TaskStatus.RUNNING, TaskStatus.FAILED,
-                                     TaskStatus.EXHAUSTED, TaskStatus.CANCELLED},
-                TaskStatus.READY: {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED},
-            }
-            if status not in allowed.get(state.generic_status, set()):
-                raise ValueError("illegal generic status transition")
-            return replace(state, generic_status=status)
         raise ValueError("unregistered RCA operation")
 
 

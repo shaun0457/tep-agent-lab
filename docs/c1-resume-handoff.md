@@ -1,11 +1,13 @@
 # C1 resume handoff
 
 Branch: `feat/investigation-state-v0-resume`
-Implementation commit: `4e546f3`
+Implementation base commit: `4e546f3`
+Contract-closure commit: recorded in the coordinator handoff after commit
 
 ## Delivered
 
-- `RcaState`, `OpenQuestion`, `WorkingExplanation`, and immutable
+- `RcaState`, `OpenQuestion`, shared revision-free
+  `WorkingExplanationUpdate`, materialized `WorkingExplanation`, and immutable
   `ObservationRecord` contracts;
 - `RcaStateStore` implementing the runtime `TaskStateStore` protocol with
   optimistic revision checks, producer/operation allowlists, atomic batches,
@@ -20,47 +22,56 @@ Implementation commit: `4e546f3`
   readiness deficiencies, and Engineering Record coverage from the prior C1
   tranche;
 - B1 Coordinator integration proving stale same-turn suppression and lexical
-  current-revision ingestion for one WorkBatch wave.
+  current-revision ingestion for one WorkBatch wave;
+- runtime-owned terminal lifecycle persistence through
+  `TaskStateStore.transition_status`, including exact-revision checks,
+  same-terminal idempotence, terminal overwrite denial, audit events, and
+  reconstruction from the accepted terminal snapshot;
+- C3 interpretation mapping from `conclusion_summary` and
+  `residual_uncertainty` into the shared typed update, with C1 assigning the
+  resulting revision.
 
 Changed files:
 
 - `src/tep_agent_lab/investigation.py`
 - `src/tep_agent_lab/__init__.py`
+- `src/tep_agent_lab/experiments.py`
 - `tests/test_investigation.py`
+- `tests/test_experiments.py`
+- `docs/specs/investigation-state-v0.md`
+- `docs/specs/hypothesis-experiment-v0.md`
 
 ## Verification
 
-Using runtime commit `dc1845fa930683364abd04a8d0d4b910168eb3d8` on `PYTHONPATH`:
+Using runtime commit `6c8a8d2` on `PYTHONPATH`:
 
 ```text
-python -m unittest discover -s tests -v
-Ran 63 tests in 0.601s
+python -m unittest discover -s tests -v  # tep-agent-lab
+Ran 66 tests in 1.067s
+OK
+
+python -m unittest discover -s tests -v  # industrial-agent-runtime
+Ran 62 tests in 1.902s
 OK
 ```
 
-The run includes the full lab regression suite and 13 C1 store/coordinator
-tests. `py_compile` and `git diff --cached --check` passed. The implementation
+The lab run includes 16 C1 store/coordinator tests. The cross-repo closure test
+proves two lexical WorkBatch ingestions apply at revisions `0->1` and `1->2`,
+then a verified finish persists `DONE` at `2->3`. `py_compile` and
+`git diff --check` passed. The implementation
 imports only generic runtime contracts and does not import simulator physics,
 provider SDKs, LangGraph, or MCP.
 
-## SPEC_CONFLICT
+## Resolved contract conflicts
 
-Two dependent paths remain stopped; the independent C1 implementation does not
-invent either missing contract.
+The approved minimum corrections are implemented in both owning specs and code:
 
-1. `investigation-state-v0.md` says Finish/hard-stop lifecycle changes update
-   `RcaState.generic_status`, but runtime `TaskStateStore` has no lifecycle
-   transition method and the domain-independent Coordinator cannot name the
-   lab-owned `SET_GENERIC_STATUS` operation. C1 validates a trusted `RUNTIME`
-   delta and keeps readiness pure, but B1 does not invoke it. Smallest proposed
-   change: add a runtime-owned typed lifecycle transition method/delta and call
-   it on terminal Coordinator paths.
-2. `hypothesis-experiment-v0.md` maps interpretation conclusion/uncertainty into
-   `UPDATE_WORKING_EXPLANATION`, while `investigation-state-v0.md` requires the
-   different canonical `WorkingExplanation` fields. C1 accepts the canonical
-   object and deliberately rejects the incompatible C3 patch. Smallest proposed
-   change: define one typed update payload and its deterministic materialization
-   in the owning specs, then share it between C3 mapping and C1 validation.
+1. terminal status changes use the generic runtime protocol and cannot be
+   expressed as a model/result delta;
+2. C3 and C1 share one `WorkingExplanationUpdate` shape, while only the store
+   writes `last_updated_revision`.
+
+No C1 `SPEC_CONFLICT` remains.
 
 ## Deferred by owning phase
 

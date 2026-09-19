@@ -11,8 +11,10 @@ from industrial_agent_runtime import (
 )
 
 from tep_agent_lab.experiments import (
-    ExperimentProposal, ExperimentResult, ExperimentType, Hypothesis,
+    ExperimentInterpretation, ExperimentProposal, ExperimentResult,
+    ExperimentType, Hypothesis,
     HypothesisEvidenceLink, HypothesisStatus, HypothesisType, EvidenceRelation,
+    interpretation_to_deltas,
 )
 from tep_agent_lab.investigation import (
     ObservationRecord, RcaResultIngestor, RcaState, RcaStateStore,
@@ -110,7 +112,6 @@ class StoreTests(unittest.TestCase):
             "current_rank_or_score_summary": "One active candidate",
             "key_evidence_link_refs": [], "key_counterevidence_link_refs": [],
             "remaining_uncertainties": ["No observation yet"],
-            "last_updated_revision": 0,
         }
         self.apply(
             StateDelta("ADD_HYPOTHESIS", "h1", hypothesis(), "MODEL"),
@@ -121,6 +122,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(["h1"], [item.ref_id for item in self.store.state.hypothesis_refs])
         self.assertEqual("q1", self.store.state.open_questions[0].question_id)
         self.assertEqual("No observation yet", self.store.state.uncertainty_summary)
+        self.assertEqual(1, self.store.state.current_best_explanation.last_updated_revision)
         with self.assertRaises(ValueError):
             self.apply(StateDelta("SET_GENERIC_STATUS", "generic_status", "DONE", "MODEL"))
 
@@ -192,6 +194,48 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(1, len(self.store.state.completed_experiment_refs))
         self.assertEqual(1, len(self.store.state.observation_refs))
 
+    def test_interpretation_mapping_applies_shared_working_explanation_update(self):
+        self.apply(StateDelta("ADD_HYPOTHESIS", "h1", hypothesis(), "MODEL"))
+        result = ToolResult(
+            "request-1", "SUCCESS", {"value": 42}, {},
+            {"tool_name": "read", "tool_version": "v1", "created_at": NOW})
+        self.apply(*RcaResultIngestor().derive_deltas(result))
+        h_ref, o_ref = (self.store.state.hypothesis_refs[0],
+                        self.store.state.observation_refs[0])
+        proposal = ExperimentProposal(
+            experiment_id="e1", investigation_id="i1", goal="Distinguish",
+            hypothesis_refs=(h_ref,), experiment_type=ExperimentType.SIGNAL_ANALYSIS,
+            rationale="Measure response", discriminating_question="Direction?",
+            prediction_refs=(ref("prediction"),), scenario_or_intervention={},
+            required_input_refs=(), requested_tools=("signal",), seed_policy={},
+            horizon=10, metrics=("delta",), budget_request={"trials": 1},
+            safety_constraints=("read-only",), status="PLANNED")
+        self.apply(StateDelta("PLAN_EXPERIMENT", "e1", proposal, "MODEL"))
+        base = self.store.revision()
+        link = HypothesisEvidenceLink(
+            hypothesis_ref=h_ref, observation_ref=o_ref,
+            relation=EvidenceRelation.SUPPORT, reason_summary="Matched",
+            producer="MODEL")
+        updated = hypothesis(revision=base)
+        interpretation = ExperimentInterpretation(
+            interpretation_id="int1",
+            experiment_ref=self.store.state.planned_experiment_refs[0],
+            proposed_evidence_links=(link,), hypothesis_updates=(updated,),
+            conclusion_summary="Candidate remains plausible",
+            residual_uncertainty="Alternative remains",
+            next_questions=({"question_id": "q1", "question": "Alternative?",
+                             "why_it_matters": "Residual ambiguity",
+                             "related_hypotheses": [h_ref],
+                             "resolvable_by": "EXPERIMENT", "priority": 1,
+                             "status": "OPEN"},))
+        self.store.apply_batch(
+            interpretation_to_deltas(interpretation, base_revision=base), base)
+        explanation = self.store.state.current_best_explanation
+        self.assertEqual("Candidate remains plausible",
+                         explanation.current_rank_or_score_summary)
+        self.assertEqual(("Alternative remains",), explanation.remaining_uncertainties)
+        self.assertEqual(base + 1, explanation.last_updated_revision)
+
     def test_experiment_result_requires_registered_run_spec(self):
         self.apply(StateDelta("ADD_HYPOTHESIS", "h1", hypothesis(), "MODEL"))
         h_ref = self.store.state.hypothesis_refs[0]
@@ -253,14 +297,34 @@ class StoreTests(unittest.TestCase):
                           "missing required evidence ref: missing-e",
                           "missing required artifact ref: missing-a"), issues)
 
-    def test_runtime_status_operation_exists_but_readiness_has_no_side_effect(self):
+    def test_runtime_terminal_status_protocol_is_revision_bound_and_not_a_delta(self):
         self.assertEqual(TaskStatus.RUNNING, self.store.status())
         readiness_deficiencies(self.store)
         self.assertEqual(TaskStatus.RUNNING, self.store.status())
         revision = self.store.revision()
-        self.store.apply_batch((StateDelta("SET_GENERIC_STATUS", "generic_status",
-                                           "READY", "RUNTIME", revision),), revision)
-        self.assertEqual(TaskStatus.READY, self.store.status())
+        with self.assertRaises(ValueError):
+            self.store.apply_batch((StateDelta("SET_GENERIC_STATUS", "generic_status",
+                                               "READY", "RUNTIME", revision),), revision)
+        with self.assertRaises(ValueError):
+            self.store.transition_status(TaskStatus.READY, revision)
+        self.store.transition_status(TaskStatus.DONE, revision)
+        self.assertEqual(TaskStatus.DONE, self.store.status())
+        self.assertEqual(revision + 1, self.store.revision())
+        self.assertEqual(revision + 1,
+                         self.store.transition_status(TaskStatus.DONE, revision + 1))
+        self.assertEqual("RCA_STATUS_TRANSITION_IDEMPOTENT",
+                         self.log.events()[-1]["type"])
+        with self.assertRaises(ValueError):
+            self.store.transition_status(TaskStatus.FAILED, revision + 1)
+        self.assertEqual("RCA_STATUS_TRANSITION_REJECTED", self.log.events()[-1]["type"])
+        restored = RcaStateStore.reconstruct(self.log, resolve=self.registry)
+        self.assertEqual(TaskStatus.DONE, restored.status())
+
+    def test_runtime_can_exhaust_running_state(self):
+        revision = self.store.revision()
+        self.assertEqual(revision + 1,
+                         self.store.transition_status(TaskStatus.EXHAUSTED, revision))
+        self.assertEqual(TaskStatus.EXHAUSTED, self.store.status())
 
 
 class CoordinatorIntegrationTests(unittest.TestCase):
@@ -334,9 +398,15 @@ class CoordinatorIntegrationTests(unittest.TestCase):
             ingestor=RcaResultIngestor(), clock=lambda: NOW).run()
         self.assertEqual(TaskStatus.DONE, result.status)
         self.assertEqual(["a", "z"], self.calls)
+        self.assertEqual(TaskStatus.DONE, self.store.status())
+        self.assertEqual(3, result.state_revision)
         accepted = [event for event in self.log.events()
                     if event["type"] == "RCA_STATE_UPDATE_ACCEPTED"]
         self.assertEqual([0, 1], [event["payload"]["expected_revision"] for event in accepted])
+        lifecycle = [event for event in self.log.events()
+                     if event["type"] == "RCA_STATUS_TRANSITION_ACCEPTED"]
+        self.assertEqual([2], [event["payload"]["expected_revision"]
+                               for event in lifecycle])
         self.assertEqual(["observation:a", "observation:z"],
                          [item.ref_id for item in self.store.state.observation_refs])
         self.assertNotIn("observation:never",
@@ -344,6 +414,40 @@ class CoordinatorIntegrationTests(unittest.TestCase):
         rejected = [event for event in self.trace.read_events()
                     if event["type"] == "STATE_UPDATE" and event["status"] == "DENIED"]
         self.assertEqual(1, len(rejected))
+
+    def test_runtime_coordinator_persists_finish_and_exhaustion(self):
+        class Verifier:
+            def verify_finish(self, proposal, task, expected_state_revision):
+                return True
+
+        task = Task("task-1", "g", (), (), Budget(1, 0, 0, 0, 1),
+                    {"type": "object"})
+        finish = FakeProvider([self._turn(
+            Action.FINISH_PROPOSAL,
+            finish_proposal=FinishProposal({"answer": "done"}))])
+        result = Coordinator(
+            task, self.store, finish, self.trace,
+            model_metadata={"provider": "fake", "model": "scripted",
+                            "model_version": "v1", "prompt_template_version": "v1"},
+            verifier=Verifier(), clock=lambda: NOW).run()
+        self.assertEqual(TaskStatus.DONE, result.status)
+        self.assertEqual(TaskStatus.DONE, self.store.status())
+
+        with TemporaryDirectory() as directory:
+            log = RunLog(Path(directory) / "state", {"run_id": "exhaust"})
+            store = RcaStateStore(
+                RcaState(investigation_id="i2", goal="g",
+                         incident_ref=ref("incident-2")), log, task_id="task-2")
+            exhausted = Coordinator(
+                replace(task, task_id="task-2",
+                        budget=replace(task.budget, max_model_calls=0)),
+                store, FakeProvider([]),
+                TraceRecorder(Path(directory) / "trace"),
+                model_metadata={"provider": "fake", "model": "scripted",
+                                "model_version": "v1", "prompt_template_version": "v1"},
+                clock=lambda: NOW).run()
+            self.assertEqual(TaskStatus.EXHAUSTED, exhausted.status)
+            self.assertEqual(TaskStatus.EXHAUSTED, store.status())
 
 
 if __name__ == "__main__":

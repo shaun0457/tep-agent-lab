@@ -506,6 +506,10 @@ def interpretation_to_deltas(interpretation: ExperimentInterpretation, *,
     _revision(base_revision)
     if producer != "MODEL":
         raise ValueError("Experiment interpretation is a MODEL proposal")
+    # Imported lazily because investigation state owns this shared proposal
+    # payload while importing the experiment contracts defined in this module.
+    from .investigation import WorkingExplanationUpdate
+
     values: list[tuple[str, str, Any]] = []
     for link in interpretation.proposed_evidence_links:
         if link.producer != producer:
@@ -515,9 +519,14 @@ def interpretation_to_deltas(interpretation: ExperimentInterpretation, *,
         values.append(("UPDATE_HYPOTHESIS", hypothesis.hypothesis_id, hypothesis))
     for question in interpretation.next_questions:
         values.append(("ADD_OPEN_QUESTION", question["question_id"], question))
-    values.append(("UPDATE_WORKING_EXPLANATION", "current_best_explanation", {
-        "conclusion_summary": interpretation.conclusion_summary,
-        "residual_uncertainty": interpretation.residual_uncertainty}))
+    remaining = ((interpretation.residual_uncertainty,)
+                 if interpretation.residual_uncertainty.strip() else ())
+    values.append(("UPDATE_WORKING_EXPLANATION", "current_best_explanation",
+                   WorkingExplanationUpdate(
+                       leading_hypothesis_ref=None,
+                       current_rank_or_score_summary=interpretation.conclusion_summary,
+                       key_evidence_link_refs=(), key_counterevidence_link_refs=(),
+                       remaining_uncertainties=remaining)))
     values.append(("ADD_EXPERIMENT_INTERPRETATION", interpretation.interpretation_id, interpretation))
     return tuple(StateDelta(operation, target, value, producer, base_revision)
                  for operation, target, value in values)
