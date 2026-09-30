@@ -75,7 +75,11 @@ CANCELLED
 
 RCA-specific investigation phase, if useful for reporting, is metadata rather than a second authoritative status machine.
 
-The Main Agent cannot set `generic_status` directly through a model-proposed StateDelta. Finish/status transitions are runtime-controlled from validated `FinishProposal`, hard-stop, failure, cancellation, or exhaustion logic.
+The Main Agent cannot set `generic_status` directly through a model-proposed
+`StateDelta`. Finish/status transitions are runtime-controlled from validated
+`FinishProposal`, hard-stop, failure, cancellation, or exhaustion logic through
+the generic `TaskStateStore.transition_status(status, expected_revision)`
+protocol. The runtime never names a lab-owned status operation.
 
 ## Observation versus evidence
 
@@ -154,7 +158,6 @@ REGISTER_OBSERVATION
 REGISTER_COMPLETED_EXPERIMENT
 REGISTER_SUBTASK_RESULT
 REGISTER_ARTIFACT_REF
-SET_GENERIC_STATUS
 ```
 
 These operations are produced by deterministic adapters/runtime logic, not free model prose.
@@ -199,6 +202,13 @@ Subtask completion is deterministically registered; any parent interpretation of
 ## Working explanation
 
 ```text
+WorkingExplanationUpdate
+  leading_hypothesis_ref?
+  current_rank_or_score_summary?
+  key_evidence_link_refs[]
+  key_counterevidence_link_refs[]
+  remaining_uncertainties[]
+
 WorkingExplanation
   leading_hypothesis_ref?
   current_rank_or_score_summary?
@@ -210,7 +220,11 @@ WorkingExplanation
 
 It is working state, not final truth.
 
-`UPDATE_WORKING_EXPLANATION` may be proposed by the model but must reference only currently visible/valid objects.
+`UPDATE_WORKING_EXPLANATION` carries the shared typed
+`WorkingExplanationUpdate`. It may be proposed by the model but must reference
+only currently visible/valid objects. The proposal does not supply a revision;
+after atomic validation succeeds, the consumer materializes
+`WorkingExplanation.last_updated_revision` as the resulting state revision.
 
 ## `TaskStateStore` implementation
 
@@ -221,6 +235,7 @@ revision() -> Revision
 status() -> TaskStatus
 project(policy) -> ContextProjection
 apply_batch(deltas[], expected_revision) -> NewRevision
+transition_status(status, expected_revision) -> NewRevision
 ```
 
 A single-delta convenience `apply()` MAY wrap `apply_batch([delta], ...)`, but the batch contract is canonical.
@@ -240,6 +255,18 @@ Lab validates the whole batch before mutation:
 A batch is atomic: all legal deltas apply and increment `revision` once, or none apply.
 
 Every accepted/rejected update is retained as an append-only trace/state event.
+
+### `transition_status`
+
+Terminal lifecycle transitions are a generic runtime-to-store protocol call,
+separate from model/result `StateDelta` batches. `status` is restricted to
+`DONE | FAILED | EXHAUSTED | CANCELLED`; any current nonterminal state may move
+to one of them. The consumer checks the exact expected revision, persists an
+accepted/rejected event, and increments the state revision once on a new
+terminal transition. Repeating the same terminal status at the exact current
+revision is an idempotent no-op; overwriting it with a different terminal status
+is rejected. `WAITING` and `READY` are not set through this terminal method. A
+model cannot call or encode this transition through `SET_GENERIC_STATUS`.
 
 ## Model-proposed update semantics
 

@@ -306,6 +306,7 @@ next_questions[]
   -> ADD_OPEN_QUESTION
 
 conclusion_summary / residual_uncertainty
+  -> WorkingExplanationUpdate
   -> UPDATE_WORKING_EXPLANATION
 
 interpretation object itself
@@ -313,6 +314,21 @@ interpretation object itself
 ```
 
 All such deltas are bound to the `ContextProjection.base_revision` the model saw and are atomically validated/applied by the consumer TaskStateStore.
+
+The interpretation mapping constructs the shared investigation-state payload:
+
+```text
+WorkingExplanationUpdate
+  leading_hypothesis_ref = null
+  current_rank_or_score_summary = conclusion_summary
+  key_evidence_link_refs = []
+  key_counterevidence_link_refs = []
+  remaining_uncertainties = [residual_uncertainty] when nonempty, else []
+```
+
+The update carries no revision. On successful atomic application, the consumer
+materializes `WorkingExplanation.last_updated_revision` from the resulting
+state revision.
 
 A rejected/stale interpretation update does not silently mutate hypothesis/evidence state.
 
