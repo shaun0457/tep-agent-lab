@@ -370,7 +370,9 @@ SALib/Optuna/PCA/PLS/Granger/graph toolboxes/MCP/remote providers are out of sco
 
 Every bridge ToolSpec requires the policy tag `tep.agent_visible_analysis`.
 `BridgedToolSurface` composes the unchanged C4 surface with the bridge, routes each
-hook by tool name, and grants `READ + COMPUTE + SIMULATE` plus that tag.
+hook by tool name, and grants `READ + COMPUTE + SIMULATE` plus that tag. It requires
+the bridge's reference guard to be the surface's own `reference_revision`, so both
+catalogs check one reference truth.
 
 ### Backend and provenance
 
@@ -385,7 +387,7 @@ hook by tool name, and grants `READ + COMPUTE + SIMULATE` plus that tag.
 - `ToolResult.provenance`: tool name/version, bridge version, request id, created_at,
   the same implementation block, the exact `configuration` (windows, preprocessing,
   selection/alignment, feature parameters), `inputs` (artifact id, kind, checksum of
-  every input artifact), and `sampling` (source interval, alignment,
+  every input artifact), and `sampling` (window intervals, alignment,
   `resampled: false`).
 - A different NumPy version changes the ToolSpec checksum, the registered tool-set
   version, and every result's provenance.
@@ -416,8 +418,12 @@ hook by tool name, and grants `READ + COMPUTE + SIMULATE` plus that tag.
   every timestamp and window bound to integer seconds: `s = round(h * 3600)`, accepted
   only when `|h * 3600 - s| <= 1e-6 s` (float representation tolerance of the hour
   encoding, not an engineering threshold). Anything else is rejected.
-- A source series must be uniformly sampled: at least two records, strictly increasing,
-  one constant integer-second interval `dt`. Otherwise `SAMPLING_INCOMPATIBLE`.
+- Source timestamps must be strictly increasing. Uniform sampling is required inside
+  each **selected window** only: its samples share one integer-second step `dt`
+  (`null` for a one-sample window). A rollout whose last record is off-grid (early
+  shutdown, or a horizon that is not a multiple of the record interval) therefore stays
+  analyzable before that record, while a window containing it is
+  `SAMPLING_INCOMPATIBLE`. Reported intervals are window intervals.
 - A window `{start_hours, end_hours}` is closed: samples with
   `start_s <= t_s <= end_s`. `start <= end` is required and the window must lie inside
   the artifact's time span; a window that extends beyond the data is rejected, never
@@ -459,7 +465,10 @@ never a guessed default):
 - `SETTLING_TIME`: no public contract freezes the settling target (final value versus
   a new steady state) or how settling is confirmed inside a finite window;
 - `LAG`: needs a second signal; use `analyze_cross_correlation`;
-- `TRAJECTORY_DISTANCE`: needs a reference trajectory; use `compare_trajectories`.
+- `TRAJECTORY_DISTANCE`: needs a reference trajectory; use `compare_trajectories`;
+- `CORRELATION`: needs a second signal; use `analyze_cross_correlation`;
+- `EVENT_OR_SHUTDOWN`: reported by the `run_rollout` safety summary;
+- `QUALITATIVE_UNSCORED`: not computable by definition.
 
 A feature that needs the baseline without a `baseline_window`, a `baseline_window`
 that no requested feature uses, a missing or non-finite threshold/deadband, a missing

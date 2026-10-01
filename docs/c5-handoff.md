@@ -67,3 +67,10 @@ world, and one structured `UNSUPPORTED_CAPABILITY` denial.
   (needs an `ArtifactStore` size/line-count read, a C4-owned change); cache verified
   series per `(ref_id, checksum)` instead of re-reading at validation, dispatch, and
   verification; prune the executor audit map after verification.
+- C4 `get_history` writes a `HistoryWindowArtifact` only when the window exceeds the
+  preview size (12 records), so a short history window has no analyzable ref. Use a
+  longer window or rollout telemetry; always issuing the artifact is a later C4-owned
+  option (C5 does not change C4 semantics).
+- The bridge's consumer hooks mirror the C4 surface's audit/provenance/leakage checks.
+  Extracting a shared hook base needs a C4 refactor and is deferred so C4 stays
+  unchanged in this branch.

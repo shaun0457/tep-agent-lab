@@ -73,6 +73,10 @@ UNSUPPORTED_FEATURES: Mapping[str, str] = {
     Feature.LAG: "LAG needs a second signal; use analyze_cross_correlation",
     Feature.TRAJECTORY_DISTANCE: "TRAJECTORY_DISTANCE needs a reference trajectory; "
                                  "use compare_trajectories",
+    Feature.CORRELATION: "CORRELATION needs a second signal; use analyze_cross_correlation",
+    Feature.EVENT_OR_SHUTDOWN: "EVENT_OR_SHUTDOWN is reported by the run_rollout safety "
+                               "summary, not by response features",
+    Feature.QUALITATIVE_UNSCORED: "QUALITATIVE_UNSCORED is by definition not computable",
 }
 CORRELATION_PREPROCESSING = ("NONE", "FIRST_DIFFERENCE", "LINEAR_DETREND")
 CORRELATION_SELECTION = ("MAX_CORRELATION", "MAX_ABS_CORRELATION")
@@ -134,19 +138,21 @@ _NULL_INTEGER = {"type": ["integer", "null"]}
 
 @dataclass(frozen=True)
 class _Series:
-    """Checksum-verified, uniformly sampled columns of one input artifact."""
+    """Checksum-verified, strictly time-ordered columns of one input artifact."""
 
     ref: InformationRef
     seconds: numpy.ndarray
     values: Mapping[str, numpy.ndarray]
-    interval: int
 
 
 @dataclass(frozen=True)
 class _Window:
+    """Selected samples; ``interval`` is their uniform step (None for one sample)."""
+
     start: int
     end: int
     indices: numpy.ndarray
+    interval: int | None
 
     def describe(self) -> dict[str, Any]:
         return {"start_hours": self.start / 3600, "end_hours": self.end / 3600,
@@ -159,8 +165,11 @@ class _BridgeTool:
     prepare: Callable[[Mapping[str, Any]], Any]
     run: Callable[[Any, ToolCallRequest, str], tuple[Any, tuple[InformationRef, ...],
                                                      Mapping[str, Any]]]
-    input_refs: Callable[[Mapping[str, Any]], tuple[Mapping[str, Any], ...]]
+    input_fields: tuple[str, ...]
     output_kind: str | None = None
+
+    def input_refs(self, arguments: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+        return tuple(arguments[name] for name in self.input_fields)
 
 
 def _seconds(hours: Any, what: str, code: str = "INVALID_REQUEST") -> int:
@@ -343,8 +352,8 @@ class AnalysisToolBridge:
         if [to_jsonable(ref) for ref in result.artifact_refs] != (
                 [to_jsonable(embedded)] if embedded else []):
             fail("declared artifact refs differ from the output artifact ref")
-        for name, envelope in tool_input_fields(request.tool_name, request.arguments):
-            if to_jsonable(output.get(name)) != to_jsonable(envelope):
+        for name in tool.input_fields:
+            if to_jsonable(output.get(name)) != to_jsonable(request.arguments[name]):
                 fail("output input ref differs from the request")
         if not _finite_numbers(output):
             fail("structured numerical result is not finite")
@@ -419,7 +428,7 @@ class AnalysisToolBridge:
                 _obj({"trajectory_ref": _OUTPUT_REF,
                       "analysis_window": _WINDOW_OUT,
                       "baseline_window": {**_WINDOW_OUT, "type": ["object", "null"]},
-                      "sampling_interval_seconds": {"type": "integer", "minimum": 1},
+                      "sampling_interval_seconds": _NULL_INTEGER,
                       "variables": {"type": "array", "items": _obj({
                           "variable": _TEXT, "unit": {"type": ["string", "null"]},
                           "baseline_mean": _NULL_NUMBER,
@@ -428,7 +437,7 @@ class AnalysisToolBridge:
                      ("trajectory_ref", "analysis_window", "baseline_window",
                       "sampling_interval_seconds", "variables"))),
                 self._prepare_features, self._features,
-                lambda arguments: (arguments["trajectory_ref"],)),
+                ("trajectory_ref",)),
             _BridgeTool(self._spec(
                 "analyze_cross_correlation",
                 "Bounded lagged Pearson correlation between two variables of one existing "
@@ -445,7 +454,7 @@ class AnalysisToolBridge:
                      ("data_ref", "x", "y", "window", "lag_range", "min_overlap_samples",
                       "preprocessing", "selection")),
                 _obj({"data_ref": _OUTPUT_REF, "x": _TEXT, "y": _TEXT, "window": _WINDOW_OUT,
-                      "sampling_interval_seconds": {"type": "integer", "minimum": 1},
+                      "sampling_interval_seconds": _NULL_INTEGER,
                       "analyzed_samples": {"type": "integer", "minimum": 0},
                       "preprocessing": _TEXT, "selection": _TEXT,
                       "lag_convention": _TEXT, "lag_unit": {"const": "s"},
@@ -467,7 +476,7 @@ class AnalysisToolBridge:
                       "tied_lags_seconds", "zero_lag_correlation", "evaluated_lags",
                       "undefined_lags", "interpretation_note", "curve_artifact_ref"))),
                 self._prepare_correlation, self._correlation,
-                lambda arguments: (arguments["data_ref"],), CURVE_KIND),
+                ("data_ref",), CURVE_KIND),
             _BridgeTool(self._spec(
                 "compare_trajectories",
                 "Explicit error metrics (candidate minus reference) between two existing "
@@ -487,7 +496,7 @@ class AnalysisToolBridge:
                       "alignment": _obj({
                           "policy": _TEXT, "reference_window": _WINDOW_OUT,
                           "candidate_window": _WINDOW_OUT,
-                          "sampling_interval_seconds": {"type": "integer", "minimum": 1},
+                          "sampling_interval_seconds": _NULL_INTEGER,
                           "aligned_samples": {"type": "integer", "minimum": 1},
                           "resampled": {"const": False}},
                           ("policy", "reference_window", "candidate_window",
@@ -501,7 +510,7 @@ class AnalysisToolBridge:
                      ("reference_ref", "candidate_ref", "metric_contract_version",
                       "alignment", "preprocessing", "error_definition", "variables"))),
                 self._prepare_comparison, self._comparison,
-                lambda arguments: (arguments["reference_ref"], arguments["candidate_ref"])),
+                ("reference_ref", "candidate_ref")),
         ]
 
     # -- shared data access -------------------------------------------------------------
@@ -528,9 +537,7 @@ class AnalysisToolBridge:
             _fail("INVALID_REQUEST", "artifact kind is not an analyzable telemetry artifact")
         if self.artifacts.resolve(ref) is None:
             _fail("INVALID_REQUEST", "artifact ref was not issued by this lab store")
-        if not self.artifacts.verify(ref):
-            _fail("ARTIFACT_ERROR", "artifact checksum verification failed")
-        return ref
+        return ref  # ArtifactStore.read re-verifies the persisted checksum
 
     def _load(self, envelope: Any, variables: Sequence[str]) -> _Series:
         ref = self._input_ref(envelope)
@@ -560,14 +567,13 @@ class AnalysisToolBridge:
                 if type(value) not in (int, float) or not math.isfinite(value):
                     _fail("ARTIFACT_ERROR", "artifact value is not a finite number")
                 columns[name].append(float(value))
-        if len(seconds) < 2:
-            _fail("SAMPLING_INCOMPATIBLE", "at least two samples are required")
+        if not seconds:
+            _fail("ARTIFACT_ERROR", "artifact has no records")
         times = numpy.asarray(seconds, dtype=numpy.int64)
-        steps = numpy.diff(times)
-        if steps[0] <= 0 or numpy.any(steps != steps[0]):
-            _fail("SAMPLING_INCOMPATIBLE", "artifact is not uniformly sampled")
+        if numpy.any(numpy.diff(times) <= 0):
+            _fail("SAMPLING_INCOMPATIBLE", "artifact timestamps are not strictly increasing")
         return _Series(ref, times, {name: numpy.asarray(values, dtype=numpy.float64)
-                                    for name, values in columns.items()}, int(steps[0]))
+                                    for name, values in columns.items()})
 
     @staticmethod
     def _window(series: _Series, window: Mapping[str, Any], what: str) -> _Window:
@@ -580,7 +586,13 @@ class AnalysisToolBridge:
         indices = numpy.nonzero((series.seconds >= start) & (series.seconds <= end))[0]
         if not len(indices):
             _fail("INVALID_REQUEST", f"{what} contains no samples")
-        return _Window(start, end, indices)
+        # Uniform sampling is required inside the selected window only, so a rollout
+        # whose final record is off-grid (shutdown, non-multiple horizon) stays usable
+        # before that record; a window containing it is rejected, never resampled.
+        steps = numpy.diff(series.seconds[indices])
+        if len(steps) and numpy.any(steps != steps[0]):
+            _fail("SAMPLING_INCOMPATIBLE", f"{what} is not uniformly sampled")
+        return _Window(start, end, indices, int(steps[0]) if len(steps) else None)
 
     @staticmethod
     def _inputs(*series: _Series) -> list[dict[str, Any]]:
@@ -637,7 +649,7 @@ class AnalysisToolBridge:
         output = {"trajectory_ref": to_jsonable(series.ref),
                   "analysis_window": analysis.describe(),
                   "baseline_window": None if baseline is None else baseline.describe(),
-                  "sampling_interval_seconds": series.interval, "variables": rows}
+                  "sampling_interval_seconds": analysis.interval, "variables": rows}
         provenance = {
             "configuration": {"features": requested,
                               "analysis_window": dict(request.arguments["analysis_window"]),
@@ -645,7 +657,10 @@ class AnalysisToolBridge:
                                                   if baseline is not None else None),
                               "baseline_statistic": "arithmetic_mean"},
             "inputs": self._inputs(series),
-            "sampling": {"source_interval_seconds": series.interval, "resampled": False}}
+            "sampling": {"analysis_interval_seconds": analysis.interval,
+                         "baseline_interval_seconds": (baseline.interval
+                                                       if baseline is not None else None),
+                         "resampled": False}}
         return output, (), provenance
 
     @staticmethod
@@ -698,16 +713,19 @@ class AnalysisToolBridge:
         self._variables([x, y])
         series = self._load(arguments["data_ref"], [x, y])
         window = self._window(series, arguments["window"], "window")
+        interval = window.interval
+        if interval is None:
+            _fail("INVALID_REQUEST", "window needs at least min_overlap_samples samples")
         count = len(window.indices) - (arguments["preprocessing"] == "FIRST_DIFFERENCE")
         low = arguments["lag_range"]["min_lag_seconds"]
         high = arguments["lag_range"]["max_lag_seconds"]
         overlap = arguments["min_overlap_samples"]
         if low > high:
             _fail("INVALID_REQUEST", "min_lag_seconds must not exceed max_lag_seconds")
-        if low % series.interval or high % series.interval:
+        if low % interval or high % interval:
             _fail("INVALID_REQUEST", "lags must be integral multiples of the "
-                                     f"{series.interval} s sampling interval")
-        low, high = low // series.interval, high // series.interval
+                                     f"{interval} s sampling interval")
+        low, high = low // interval, high // interval
         if high - low + 1 > self.limits.max_lags:
             _fail("INVALID_REQUEST", f"at most {self.limits.max_lags} lags per request")
         if overlap > count or count - max(abs(low), abs(high)) < overlap:
@@ -717,6 +735,7 @@ class AnalysisToolBridge:
 
     def _correlation(self, plan, request, created_at):
         series, window, x, y, low, high = plan
+        interval = window.interval
         arguments = request.arguments
         preprocessing, selection = arguments["preprocessing"], arguments["selection"]
         times = series.seconds[window.indices].astype(numpy.float64)
@@ -734,7 +753,7 @@ class AnalysisToolBridge:
             value = None
             if not (constant or _degenerate(a, scale_x) or _degenerate(b, scale_y)):
                 value = _pearson(a, b)
-            curve.append({"lag_seconds": lag * series.interval, "lag_samples": lag,
+            curve.append({"lag_seconds": lag * interval, "lag_samples": lag,
                           "correlation": value, "overlap_samples": int(len(a))})
             if value is not None:
                 scores[lag] = value
@@ -749,8 +768,8 @@ class AnalysisToolBridge:
             top = max(rank.values())
             tied = sorted(lag for lag, value in rank.items() if value == top)
             chosen = min(tied, key=lambda lag: (abs(lag), lag))
-            ties = [lag * series.interval for lag in tied]
-            best = {"lag_seconds": chosen * series.interval, "lag_samples": chosen,
+            ties = [lag * interval for lag in tied]
+            best = {"lag_seconds": chosen * interval, "lag_samples": chosen,
                     "correlation": scores[chosen],
                     "overlap_samples": count - abs(chosen),
                     "lag_interpretation": ("X_LEADS_Y" if chosen > 0 else
@@ -758,7 +777,7 @@ class AnalysisToolBridge:
         artifact = self.artifacts.put_records(CURVE_KIND, curve, created_at)
         output = {
             "data_ref": to_jsonable(series.ref), "x": x, "y": y,
-            "window": window.describe(), "sampling_interval_seconds": series.interval,
+            "window": window.describe(), "sampling_interval_seconds": interval,
             "analyzed_samples": count, "preprocessing": preprocessing,
             "selection": selection, "lag_convention": LAG_CONVENTION, "lag_unit": "s",
             "outcome": "UNDEFINED" if reason else "DEFINED", "undefined_reason": reason,
@@ -778,7 +797,7 @@ class AnalysisToolBridge:
                               "tie_break": "min(|lag|, lag)",
                               "lag_convention": LAG_CONVENTION},
             "inputs": self._inputs(series),
-            "sampling": {"source_interval_seconds": series.interval, "resampled": False}}
+            "sampling": {"window_interval_seconds": interval, "resampled": False}}
         return output, (artifact,), provenance
 
     # -- compare_trajectories -----------------------------------------------------------
@@ -804,7 +823,7 @@ class AnalysisToolBridge:
             if not numpy.array_equal(ref_times, cand_times):
                 _fail("SAMPLING_INCOMPATIBLE", "selected timestamps differ; no resampling "
                                                "is performed")
-        elif (reference.interval != candidate.interval
+        elif (ref_window.interval != cand_window.interval
               or len(ref_times) != len(cand_times)
               or ref_window.end - ref_window.start != cand_window.end - cand_window.start
               or ref_times[0] - ref_window.start != cand_times[0] - cand_window.start):
@@ -848,7 +867,7 @@ class AnalysisToolBridge:
             "metric_contract_version": TRAJECTORY_METRICS_VERSION,
             "alignment": {"policy": policy, "reference_window": ref_window.describe(),
                           "candidate_window": cand_window.describe(),
-                          "sampling_interval_seconds": reference.interval,
+                          "sampling_interval_seconds": ref_window.interval,
                           "aligned_samples": int(len(times)), "resampled": False},
             "preprocessing": preprocessing, "error_definition": "candidate - reference",
             "variables": rows}
@@ -861,19 +880,10 @@ class AnalysisToolBridge:
                               "preprocessing": preprocessing, "metrics": metrics,
                               "metric_contract_version": TRAJECTORY_METRICS_VERSION},
             "inputs": self._inputs(reference, candidate),
-            "sampling": {"source_interval_seconds": {"reference": reference.interval,
-                                                     "candidate": candidate.interval},
+            "sampling": {"window_interval_seconds": {"reference": ref_window.interval,
+                                                     "candidate": cand_window.interval},
                          "alignment": policy, "resampled": False}}
         return output, (), provenance
-
-
-def tool_input_fields(tool_name: str, arguments: Mapping[str, Any]
-                      ) -> tuple[tuple[str, Any], ...]:
-    """Output fields that must echo the request's input refs exactly."""
-    names = {"compute_response_features": ("trajectory_ref",),
-             "analyze_cross_correlation": ("data_ref",),
-             "compare_trajectories": ("reference_ref", "candidate_ref")}[tool_name]
-    return tuple((name, arguments[name]) for name in names)
 
 
 def _preprocess(values: numpy.ndarray, times: numpy.ndarray, policy: str) -> numpy.ndarray:
@@ -914,6 +924,9 @@ class BridgedToolSurface:
             raise TypeError("BlindRcaToolSurface and AnalysisToolBridge required")
         if bridge.artifacts is not surface.artifacts:
             raise ValueError("bridge and surface must share one artifact store")
+        if bridge._reference_revision != surface.reference_revision:
+            # One reference truth: the bridge's stale-state guard is the surface's.
+            raise ValueError("bridge reference guard must be surface.reference_revision")
         overlap = {spec.name for spec in surface.tool_specs()} & {
             spec.name for spec in bridge.tool_specs()}
         if overlap:

@@ -146,8 +146,8 @@ class ResponseFeatureTests(BridgeCase):
         again = self.call("compute_response_features", arguments)
         self.assertEqual(to_jsonable(result.structured_output),
                          to_jsonable(again.structured_output))
-        self.assertEqual({"source_interval_seconds": 60, "resampled": False},
-                         to_jsonable(result.provenance["sampling"]))
+        self.assertEqual({"analysis_interval_seconds": 60, "baseline_interval_seconds": 60,
+                          "resampled": False}, to_jsonable(result.provenance["sampling"]))
 
     def test_edge_case_semantics_are_explicit(self):
         ref = self.fixture()
@@ -196,7 +196,8 @@ class ResponseFeatureTests(BridgeCase):
         ref = self.fixture()
         base = {"trajectory_ref": ref, "variables": ["XMEAS(1)"],
                 "baseline_window": window(0, 120), "analysis_window": window(180, 420)}
-        for feature in ("SETTLING_TIME", "LAG", "TRAJECTORY_DISTANCE"):
+        for feature in ("SETTLING_TIME", "LAG", "TRAJECTORY_DISTANCE", "CORRELATION",
+                        "EVENT_OR_SHUTDOWN", "QUALITATIVE_UNSCORED"):
             decision = self.denied("compute_response_features",
                                    {**base, "features": [{"feature": feature}]},
                                    "UNSUPPORTED_CAPABILITY")
@@ -463,7 +464,21 @@ class TrajectoryComparisonTests(BridgeCase):
                     "INVALID_REQUEST")
         self.denied("compare_trajectories", {**elapsed, "candidate_ref": reference},
                     "INVALID_REQUEST")
-        # non-uniform or non-integral-second source data is rejected
+        # an off-grid final record (shutdown or non-multiple horizon) only blocks the
+        # windows that contain it; the uniformly sampled part stays analyzable
+        shutdown = self.history({"XMEAS(7)": [1.0, 2.0, 3.0, 4.0, 9.0]},
+                                times=[0, 60, 120, 180, 214])
+        early = self.call("compare_trajectories", {**exact, "candidate_ref": shutdown})
+        self.assertEqual(4, early.structured_output["alignment"]["aligned_samples"])
+        self.denied("compare_trajectories", {**exact, "reference_ref": shutdown,
+                                             "candidate_ref": shutdown,
+                                             "reference_window": window(0, 214)},
+                    "SAMPLING_INCOMPATIBLE")
+        # a single-sample window has no sampling interval, and says so
+        single = self.call("compare_trajectories", {**exact, "candidate_ref": dense,
+                                                    "reference_window": window(60, 60)})
+        self.assertIsNone(single.structured_output["alignment"]["sampling_interval_seconds"])
+        # non-uniform windows or non-integral-second source data are rejected
         uneven = self.history({"XMEAS(7)": [1.0, 2.0, 3.0, 4.0]}, times=[0, 60, 150, 180])
         fractional = self.history({"XMEAS(7)": [1.0, 2.0, 3.0, 4.0]},
                                   times=[0, 60.5, 121, 181.5])
@@ -743,7 +758,10 @@ class BridgedSurfaceIngestionTests(unittest.TestCase):
             artifacts = ArtifactStore(root / "artifacts")
             surface = BlindRcaToolSurface(world, artifacts, finish_verifier=lambda *a: True,
                                           clock=lambda: NOW)
-            bridge = AnalysisToolBridge(artifacts, reference_revision=world.revision,
+            with self.assertRaises(ValueError):  # one reference truth for both hooks
+                BridgedToolSurface(surface, AnalysisToolBridge(
+                    artifacts, reference_revision=lambda: "constant"))
+            bridge = AnalysisToolBridge(artifacts, reference_revision=surface.reference_revision,
                                         clock=lambda: NOW)
             bridged = BridgedToolSurface(surface, bridge)
             specs = {spec.name: spec for spec in bridged.tool_specs()}
