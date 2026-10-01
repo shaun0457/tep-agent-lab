@@ -35,6 +35,8 @@ jobs:
           repository: shaun0457/tep-sim
           ref: ae1c14dc3d4848acc011b359e74da74b558fcc3a
           path: tep-sim
+          # tep-sim is private: read-only deploy key scoped to that repository.
+          ssh-key: ${{ secrets.TEP_SIM_DEPLOY_KEY }}
           submodules: recursive
 
       - uses: actions/setup-python@v5
@@ -47,11 +49,12 @@ jobs:
             tep-sim/pyproject.toml
 
       # The vendored upstream ``tep`` package (pinned tep-sim submodule) is used from
-      # source on PYTHONPATH, as in tep-sim CI; only its numpy dependency is installed.
+      # source on PYTHONPATH, as in tep-sim CI; only its numpy dependency is installed,
+      # at an exact version so simulator numerics do not drift with numpy releases.
       - name: Install packages
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy
+          python -m pip install numpy==2.4.6
           python -m pip install --no-deps ./industrial-agent-runtime
           python -m pip install --no-deps ./tep-sim
           python -m pip install --no-deps ./tep-agent-lab

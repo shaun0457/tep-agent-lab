@@ -15,7 +15,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
-import math
 from pathlib import Path
 import re
 import secrets
@@ -29,6 +28,7 @@ from tep_sim.snapshot import observation_sha256
 ARTIFACT_OWNER = "tep-agent-lab"
 ARTIFACT_VERSION = "tep-agent-lab.artifacts/v0"
 REFERENCE = "reference"
+BASELINE = "baseline"
 
 # Any spelling of a disturbance id (IDV(4), IDV6, idv_1, ...), mirroring tep-sim's
 # visible-graph guard, plus vocabulary that only evaluator/ground-truth data needs.
@@ -115,6 +115,7 @@ class ArtifactStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._refs: dict[str, InformationRef] = {}
+        self._sequence = 0
 
     def put_records(self, kind: str, records: Sequence[Mapping[str, Any]],
                     created_at: str) -> InformationRef:
@@ -122,12 +123,16 @@ class ArtifactStore:
         if findings:
             raise WorldError("ARTIFACT_ERROR", "artifact content failed the leakage screen")
         data = b"".join(_canonical(record) + b"\n" for record in records)
-        ref_id = f"tep-artifact-{len(self._refs) + 1:06d}"
-        path = self.root / f"{ref_id}.jsonl"
         try:
-            temporary = path.with_suffix(".tmp")
-            temporary.write_bytes(data)
-            temporary.replace(path)
+            while True:  # exclusive create: an issued artifact is never overwritten
+                self._sequence += 1
+                ref_id = f"tep-artifact-{self._sequence:06d}"
+                try:
+                    with (self.root / f"{ref_id}.jsonl").open("xb") as stream:
+                        stream.write(data)
+                    break
+                except FileExistsError:
+                    continue
         except OSError as exc:
             raise WorldError("ARTIFACT_ERROR", "artifact could not be persisted") from exc
         ref = InformationRef(ref_id, kind, ARTIFACT_OWNER, ARTIFACT_VERSION, Visibility.AGENT,
@@ -174,11 +179,29 @@ class ReferenceWorld:
         self._salt = revision_salt if revision_salt is not None else secrets.token_hex(16)
         self._history = [sanitize_observation(environment.observe())]
         self._handles = 0
+        self._baselines: dict[str, Snapshot] = {}
 
     def new_handle(self, prefix: str) -> str:
         """World-unique opaque handle; tep-sim snapshot/branch directories never collide."""
         self._handles += 1
         return f"{prefix}-{self._handles:04d}"
+
+    def designate_baseline(self) -> str:
+        """Harness only: register the current state as a pre-incident baseline snapshot.
+
+        Semantic scenarios are applied only on branches descending from a baseline
+        (see ``SimulationSandbox``). Re-applying a cause already active in a fork of
+        the incident state is a no-op, which would reveal the hidden cause, so a
+        baseline must not carry injected hidden state.
+        """
+        if self.environment.observe().active_disturbances:
+            raise ValueError("a baseline must be taken before any hidden state is injected")
+        handle = self.new_handle("snapshot")
+        self._baselines[handle] = self.environment.snapshot(snapshot_id=handle)
+        return handle
+
+    def baselines(self) -> dict[str, Snapshot]:
+        return dict(self._baselines)
 
     def advance(self, horizon_hours: float) -> None:
         """Harness/evaluator only: step the reference world and extend its history."""
@@ -210,15 +233,29 @@ class SimulationSandbox:
 
     A handle is a world-unique sequential id; tep-sim paths, run ids, and random
     state metadata are never exposed. The reference world is never a branch.
+    Every snapshot and branch carries a lineage: ``baseline`` when it descends from
+    a harness-designated baseline, else ``reference``.
     """
 
     def __init__(self, world: ReferenceWorld) -> None:
         self.world = world
-        self._snapshots: dict[str, tuple[Snapshot, TEPEnvironment, str]] = {}
-        self._branches: dict[str, tuple[TEPEnvironment, str]] = {}
+        # handle -> (snapshot, owning environment, source handle, lineage)
+        self._snapshots: dict[str, tuple[Snapshot, TEPEnvironment, str, str]] = {}
+        # handle -> (environment, parent snapshot handle, lineage)
+        self._branches: dict[str, tuple[TEPEnvironment, str, str]] = {}
+
+    def _snapshot_entry(self, handle: Any):
+        if not isinstance(handle, str):
+            return None
+        if handle in self._snapshots:
+            return self._snapshots[handle]
+        baseline = self.world.baselines().get(handle)
+        if baseline is not None:
+            return baseline, self.world.environment, REFERENCE, BASELINE
+        return None
 
     def has_snapshot(self, handle: Any) -> bool:
-        return isinstance(handle, str) and handle in self._snapshots
+        return self._snapshot_entry(handle) is not None
 
     def has_branch(self, handle: Any) -> bool:
         return isinstance(handle, str) and handle in self._branches
@@ -231,6 +268,13 @@ class SimulationSandbox:
     def branch_parent(self, handle: str) -> str:
         return self._branches[handle][1]
 
+    def lineage(self, handle: str) -> str:
+        """``baseline`` or ``reference`` for a branch, snapshot, or the reference."""
+        if handle in self._branches:
+            return self._branches[handle][2]
+        entry = self._snapshot_entry(handle)
+        return entry[3] if entry is not None else REFERENCE
+
     def source(self, handle: str) -> TEPEnvironment:
         if handle == REFERENCE:
             return self.world.environment
@@ -240,29 +284,28 @@ class SimulationSandbox:
         environment = self.source(source)
         handle = self.world.new_handle("snapshot")
         snapshot = environment.snapshot(snapshot_id=handle)
-        self._snapshots[handle] = (snapshot, environment, source)
+        self._snapshots[handle] = (snapshot, environment, source, self.lineage(source))
         return handle, snapshot
 
     def snapshot_source(self, handle: str) -> str:
-        return self._snapshots[handle][2]
+        return self._snapshot_entry(handle)[2]
 
     def fork(self, snapshot_handle: str) -> tuple[str, TEPEnvironment]:
-        if not self.has_snapshot(snapshot_handle):
+        entry = self._snapshot_entry(snapshot_handle)
+        if entry is None:
             raise WorldError("INVALID_REQUEST", "unknown snapshot")
-        snapshot, environment, _source = self._snapshots[snapshot_handle]
+        snapshot, environment, _source, lineage = entry
         handle = self.world.new_handle("branch")
         branch = environment.fork(snapshot, branch_id=handle)
         if branch is environment:
             raise WorldError("SIMULATION_FAILED", "fork did not produce an isolated branch")
-        self._branches[handle] = (branch, snapshot_handle)
+        self._branches[handle] = (branch, snapshot_handle, lineage)
         return handle, branch
 
     def retire(self, handle: str) -> None:
-        """Remove a branch whose state is no longer a clean experiment base."""
+        """Remove a failed branch and the snapshots it owns (they can no longer fork)."""
         entry = self._branches.pop(handle, None)
         if entry is not None:
+            for name in [key for key, value in self._snapshots.items() if value[2] == handle]:
+                del self._snapshots[name]
             entry[0].close()
-
-
-def finite(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)

@@ -239,5 +239,9 @@ record implementation-defined details; they do not change the contract above.
   observation fields. It never appears in Agent-visible provenance.
 - Supported semantic scenarios are not enumerated in blind RCA (`SPEC_CONFLICT`
   SC-1 in `docs/c4-handoff.md`); scenarios are queried by id, and `AMBIGUOUS`
-  answers list their tested candidates. Compiled process-input deviations are
+  answers withhold their tested candidates. Compiled process-input deviations are
   reported as `PROCESS_DEVIATION` with the runtime target withheld.
+- Scenario interventions (one per rollout) apply only on branches descending from a
+  harness-designated pre-incident baseline snapshot (SC-4); forks of the incident
+  state allow forward rollouts only. Baselines are listed by
+  `get_capability_summary`.

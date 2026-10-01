@@ -46,6 +46,7 @@ def make_world(directory: Path, *, inject: bool = True) -> ReferenceWorld:
     environment.reset()
     world = ReferenceWorld(environment)
     world.advance(0.1)
+    world.designate_baseline()  # pre-incident state, before any hidden injection
     if inject:
         environment.apply(DisturbanceIntervention(INJECTED, 1))
     world.advance(0.2)
@@ -114,9 +115,16 @@ class SurfaceCase(unittest.TestCase):
         return result
 
     def branch(self):
+        """Fork of the current (incident) reference state: ``reference`` lineage."""
         snapshot = self.call("snapshot_environment").structured_output["snapshot_id"]
         return self.call("fork_environment", {"snapshot_id": snapshot}).structured_output[
             "branch_id"]
+
+    def baseline_branch(self):
+        (baseline,) = self.world.baselines()
+        result = self.call("fork_environment", {"snapshot_id": baseline})
+        self.assertEqual("baseline", result.structured_output["lineage"])
+        return result.structured_output["branch_id"]
 
 
 class RegistryAndLeakageTests(SurfaceCase):
@@ -203,6 +211,10 @@ class RegistryAndLeakageTests(SurfaceCase):
             store.put_records("Telemetry", [{"active_disturbances": ["IDV(1)"]}], NOW)
         ref = store.put_records("Telemetry", [{"x": 1.0}], NOW)
         self.assertEqual(ref, store.resolve(ref))
+        # a second store over the same root never overwrites an issued artifact
+        other = ArtifactStore(self.artifact_dir.name).put_records("Telemetry", [{"y": 2.0}], NOW)
+        self.assertNotEqual(ref.ref_id, other.ref_id)
+        self.assertTrue(store.verify(ref))
         self.assertIsNone(store.resolve(replace(ref, checksum="0" * 64)))
         (Path(self.artifact_dir.name) / f"{ref.ref_id}.jsonl").write_text("tampered")
         self.assertFalse(store.verify(ref))
@@ -283,6 +295,9 @@ class ReadToolTests(SurfaceCase):
                          summary["semantic_scenarios"]["enumeration"])
         self.assertIn("fire", [item["domain_id"]
                                for item in summary["unsupported_consequence_domains"]])
+        self.assertEqual(list(self.world.baselines()),
+                         [item["snapshot_id"] for item in summary["baseline_snapshots"]])
+        self.assertEqual("BASELINE_LINEAGE_BRANCHES_ONLY", summary["scenario_application"])
 
 
 class SimulateToolTests(SurfaceCase):
@@ -311,7 +326,7 @@ class SimulateToolTests(SurfaceCase):
 
     def test_semantic_scenario_rollout_on_branch_only(self):
         before = reference_fingerprint(self.world)
-        branch_id = self.branch()
+        branch_id = self.baseline_branch()
         result = self.call("run_rollout", {
             "branch_id": branch_id, "horizon_hours": 0.02,
             "scenarios": [{"scenario_id": "condenser_cooling_water_inlet_temperature_step"}],
@@ -325,6 +340,21 @@ class SimulateToolTests(SurfaceCase):
         # the branch did change: its hidden state now differs from the reference
         self.assertNotEqual(self.surface.sandbox.branch(branch_id).observe().active_disturbances,
                             self.world.environment.observe().active_disturbances)
+
+    def test_scenarios_on_incident_state_forks_are_denied(self):
+        """Re-applying an active cause on an incident fork is a no-op oracle."""
+        branch_id = self.branch()
+        self.assertEqual("reference", self.surface.sandbox.lineage(branch_id))
+        for scenario_id in ("reactor_cooling_water_inlet_temperature_step",
+                            "condenser_cooling_water_inlet_temperature_step"):
+            decision = self.decide(self.request("run_rollout", {
+                "branch_id": branch_id, "horizon_hours": 0.01,
+                "scenarios": [{"scenario_id": scenario_id}]}))
+            self.assertEqual(("DENY", "POLICY_DENIED"), (decision.decision, decision.reason_code))
+        # forward prediction without a scenario stays available on incident forks
+        self.call("run_rollout", {"branch_id": branch_id, "horizon_hours": 0.01})
+        with self.assertRaises(ValueError):
+            self.world.designate_baseline()  # hidden state present: not a baseline
 
     def test_dense_rollout_output_is_artifact_backed_and_sanitized(self):
         result = self.call("run_rollout", {"branch_id": self.branch(), "horizon_hours": 0.25})
@@ -386,7 +416,8 @@ class SimulateToolTests(SurfaceCase):
                          (check("fire")["status"], check("fire")["missing_capability"]))
         ambiguous = check("loss_of_cooling")
         self.assertEqual("AMBIGUOUS", ambiguous["status"])
-        self.assertTrue(ambiguous["candidates"])
+        self.assertNotIn("candidates", ambiguous)  # tested mappings would list causes
+        self.assertNotIn("reactor_cooling", ambiguous["reason"])
         self.assertEqual("UNSUPPORTED", check("pump_seizure")["status"])
         manual_only = {"scenario": {"scenario_id": "reactor_cooling_water_flow_reduction",
                                     "parameters": {"valve_position_percent": 10.0}}}
@@ -394,7 +425,7 @@ class SimulateToolTests(SurfaceCase):
                                                   manual_only).structured_output["status"])
         compile_denied = self.decide(self.request("compile_process_deviation", manual_only))
         self.assertEqual("UNSUPPORTED_CAPABILITY", compile_denied.reason_code)
-        branch_id = self.branch()
+        branch_id = self.baseline_branch()
         start = self.surface.sandbox.branch(branch_id).observe().simulation_time
         for scenario, code in ((manual_only["scenario"], "UNSUPPORTED_CAPABILITY"),
                                ({"scenario_id": "fire"}, "UNSUPPORTED_CAPABILITY"),
@@ -402,6 +433,7 @@ class SimulateToolTests(SurfaceCase):
             decision = self.decide(self.request("run_rollout", {
                 "branch_id": branch_id, "horizon_hours": 0.01, "scenarios": [scenario]}))
             self.assertEqual(("DENY", code), (decision.decision, decision.reason_code))
+            self.assertNotIn("reactor_cooling", decision.reason)
         self.assertEqual(start, self.surface.sandbox.branch(branch_id).observe().simulation_time)
         compiled = self.call("compile_process_deviation", {"scenario": {
             "scenario_id": "reactor_cooling_water_inlet_temperature_step"}}).structured_output
@@ -497,6 +529,37 @@ class ReferenceChangeTests(unittest.TestCase):
             stale = surface.execute(ToolCallRequest("r2", "get_safety_margins", {}),
                                     specs["get_safety_margins"])
             self.assertEqual("STALE_STATE", stale.status)
+
+            # the scenario rule is lineage-based, so a healthy plant answers the same way
+            snapshot = surface.execute(ToolCallRequest("r3", "snapshot_environment", {}),
+                                       specs["snapshot_environment"])
+            branch = surface.execute(ToolCallRequest("r4", "fork_environment", {
+                "snapshot_id": snapshot.structured_output["snapshot_id"]}),
+                specs["fork_environment"]).structured_output["branch_id"]
+            decision = surface.validate_request(ToolCallRequest("r5", "run_rollout", {
+                "branch_id": branch, "horizon_hours": 0.01,
+                "scenarios": [{"scenario_id": "reactor_cooling_water_inlet_temperature_step"}]}),
+                specs["run_rollout"], None, 0, {})
+            self.assertEqual("POLICY_DENIED", decision.reason_code)
+
+            # an unexpected runner error becomes a generic, sanitized failure result
+            def broken(*args):
+                raise KeyError("IDV(4) secret detail")
+            surface._tools["get_capability_summary"] = replace(
+                surface._tools["get_capability_summary"], run=broken)
+            failed = surface.execute(ToolCallRequest("r6", "get_capability_summary", {}),
+                                     specs["get_capability_summary"])
+            self.assertEqual(("INVALID_REQUEST", "internal tool error"),
+                             (failed.status, failed.error))
+            assert_blind(self, failed)
+
+            # retiring a failed branch also drops the snapshots it owns
+            owned = surface.execute(ToolCallRequest("r7", "snapshot_environment", {
+                "source": branch}), specs["snapshot_environment"])
+            owned_id = owned.structured_output["snapshot_id"]
+            surface.sandbox.retire(branch)
+            self.assertFalse(surface.sandbox.has_branch(branch))
+            self.assertFalse(surface.sandbox.has_snapshot(owned_id))
             world.environment.close()
 
 
@@ -523,12 +586,13 @@ class CoordinatorIngestionTests(unittest.TestCase):
             requests = [
                 ToolCallRequest("a-topology", "get_related_measurements", {"node_id": "reactor"}),
                 ToolCallRequest("b-snapshot", "snapshot_environment", {}),
+                # snapshot-0001 is the harness-designated pre-incident baseline
                 ToolCallRequest("c-fork", "fork_environment", {"snapshot_id": "snapshot-0001"}),
                 ToolCallRequest("d-rollout", "run_rollout", {
-                    "branch_id": "branch-0002", "horizon_hours": 0.05,
+                    "branch_id": "branch-0003", "horizon_hours": 0.05,
                     "scenarios": [{"scenario_id": "reactor_cooling_water_inlet_temperature_step"}]}),
                 ToolCallRequest("e-unsupported", "run_rollout", {
-                    "branch_id": "branch-0002", "horizon_hours": 0.01,
+                    "branch_id": "branch-0003", "horizon_hours": 0.01,
                     "scenarios": [{"scenario_id": "fire"}]}),
                 ToolCallRequest("f-reference", "run_rollout", {
                     "branch_id": "reference", "horizon_hours": 0.01}),

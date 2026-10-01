@@ -35,7 +35,8 @@ from tep_sim import (CAPABILITY_VERSION, REGISTRY, SAFETY_LIMITS, SAFETY_LIMITS_
                      UnknownProcessEntity, UnsupportedCapability, UnsupportedScenario)
 from tep_sim.snapshot import ENVIRONMENT_VERSION
 
-from .tep_world import (REFERENCE, ArtifactStore, ReferenceWorld, SimulationSandbox,
+from .tep_world import (BASELINE, REFERENCE, ArtifactStore, ReferenceWorld,
+                        SimulationSandbox,
                         WorldError, leakage_findings, read_telemetry, sanitize_observation)
 
 TOOL_SURFACE_VERSION = "tep-agent-lab.tool-surface/v0"
@@ -71,7 +72,6 @@ class ToolSurfaceLimits:
     max_metadata_ids: int = 16
     max_neighbor_depth: int = 3
     max_rollout_horizon_hours: float = 1.0
-    max_scenarios_per_rollout: int = 2
 
     def __post_init__(self) -> None:
         for name in ("max_history_window_hours", "max_rollout_horizon_hours"):
@@ -79,7 +79,7 @@ class ToolSurfaceLimits:
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite number")
         for name in ("max_variables", "max_preview_points", "max_metadata_ids",
-                     "max_neighbor_depth", "max_scenarios_per_rollout"):
+                     "max_neighbor_depth"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
         if self.max_preview_points < 2:
@@ -142,10 +142,9 @@ _SCENARIO_STATUS = _obj({
     "status": {"enum": ["SUPPORTED", "UNSUPPORTED", "AMBIGUOUS", "INVALID"]},
     "reason": {"type": ["string", "null"]},
     "missing_capability": {"type": ["string", "null"]},
-    "candidates": {"type": "array", "items": _TEXT},
     "control_mode": _TEXT,
     "mapping_version": _TEXT,
-}, ("scenario_id", "status", "reason", "missing_capability", "candidates", "control_mode",
+}, ("scenario_id", "status", "reason", "missing_capability", "control_mode",
     "mapping_version"))
 
 
@@ -169,8 +168,12 @@ def _safe_reason(reason: str) -> str:
     return reason if not leakage_findings(reason) else "request rejected by the world model"
 
 
-def _world_error(exc: Exception) -> WorldError:
-    """Map tep-sim's distinguishable errors onto the tool-surface failure codes."""
+def _world_error(exc: Exception, default: str = "INVALID_REQUEST") -> WorldError:
+    """Map tep-sim's distinguishable errors onto the tool-surface failure codes.
+
+    Anything unexpected maps to ``default`` with a generic reason: raw exception
+    text is never forwarded to model-adjacent traces.
+    """
     if isinstance(exc, WorldError):
         return WorldError(exc.status, _safe_reason(exc.reason))
     if isinstance(exc, (UnsupportedCapability, IncompatibleControlMode)):
@@ -183,7 +186,7 @@ def _world_error(exc: Exception) -> WorldError:
     elif isinstance(exc, OSError):
         status = "ARTIFACT_ERROR"
     else:
-        raise exc
+        return WorldError(default, "internal tool error")
     return WorldError(status, _safe_reason(str(exc) or type(exc).__name__))
 
 
@@ -292,7 +295,9 @@ class BlindRcaToolSurface:
             provenance.update(tool.provenance(request.arguments))
             output, refs = tool.run(request, created_at, usage)
         except Exception as exc:
-            failure = _world_error(exc)
+            failure = _world_error(exc, "SIMULATION_FAILED"
+                                   if spec.side_effect_class == SideEffectClass.SIMULATE
+                                   else "INVALID_REQUEST")
             status, error = failure.status, failure.reason
             output, refs = {"failure": status, "reason": error}, ()
         after = self.world.revision()
@@ -485,15 +490,20 @@ class BlindRcaToolSurface:
                       "supported_consequence_domains": {"type": "array"},
                       "unsupported_consequence_domains": {"type": "array"},
                       "semantic_scenarios": {"type": "object"},
-                      "rollout_interventions": _TEXT, "tool_limits": _NUMBERS},
+                      "rollout_interventions": _TEXT, "scenario_application": _TEXT,
+                      "baseline_snapshots": {"type": "array", "items": _obj(
+                          {"snapshot_id": _TEXT, "simulation_time_hours": _NUMBER},
+                          ("snapshot_id", "simulation_time_hours"))},
+                      "tool_limits": _NUMBERS},
                      ("capability_version", "backend", "control_mode", "snapshot_fidelity",
                       "supported_consequence_domains", "unsupported_consequence_domains",
-                      "semantic_scenarios", "rollout_interventions", "tool_limits"))),
+                      "semantic_scenarios", "rollout_interventions", "scenario_application",
+                      "baseline_snapshots", "tool_limits"))),
                 self._validate_nothing, self._capability_summary, read_only),
             _Tool(self._spec(
                 "check_scenario_capability",
                 "Ask whether a named semantic scenario is simulatable here. Returns "
-                "SUPPORTED, UNSUPPORTED, AMBIGUOUS (with candidates), or INVALID.",
+                "SUPPORTED, UNSUPPORTED, AMBIGUOUS, or INVALID.",
                 scenario_query, _SCENARIO_STATUS),
                 self._validate_scenario_target, self._check_scenario, read_only),
             _Tool(self._spec(
@@ -515,12 +525,15 @@ class BlindRcaToolSurface:
             _Tool(self._spec(
                 "snapshot_environment",
                 "Exact snapshot of the reference world or of an isolated branch; never "
-                "advances the source.",
+                "advances the source. Designated baseline snapshots are listed by "
+                "get_capability_summary.",
                 _obj({"source": {"type": "string",
                                  "pattern": r"^(reference|branch-[0-9]{4,})$"}}),
-                _obj({"snapshot_id": _TEXT, "source": _TEXT, "simulation_time_hours": _NUMBER,
-                      "fidelity": _TEXT, "randomness_policy": _TEXT},
-                     ("snapshot_id", "source", "simulation_time_hours", "fidelity",
+                _obj({"snapshot_id": _TEXT, "source": _TEXT,
+                      "lineage": {"enum": [BASELINE, REFERENCE]},
+                      "simulation_time_hours": _NUMBER, "fidelity": _TEXT,
+                      "randomness_policy": _TEXT},
+                     ("snapshot_id", "source", "lineage", "simulation_time_hours", "fidelity",
                       "randomness_policy")),
                 SideEffectClass.SIMULATE, {"simulation_snapshots": 1},
                 {"simulation_snapshots": 1}),
@@ -530,21 +543,25 @@ class BlindRcaToolSurface:
                 "Create an isolated simulation branch from a snapshot.",
                 _obj({"snapshot_id": _SNAPSHOT_ID}, ("snapshot_id",)),
                 _obj({"branch_id": _TEXT, "parent_snapshot_id": _TEXT,
+                      "lineage": {"enum": [BASELINE, REFERENCE]},
                       "simulation_time_hours": _NUMBER, "isolated": {"const": True}},
-                     ("branch_id", "parent_snapshot_id", "simulation_time_hours", "isolated")),
+                     ("branch_id", "parent_snapshot_id", "lineage", "simulation_time_hours",
+                      "isolated")),
                 SideEffectClass.SIMULATE, {"simulation_branches": 1},
                 {"simulation_branches": 1}),
                 self._validate_fork, self._fork, self._check_fork),
             _Tool(self._spec(
                 "run_rollout",
-                "Apply optional supported semantic scenarios to an isolated branch and "
-                "roll it forward. Returns a safety summary, a downsampled preview, and "
-                "the full sanitized telemetry as an artifact.",
+                "Roll an isolated branch forward, optionally after applying one supported "
+                "semantic scenario (baseline-lineage branches only). Returns a safety "
+                "summary, a downsampled preview, and the full sanitized telemetry as an "
+                "artifact.",
                 _obj({"branch_id": _BRANCH_ID,
                       "horizon_hours": {"type": "number", "exclusiveMinimum": 0,
                                         "maximum": limits.max_rollout_horizon_hours},
-                      "scenarios": {"type": "array", "items": _SCENARIO,
-                                    "maxItems": limits.max_scenarios_per_rollout},
+                      # One scenario: tep-sim applies a scenario atomically, but
+                      # several would be validated against a state the first changes.
+                      "scenarios": {"type": "array", "items": _SCENARIO, "maxItems": 1},
                       "preview_variables": variables},
                      ("branch_id", "horizon_hours")),
                 _obj({"branch_id": _TEXT, "termination_reason": _TEXT,
@@ -612,9 +629,8 @@ class BlindRcaToolSurface:
         if isinstance(compiled, UnsupportedScenario):
             _fail("UNSUPPORTED_CAPABILITY",
                   f"{compiled.reason} (missing {compiled.missing_capability})")
-        if isinstance(compiled, AmbiguousScenario):
-            _fail("INVALID_REQUEST", "ambiguous scenario; choose one of "
-                  + ", ".join(compiled.candidates))
+        if isinstance(compiled, AmbiguousScenario):  # candidates would list causes
+            _fail("INVALID_REQUEST", "ambiguous scenario term; name one specific mechanism")
         _fail("INVALID_REQUEST", getattr(compiled, "reason", "scenario did not compile"))
 
     def _validate_compilable(self, arguments: Mapping[str, Any]) -> None:
@@ -638,7 +654,13 @@ class BlindRcaToolSurface:
         if steps < 1 or not math.isclose(horizon * 3600, steps, rel_tol=0, abs_tol=1e-8):
             _fail("INVALID_REQUEST", "horizon must span an integral number of seconds")
         self._check_variables(arguments.get("preview_variables", ()))
-        for scenario in arguments.get("scenarios", ()):
+        scenarios = arguments.get("scenarios", ())
+        if scenarios and self.sandbox.lineage(arguments["branch_id"]) != BASELINE:
+            # State-independent rule: on a fork of the incident state, re-applying an
+            # already active cause is a no-op and would reveal the hidden cause.
+            _fail("POLICY_DENIED",
+                  "semantic scenarios apply only to branches forked from a baseline snapshot")
+        for scenario in scenarios:
             self._require_supported(self._compile({"scenario": scenario}, branch)[1])
 
     # -- READ runners -------------------------------------------------------------------
@@ -769,26 +791,32 @@ class BlindRcaToolSurface:
                                    "enumeration": "NOT_EXPOSED_IN_BLIND_RCA",
                                    "query_tool": "check_scenario_capability"},
             "rollout_interventions": "SUPPORTED_SEMANTIC_SCENARIOS_ONLY",
+            "scenario_application": "BASELINE_LINEAGE_BRANCHES_ONLY",
+            "baseline_snapshots": [
+                {"snapshot_id": handle, "simulation_time_hours": float(snapshot.simulation_time)}
+                for handle, snapshot in sorted(self.world.baselines().items())],
             "tool_limits": {
                 "max_history_window_hours": limits.max_history_window_hours,
                 "max_variables": limits.max_variables,
                 "max_preview_points": limits.max_preview_points,
                 "max_rollout_horizon_hours": limits.max_rollout_horizon_hours,
-                "max_scenarios_per_rollout": limits.max_scenarios_per_rollout},
+                "max_scenarios_per_rollout": 1},
         }, ()
 
     def _check_scenario(self, request, created_at, usage):
         environment, compiled = self._compile(request.arguments)
         output = {"scenario_id": request.arguments["scenario"]["scenario_id"],
                   "status": "SUPPORTED", "reason": None, "missing_capability": None,
-                  "candidates": [], "control_mode": environment.config.control_mode.value,
+                  "control_mode": environment.config.control_mode.value,
                   "mapping_version": SCENARIO_MAPPING_VERSION}
         if isinstance(compiled, UnsupportedScenario):
             output.update(status="UNSUPPORTED", reason=compiled.reason,
                           missing_capability=compiled.missing_capability)
         elif isinstance(compiled, AmbiguousScenario):
-            output.update(status="AMBIGUOUS", reason=compiled.reason,
-                          candidates=list(compiled.candidates))
+            # The tested candidates are withheld: they would enumerate causes (SC-1).
+            output.update(status="AMBIGUOUS",
+                          reason="term maps to several tested scenarios; name one "
+                                 "specific mechanism")
         elif isinstance(compiled, InvalidScenario) or not isinstance(compiled, SupportedScenario):
             output.update(status="INVALID",
                           reason=getattr(compiled, "reason", "scenario did not compile"))
@@ -823,6 +851,7 @@ class BlindRcaToolSurface:
         handle, snapshot = self.sandbox.snapshot(source)
         usage["simulation_snapshots"] = 1
         return {"snapshot_id": handle, "source": source,
+                "lineage": self.sandbox.lineage(handle),
                 "simulation_time_hours": float(snapshot.simulation_time),
                 "fidelity": snapshot.fidelity.value,
                 "randomness_policy": snapshot.random_state_metadata["fork_policy"]}, ()
@@ -832,6 +861,7 @@ class BlindRcaToolSurface:
         handle, branch = self.sandbox.fork(parent)
         usage["simulation_branches"] = 1
         return {"branch_id": handle, "parent_snapshot_id": parent,
+                "lineage": self.sandbox.lineage(handle),
                 "simulation_time_hours": float(branch.observe().simulation_time),
                 "isolated": True}, ()
 
@@ -842,21 +872,23 @@ class BlindRcaToolSurface:
         start = branch.observe().simulation_time
         applied = []
         for scenario in arguments.get("scenarios", ()):
-            try:
-                compiled = branch.apply_scenario(ScenarioRequest(
-                    scenario["scenario_id"], dict(scenario.get("parameters", {}))))
-            except Exception:
-                self.sandbox.retire(handle)  # partially intervened: no longer a clean base
-                raise
+            # tep-sim validates every intervention before committing: a rejection
+            # leaves the branch unchanged.
+            compiled = branch.apply_scenario(ScenarioRequest(
+                scenario["scenario_id"], dict(scenario.get("parameters", {}))))
             applied.append({"scenario_id": compiled.scenario_id,
                             "parameters": dict(compiled.provenance["parameters"]),
                             "intervention_count": len(compiled.interventions)})
         usage["simulation_rollouts"] = 1
         try:
             rollout = branch.rollout(horizon)
-        finally:
+        except Exception:
             usage["simulated_horizon_seconds"] = round(
                 (branch.observe().simulation_time - start) * 3600)
+            self.sandbox.retire(handle)  # a failed run cannot be continued
+            raise
+        usage["simulated_horizon_seconds"] = round(
+            (branch.observe().simulation_time - start) * 3600)
         records = [sanitize_observation(record) for record in read_telemetry(rollout.telemetry)]
         safety = branch.evaluate_safety(rollout)
         artifact = self.artifacts.put_records("RolloutTelemetryArtifact", records, created_at)
