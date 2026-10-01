@@ -939,11 +939,17 @@ class BridgedToolSurface:
                             key=lambda spec: spec.name))
 
     def gate_policy(self) -> GatePolicy:
+        """Base C4 policy plus COMPUTE, the analysis tag, and the bridge tools.
+
+        Monotone composition: simulation-dimension classification and every base
+        approval requirement are carried over explicitly, never re-defaulted.
+        """
         base = self.surface.gate_policy()
         return GatePolicy(BRIDGED_POLICY_VERSION,
                           base.granted_side_effect_classes | {SideEffectClass.COMPUTE},
                           base.granted_policy_tags | {ANALYSIS_POLICY_TAG},
                           base.simulation_dimensions,
+                          approval_required_for=base.approval_required_for,
                           tool_allowlist=frozenset(spec.name for spec in self.tool_specs()))
 
     def _owner(self, name: Any):

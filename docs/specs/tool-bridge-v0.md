@@ -342,7 +342,7 @@ Implement locally when:
 ## C5 implementation contract (v0)
 
 Status: implemented on `feat/tool-bridge-v0` (lab base `57bc526`), against
-`tep-sim` `4261dc7` and `industrial-agent-runtime` `2f243bd`. This section freezes the
+`tep-sim` `4261dc7` and `industrial-agent-runtime` `92651cf` (B2.1). This section freezes the
 numerical semantics of the first-RCA bridge tools; `src/tep_agent_lab/tool_bridge.py`
 implements exactly this section.
 
@@ -372,7 +372,10 @@ Every bridge ToolSpec requires the policy tag `tep.agent_visible_analysis`.
 `BridgedToolSurface` composes the unchanged C4 surface with the bridge, routes each
 hook by tool name, and grants `READ + COMPUTE + SIMULATE` plus that tag. It requires
 the bridge's reference guard to be the surface's own `reference_revision`, so both
-catalogs check one reference truth.
+catalogs check one reference truth. Policy composition is monotone: it adds COMPUTE,
+the analysis tag, and the bridge tools; it carries over the base
+`simulation_dimensions` and `approval_required_for` explicitly (never a runtime
+default), so it never weakens base authority or approval requirements.
 
 ### Backend and provenance
 

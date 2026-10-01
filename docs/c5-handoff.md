@@ -6,8 +6,8 @@
 - Exact dependency attestation (`dependency-pins.json`, `scripts/check.py`, CI):
   - `tep-sim` = `4261dc7ab4994348778133190964c6d59b17bb82` (Program Re-baseline; moved
     from the pre-rebaseline `ae1c14d`, docs-only upstream delta);
-  - `industrial-agent-runtime` = `2f243bd607ff94cc5b78a4d699362893fefdd1cd`
-    (unchanged; B2.1 has not merged);
+  - `industrial-agent-runtime` = `92651cf305ad735871f26006a790f561fff82654`
+    (B2.1 request-bound reservation merged; moved from `2f243bd`, no C5 semantic change);
   - `numpy` = `2.4.6` (unchanged). No SciPy or other new dependency.
 
 ## Implemented
@@ -40,7 +40,7 @@ re-added to C4.
 py -3.13 scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
 ```
 
-Runs **111 tests** (19 C5 + 92 existing C1-C4 regressions) after attesting both exact
+Runs **112 tests** (20 C5 + 92 existing C1-C4 regressions) after attesting both exact
 Git pins and NumPy. CI runs the same on Python 3.11 and 3.13.
 
 C5 acceptance coverage (`tests/test_tool_bridge.py`): known feature values and their
@@ -50,7 +50,7 @@ constant/degenerate signals, including non-dyadic constants and held actuators; 
 incompatibility and no resampling; evaluator-only/unissued/tampered refs; no path or
 code input; COMPUTE-only specs with no simulator entry point touched; B3 tool-version
 match and forged-version rejection; library-version provenance; tampering/evidence/
-stale-reference rejection; full Coordinator run (C4 history + rollout, then the three
+stale-reference rejection; monotone bridged-policy composition preserving base `approval_required_for`; full Coordinator run (C4 history + rollout, then the three
 bridge tools) yielding 6 ObservationRecords, 0 EvidenceLinks, an unchanged reference
 world, and one structured `UNSUPPORTED_CAPABILITY` denial.
 

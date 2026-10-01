@@ -748,6 +748,42 @@ class AuthorityAndProvenanceTests(BridgeCase):
         assert_blind(self, failed)
 
 
+class BridgedPolicyCompositionTests(unittest.TestCase):
+    """The bridged policy only adds authority for analysis; it never weakens the base."""
+
+    def test_base_approval_requirements_are_preserved(self):
+        from industrial_agent_runtime import GatePolicy
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            world = make_world(root, inject=False)
+            artifacts = ArtifactStore(root / "artifacts")
+            surface = BlindRcaToolSurface(world, artifacts, clock=lambda: NOW)
+            bridged = BridgedToolSurface(surface, AnalysisToolBridge(
+                artifacts, reference_revision=surface.reference_revision, clock=lambda: NOW))
+            base = surface.gate_policy()
+            # a stricter base: SIMULATE also requires approval
+            strict = GatePolicy(base.policy_version, base.granted_side_effect_classes,
+                                base.granted_policy_tags, base.simulation_dimensions,
+                                approval_required_for=base.approval_required_for
+                                | {SideEffectClass.SIMULATE},
+                                tool_allowlist=base.tool_allowlist)
+            for source in (base, strict):
+                with mock.patch.object(surface, "gate_policy", return_value=source):
+                    policy = bridged.gate_policy()
+                self.assertEqual(source.approval_required_for, policy.approval_required_for)
+                self.assertEqual(source.simulation_dimensions, policy.simulation_dimensions)
+                self.assertEqual(source.granted_side_effect_classes | {SideEffectClass.COMPUTE},
+                                 policy.granted_side_effect_classes)
+                self.assertEqual(source.granted_policy_tags | {ANALYSIS_POLICY_TAG},
+                                 policy.granted_policy_tags)
+                self.assertTrue(source.tool_allowlist < policy.tool_allowlist)
+                self.assertEqual(BRIDGE_TOOLS, policy.tool_allowlist - source.tool_allowlist)
+            with mock.patch.object(surface, "gate_policy", return_value=strict):
+                self.assertIn(SideEffectClass.SIMULATE,
+                              bridged.gate_policy().approval_required_for)
+            world.environment.close()
+
+
 class BridgedSurfaceIngestionTests(unittest.TestCase):
     """Runtime B1-B3 + C4 surface + C5 bridge + C1 ingestion over the real world."""
 
