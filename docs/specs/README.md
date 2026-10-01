@@ -1,8 +1,8 @@
 # TEP Agent Lab Specifications
 
-These v0 specs define TEP-specific integration, investigation, research, and evaluation on top of `tep-sim` and `industrial-agent-runtime`.
+These v0 specs define TEP-specific integration, investigation, research, application hosting, and evaluation on top of `tep-sim` and `industrial-agent-runtime`.
 
-Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. See `../../../../design-freeze-record.md` and `../../../../implementation-plan.md` for release status.
+Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Program Re-baseline v1 adds an Application / Playground Plane and canonical-context contract without reopening those accepted runtime/world/investigation boundaries.
 
 ## State / knowledge / experiment contracts
 
@@ -10,6 +10,12 @@ Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. See `.
 - [`knowledge-rule-registry-v0.md`](knowledge-rule-registry-v0.md) — `origin × validation × authority` rule metadata, provenance, enforcement classes, and later promotion direction.
 - [`hypothesis-experiment-v0.md`](hypothesis-experiment-v0.md) — first-class hypotheses, typed Predictions, evidence links, experiment proposals/run specs/results, and explicit interpretation-to-StateDelta mapping.
 - [`engineering-records-v0.md`](engineering-records-v0.md) — InvestigationReport / DecisionRecord / ExperimentRecord archive contracts.
+
+## Application / Playground
+
+- [`playground-backend-v0.md`](playground-backend-v0.md) — minimal local-first RunManager/RunManifest lifecycle, Git/repository-backed `CanonicalContextRegistry`, visibility-aware context-source resolution, read/event projections, branch-tree views, and typed artifact access. Application/UI APIs remain separate from Agent tool authority.
+
+The Playground backend is initially an integration layer in this repo, not a fourth core repository and not another canonical TaskStateStore/world store. Existing runtime/lab/world components remain authoritative; Playground views are derived projections.
 
 ## Tools
 
@@ -28,4 +34,10 @@ Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. See `.
 - [`benchmark-design-v0.md`](benchmark-design-v0.md) — scenario-family design, identifiability pilot, difficulty, partitioning, leakage controls, and strong C0 baseline.
 - [`evaluation-v0.md`](evaluation-v0.md) — environment/runtime/task/scientific-behavior metrics plus canonical capability and orchestration ablations.
 
-The lab owns TEP/domain-policy adapters and evaluation logic. It does not reimplement TEP physics or generic runtime mechanics.
+## Canonical context principle
+
+Versioned engineering/research truth may be materialized locally from repository-controlled sources at exact revisions, but local availability does not imply Agent visibility. `ContextProjection` remains bounded and visibility-aware.
+
+Run-specific hypotheses, observations, evidence links, branches, traces, budgets and temporary telemetry remain run state and are not automatically promoted into Git-backed canonical knowledge.
+
+The lab owns TEP/domain-policy adapters, initial Playground integration, and evaluation logic. It does not reimplement TEP physics or generic runtime mechanics.
