@@ -22,30 +22,24 @@ PROMOTED_GRAPH_SHA256 = "cc8ccc81e9f421238863457438465877850b19d9760740279e54a52
 
 
 def agent_visible_semantics(graph) -> dict:
-    """Everything C4 can project from a graph, minus graph provenance."""
-    nodes = [node.node_id for node in graph.nodes()]
-
-    def described(found):
-        return sorted((binding.describe() for binding in found),
-                      key=lambda item: json.dumps(item, sort_keys=True))
-
+    """Everything C4 can project from a graph, in projection order, minus graph provenance."""
     view = {}
-    for node_id in nodes:
-        local = graph.project_local(node_id).as_dict()
+    for node in graph.nodes():
+        local = graph.project_local(node.node_id).as_dict()
         local.pop("graph")
-        view[node_id] = {
+        view[node.node_id] = {
             "local": local,
-            "upstream": sorted(graph.upstream(node_id, max_depth=None)),
-            "downstream": sorted(graph.downstream(node_id, max_depth=None)),
-            "measurements": described(graph.measurements(node_id,
-                                                         include_incident_streams=True)),
-            "actuators": described(graph.actuators(node_id, include_incident_streams=True)),
+            "upstream": list(graph.upstream(node.node_id, max_depth=None)),
+            "downstream": list(graph.downstream(node.node_id, max_depth=None)),
+            "measurements": [binding.describe() for binding in graph.measurements(
+                node.node_id, include_incident_streams=True)],
+            "actuators": [binding.describe() for binding in graph.actuators(
+                node.node_id, include_incident_streams=True)],
         }
-    return {"nodes": view,
-            "edges": sorted((edge.edge_id, edge.kind.value, edge.source_node,
-                             edge.target_node, edge.name, edge.stream_number)
-                            for edge in graph.edges()),
-            "bindings": described(graph.bindings())}
+    return {"node_order": list(view), "nodes": view,
+            "edges": [(edge.edge_id, edge.kind.value, edge.source_node, edge.target_node,
+                       edge.name, edge.stream_number) for edge in graph.edges()],
+            "bindings": [binding.describe() for binding in graph.bindings()]}
 
 
 class DependencyPinTests(unittest.TestCase):

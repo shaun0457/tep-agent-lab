@@ -572,9 +572,11 @@ class PromotedGraphProvenanceTests(SurfaceCase):
                          (evaluator.provenance.graph_fixture_version,
                           evaluator.provenance.graph_content_sha256))
         # the same packaged file the loader selected for this graph version
-        raw = read_fixture(None, PACKAGED_EVALUATOR_FIXTURES["0.2.0"])
+        raw = read_fixture(None, PACKAGED_EVALUATOR_FIXTURES[
+            self.world.graph.provenance.fixture_version])
         self.assertEqual(evaluator.provenance.content_sha256, canonical_sha256(raw))
-        self.assertEqual("PENDING_HUMAN_REVIEW", raw["source"]["review_status"])
+        evaluator_status = raw["source"]["review_status"]
+        self.assertEqual("PENDING_HUMAN_REVIEW", evaluator_status)  # accepted in 0.2.0
         hidden = {binding.runtime_variable_id.lower() for binding in evaluator.bindings()}
         self.assertTrue(hidden)
         # every hidden location: a node itself, or both endpoints of a stream/edge
@@ -598,7 +600,7 @@ class PromotedGraphProvenanceTests(SurfaceCase):
                 self.assertEqual("HUMAN_VERIFIED",
                                  result.provenance["process_graph_review_status"])
                 text = canonical_json(to_jsonable(result)).lower()
-                self.assertNotIn("pending_human_review", text)
+                self.assertNotIn(evaluator_status.lower(), text)
                 for runtime_id in hidden:
                     self.assertNotIn(runtime_id, text)
 

@@ -90,8 +90,12 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     runtime, tep_sim = args.runtime.resolve(), args.tep_sim.resolve()
     pins = json.loads((root / "dependency-pins.json").read_text())
-    with open(root / "pyproject.toml", "rb") as file:
-        declared = tomllib.load(file)["project"]["dependencies"]
+    try:
+        with open(root / "pyproject.toml", "rb") as file:
+            declared = tomllib.load(file)["project"]["dependencies"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        print(f"Cannot read lab dependency declarations: {error!r}", flush=True)
+        return 1
     if not (attest("industrial-agent-runtime", runtime, pins["industrial-agent-runtime"])
             and attest("tep-sim", tep_sim, pins["tep-sim"])
             and attest_version("industrial-agent-runtime", runtime, declared)
