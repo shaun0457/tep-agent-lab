@@ -26,14 +26,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: shaun0457/industrial-agent-runtime
-          ref: 2f243bd607ff94cc5b78a4d699362893fefdd1cd
+          ref: 92651cf305ad735871f26006a790f561fff82654
           path: industrial-agent-runtime
 
       - name: Check out exact tep-sim dependency
         uses: actions/checkout@v4
         with:
           repository: shaun0457/tep-sim
-          ref: ae1c14dc3d4848acc011b359e74da74b558fcc3a
+          ref: 4261dc7ab4994348778133190964c6d59b17bb82
           path: tep-sim
           # tep-sim is private: read-only deploy key scoped to that repository.
           ssh-key: ${{ secrets.TEP_SIM_DEPLOY_KEY }}
