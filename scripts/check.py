@@ -1,6 +1,9 @@
-"""Verify the exact local upstream pin, then run offline lab checks.
+"""Verify the exact local upstream pins, then run offline lab checks.
 
-Usage: py -3.13 scripts/check.py --runtime ../industrial-agent-runtime
+Usage: py -3.13 scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
+
+Both dependencies must be clean checkouts at the exact revisions recorded in
+``dependency-pins.json``; a floating branch head is never accepted.
 """
 
 import argparse
@@ -10,29 +13,44 @@ from pathlib import Path
 import subprocess
 import sys
 
+# tep-sim imports the vendored upstream ``tep`` package from its pinned submodule.
+TEP_UPSTREAM_SOURCE = Path("vendor/tep-sim-upstream/src")
+
+
+def attest(name: str, checkout: Path, pin: str) -> bool:
+    # Git for Windows compares safe.directory using slash-normalized paths.
+    git_path = checkout.as_posix()
+    git = ["git", "-c", f"safe.directory={git_path}", "-C", git_path]
+    actual = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
+    if actual != pin:
+        print(f"Dependency pin mismatch for {name}: expected {pin}, got {actual}", flush=True)
+        return False
+    # Submodule commits and contents are part of the superproject status.
+    dirty = subprocess.check_output(
+        git + ["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"],
+        text=True)
+    if dirty.strip():
+        print(f"{name} checkout is dirty; cannot attest the pinned revision", flush=True)
+        return False
+    print(f"Verified {name} pin: {actual}", flush=True)
+    return True
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", required=True, type=Path)
+    parser.add_argument("--tep-sim", required=True, type=Path, dest="tep_sim")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    runtime = args.runtime.resolve()
-    pin = json.loads((root / "dependency-pins.json").read_text())["industrial-agent-runtime"]
-    # Git for Windows compares safe.directory using slash-normalized paths.
-    git_path = runtime.as_posix()
-    git = ["git", "-c", f"safe.directory={git_path}", "-C", git_path]
-    actual = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
-    if actual != pin:
-        print(f"Dependency pin mismatch: expected {pin}, got {actual}", flush=True)
+    runtime, tep_sim = args.runtime.resolve(), args.tep_sim.resolve()
+    pins = json.loads((root / "dependency-pins.json").read_text())
+    if not (attest("industrial-agent-runtime", runtime, pins["industrial-agent-runtime"])
+            and attest("tep-sim", tep_sim, pins["tep-sim"])):
         return 1
-    dirty = subprocess.check_output(
-        git + ["status", "--porcelain", "--untracked-files=normal"], text=True)
-    if dirty.strip():
-        print("Runtime checkout is dirty; cannot attest the pinned revision", flush=True)
-        return 1
-    print(f"Verified industrial-agent-runtime pin: {actual}", flush=True)
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(runtime / "src")))
+    env["PYTHONPATH"] = os.pathsep.join((
+        str(root / "src"), str(runtime / "src"), str(tep_sim / "src"),
+        str(tep_sim / TEP_UPSTREAM_SOURCE)))
     result = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
                             cwd=root, env=env)
     if result.returncode:

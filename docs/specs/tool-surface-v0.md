@@ -202,3 +202,42 @@ Leakage audit covers:
 6. When recovery MUTATE is later enabled, validate/apply only a state-revision-bound frozen request.
 7. Return dense rollout data via artifact refs with actual budget usage.
 8. Hidden-fault lookup through registered Agent tools is impossible in blind mode.
+
+## v0 implementation notes (C4)
+
+Implemented in `src/tep_agent_lab/tool_surface.py` and `src/tep_agent_lab/tep_world.py`
+against `tep-sim` `ae1c14d` and `industrial-agent-runtime` `2f243bd`. These notes
+record implementation-defined details; they do not change the contract above.
+
+- Default blind-RCA registry: `get_current_observation`, `get_history`,
+  `get_variable_metadata`, `get_process_node`, `get_neighbors`,
+  `get_related_measurements`, `get_related_actuators`, `get_safety_margins`,
+  `get_capability_summary`, `check_scenario_capability`,
+  `compile_process_deviation` (READ; none mutates any world); `snapshot_environment`,
+  `fork_environment`, `run_rollout` (SIMULATE). No PROPOSE/MUTATE tool is
+  registered; the lab `GatePolicy` grants READ + SIMULATE only.
+- `compare_rollouts` is not implemented in C4: trajectory comparison is Tool
+  Bridge analysis (`tool-bridge-v0.md`, C5).
+- Success status is the runtime `RESULT_SUCCESS` value `SUCCESS` (the `OK` row of
+  the failure list). Failures use the listed codes; consumer pre-execution denials
+  use the same codes as `GateDecision.reason_code`.
+- SIMULATE budget dimensions: `simulation_snapshots`, `simulation_branches`,
+  `simulation_rollouts`, `simulated_horizon_seconds`. `run_rollout` declares the
+  horizon as an expression and therefore reserves its `max_budget_draw`; the
+  result reports the actually simulated seconds (shorter only on shutdown).
+- Hidden-truth isolation is an allowlist: Agent-visible observations and telemetry
+  keep only measurements, manipulated variables, shutdown state, and safety
+  margins. tep-sim `active_disturbances`, disturbance-kind safety events, raw
+  artifact paths, run ids, and random state never leave the lab. Every result,
+  artifact, ToolSpec, and failure reason is screened for disturbance identifiers
+  and evaluator vocabulary; `tep_sim.evaluator_bindings` is never imported.
+- Dense data is re-written as sanitized, checksummed lab artifacts with opaque
+  sequential ids (`tep-artifact-NNNNNN`); `ArtifactStore.resolve` is the exact-ref
+  resolver for C1 `REGISTER_OBSERVATION`/`REGISTER_ARTIFACT_REF`.
+- The reference revision used by the runtime `ReferenceStateGuard` is salted, so
+  the Agent cannot test disturbance guesses against a hash of otherwise-visible
+  observation fields. It never appears in Agent-visible provenance.
+- Supported semantic scenarios are not enumerated in blind RCA (`SPEC_CONFLICT`
+  SC-1 in `docs/c4-handoff.md`); scenarios are queried by id, and `AMBIGUOUS`
+  answers list their tested candidates. Compiled process-input deviations are
+  reported as `PROCESS_DEVIATION` with the runtime target withheld.
