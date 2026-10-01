@@ -8,6 +8,7 @@ Any Agent-visible engineering difference here is a SPEC_CONFLICT, not a test upd
 from importlib import resources
 import json
 from pathlib import Path
+import re
 import tomllib
 import unittest
 
@@ -56,9 +57,12 @@ class DependencyPinTests(unittest.TestCase):
             declared = tomllib.load(file)["project"]["dependencies"]
         self.assertIn("tep-sim==0.2.0", declared)
         self.assertIn("industrial-agent-runtime==0.1.0", declared)
+        # each CI checkout step pins its own repository to the pins-file revision
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-        self.assertIn(f"ref: {TEP_SIM_SHA}", ci)
-        self.assertIn(f"ref: {RUNTIME_SHA}", ci)
+        refs = dict(re.findall(r"^\s*repository:\s*shaun0457/(\S+)\s*\n\s*ref:\s*(\S+)\s*$",
+                               ci, re.MULTILINE))
+        self.assertEqual({name: pins[name] for name in ("industrial-agent-runtime", "tep-sim")},
+                         refs)
 
 
 class PromotedProcessGraphTests(unittest.TestCase):

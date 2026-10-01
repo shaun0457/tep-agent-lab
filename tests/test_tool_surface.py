@@ -22,10 +22,13 @@ from industrial_agent_runtime.gates import GateDenied, reconcile
 from industrial_agent_runtime.schema import instance_errors, schema_errors
 from tep_sim import (REGISTRY, UPSTREAM_REVISION, ControlMode, DisturbanceIntervention,
                      EnvironmentConfig, TEPEnvironment)
-from tep_sim.evaluator_bindings import (PACKAGED_EVALUATOR_FIXTURE,
+from tep_sim.errors import UnknownProcessEntity
+from tep_sim.evaluator_bindings import (PACKAGED_EVALUATOR_FIXTURES,
                                         load_evaluator_disturbance_bindings)
-from tep_sim.process import read_fixture
+from tep_sim.process import canonical_sha256, read_fixture
 from tep_sim.snapshot import observation_sha256
+
+from test_dependency_adoption import PROMOTED_GRAPH_SHA256
 
 from tep_agent_lab import tep_world, tool_surface
 from tep_agent_lab.investigation import RcaResultIngestor, RcaState, RcaStateStore
@@ -40,7 +43,6 @@ from tep_agent_lab.tool_surface import (
 
 NOW = "2026-10-01T00:00:00Z"
 INJECTED = "IDV(4)"  # evaluator-chosen hidden cause of the incident fixture
-PROMOTED_GRAPH_SHA256 = "cc8ccc81e9f421238863457438465877850b19d9760740279e54a52468fe9a87"
 HIDDEN_NAMES = tuple(variable.name.lower() for key, variable in REGISTRY.items()
                      if key.startswith("IDV(") and variable.name != "Unknown")
 
@@ -569,13 +571,21 @@ class PromotedGraphProvenanceTests(SurfaceCase):
         self.assertEqual(("0.2.0", PROMOTED_GRAPH_SHA256),
                          (evaluator.provenance.graph_fixture_version,
                           evaluator.provenance.graph_content_sha256))
-        raw = read_fixture(None, PACKAGED_EVALUATOR_FIXTURE)
+        # the same packaged file the loader selected for this graph version
+        raw = read_fixture(None, PACKAGED_EVALUATOR_FIXTURES["0.2.0"])
+        self.assertEqual(evaluator.provenance.content_sha256, canonical_sha256(raw))
         self.assertEqual("PENDING_HUMAN_REVIEW", raw["source"]["review_status"])
         hidden = {binding.runtime_variable_id.lower() for binding in evaluator.bindings()}
         self.assertTrue(hidden)
-        located = {binding.attached_to for binding in evaluator.bindings()}
-        nodes = sorted(located & {node.node_id for node in self.world.graph.nodes()})
-        self.assertTrue(nodes)
+        # every hidden location: a node itself, or both endpoints of a stream/edge
+        graph, nodes = self.world.graph, set()
+        for binding in evaluator.bindings():
+            try:
+                nodes.add(graph.node(binding.attached_to).node_id)
+            except UnknownProcessEntity:
+                edge = graph.edge(binding.attached_to)
+                nodes |= {edge.source_node, edge.target_node}
+        nodes = sorted(nodes)
         for node_id in nodes:
             for name in ("get_process_node", "get_neighbors", "get_related_measurements",
                          "get_related_actuators"):

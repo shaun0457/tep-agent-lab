@@ -14,12 +14,15 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tomllib
 
 # tep-sim imports the vendored upstream ``tep`` package from its pinned submodule.
 TEP_UPSTREAM_SOURCE = Path("vendor/tep-sim-upstream/src")
+# One exact ``name==version`` requirement (no extras); environment markers are ignored.
+_EXACT_PIN = re.compile(r"\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*(?P<version>[^\s=]+)\s*")
 
 
 def attest(name: str, checkout: Path, pin: str) -> bool:
@@ -41,10 +44,15 @@ def attest(name: str, checkout: Path, pin: str) -> bool:
     return True
 
 
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()  # PEP 503 name normalization
+
+
 def attest_version(name: str, checkout: Path, declared: list[str]) -> bool:
     """The pinned checkout's package version equals the lab's exact ``name==`` pin."""
-    expected = [item.split("==", 1)[1].strip() for item in declared
-                if item.replace(" ", "").startswith(f"{name}==")]
+    exact = (_EXACT_PIN.fullmatch(item.split(";", 1)[0]) for item in declared)
+    expected = [match["version"] for match in exact
+                if match and _canonical(match["name"]) == _canonical(name)]
     if len(expected) != 1:
         print(f"Lab must declare exactly one {name}==<version> pin, found {expected}",
               flush=True)
@@ -52,7 +60,7 @@ def attest_version(name: str, checkout: Path, declared: list[str]) -> bool:
     try:
         with open(checkout / "pyproject.toml", "rb") as file:
             actual = tomllib.load(file)["project"]["version"]
-    except (OSError, KeyError) as error:
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
         print(f"Cannot read {name} package version: {error!r}", flush=True)
         return False
     if expected != [actual]:

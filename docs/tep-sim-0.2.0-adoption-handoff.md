@@ -55,9 +55,18 @@ final D0 benchmark policy is out of scope here.
   CI); default graph 0.2.0 / HUMAN_VERIFIED / pinned / promoted hash; 0.1.0 vs 0.2.0
   Agent-visible semantic equality.
 - New `PromotedGraphProvenanceTests` in `tests/test_tool_surface.py`: ReferenceWorld and
-  world provenance use the promoted graph; for every node carrying evaluator truth, C4
-  graph tools stay blind, report `HUMAN_VERIFIED`, and expose neither the evaluator's
-  `PENDING_HUMAN_REVIEW` status nor any of its IDV ids.
+  world provenance use the promoted graph; for every evaluator-bound location (the node
+  itself, or both endpoints of a bound stream), `get_process_node`, `get_neighbors`, and
+  `get_related_measurements`/`get_related_actuators` with incident streams stay blind,
+  report `HUMAN_VERIFIED`, and expose neither the evaluator's `PENDING_HUMAN_REVIEW`
+  status nor any of its IDV ids.
+
+## Follow-up (not in this PR)
+
+- The Lab does not itself pin the expected graph `(fixture_version, content_sha256)`;
+  `ReferenceWorld` follows tep-sim's default graph and only these tests detect a change.
+  Declaring the graph identity in `dependency-pins.json` and failing closed at
+  `ReferenceWorld` construction or in `check.py` is a later Lab-policy change.
 
 ## Verification
 
