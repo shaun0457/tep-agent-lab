@@ -3,10 +3,14 @@
 from dataclasses import replace
 import hashlib
 import inspect
+import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
+
+import numpy
 
 from industrial_agent_runtime import (
     Action, Budget, Coordinator, FakeProvider, FinishProposal, GatePipeline,
@@ -295,8 +299,8 @@ class ReadToolTests(SurfaceCase):
                          summary["semantic_scenarios"]["enumeration"])
         self.assertIn("fire", [item["domain_id"]
                                for item in summary["unsupported_consequence_domains"]])
-        self.assertEqual(list(self.world.baselines()),
-                         [item["snapshot_id"] for item in summary["baseline_snapshots"]])
+        self.assertEqual([{"snapshot_id": handle} for handle in self.world.baselines()],
+                         to_jsonable(summary["baseline_snapshots"]))  # ids only, no timing
         self.assertEqual("BASELINE_LINEAGE_BRANCHES_ONLY", summary["scenario_application"])
 
 
@@ -456,6 +460,86 @@ class SimulateToolTests(SurfaceCase):
         self.assertEqual((), accounting.violations)
         self.assertEqual({"simulation_rollouts": 1, "simulated_horizon_seconds": 72},
                          dict(accounting.charged))
+
+
+class FailedRolloutRetirementTests(SurfaceCase):
+    """A failed result never leaves a silently advanced or intervened branch usable."""
+
+    def state(self, handle):
+        observation = self.surface.sandbox.branch(handle).observe()
+        return observation.simulation_time, observation_sha256(observation)
+
+    def assert_retired_after(self, failure, scenarios=()):
+        before = reference_fingerprint(self.world)
+        sibling = self.branch()
+        sibling_state = self.state(sibling)
+        target = self.baseline_branch() if scenarios else self.branch()
+        request = self.request("run_rollout", {"branch_id": target, "horizon_hours": 0.01,
+                                               "scenarios": list(scenarios)})
+        self.assertEqual("ALLOW", self.decide(request).decision)
+        with failure():
+            result = self.surface.execute(request, self.specs["run_rollout"])
+        self.assertNotEqual("SUCCESS", result.status)
+        self.assertEqual({"simulation_rollouts": 1, "simulated_horizon_seconds": 36},
+                         dict(result.actual_budget_draw))  # the advance is still reported
+        self.assertFalse(self.surface.sandbox.has_branch(target))
+        again = self.decide(self.request("run_rollout", {"branch_id": target,
+                                                         "horizon_hours": 0.01}))
+        self.assertEqual(("DENY", "INVALID_REQUEST"), (again.decision, again.reason_code))
+        self.assertFalse(self.surface.verify_result(result, request, self.specs["run_rollout"],
+                                                    (), 0))
+        self.assertEqual(before, reference_fingerprint(self.world))
+        self.assertEqual(sibling_state, self.state(sibling))
+        self.call("run_rollout", {"branch_id": sibling, "horizon_hours": 0.01})
+        return result
+
+    def test_artifact_persistence_failure_retires_the_advanced_branch(self):
+        def failure():
+            return mock.patch.object(self.surface.artifacts, "put_records",
+                                     side_effect=WorldError("ARTIFACT_ERROR", "disk full"))
+        result = self.assert_retired_after(failure)
+        self.assertEqual("ARTIFACT_ERROR", result.status)
+        result = self.assert_retired_after(
+            failure, [{"scenario_id": "condenser_cooling_water_inlet_temperature_step"}])
+        self.assertEqual("ARTIFACT_ERROR", result.status)
+
+    def test_telemetry_and_safety_post_processing_failures_retire_the_branch(self):
+        telemetry = lambda: mock.patch(  # noqa: E731
+            "tep_agent_lab.tool_surface.read_telemetry", side_effect=OSError("unreadable"))
+        self.assertEqual("ARTIFACT_ERROR", self.assert_retired_after(telemetry).status)
+        safety = lambda: mock.patch(  # noqa: E731
+            "tep_sim.TEPEnvironment.evaluate_safety", side_effect=RuntimeError("boom"))
+        result = self.assert_retired_after(safety)
+        self.assertEqual(("SIMULATION_FAILED", "internal tool error"),
+                         (result.status, result.error))
+
+    def test_rejection_before_any_branch_mutation_does_not_retire(self):
+        branch_id = self.baseline_branch()
+        state = self.state(branch_id)
+        fire = {"branch_id": branch_id, "horizon_hours": 0.01,
+                "scenarios": [{"scenario_id": "fire"}]}
+        # deterministic pre-execution validation (gate and executor re-validation)
+        self.assertEqual("DENY", self.decide(self.request("run_rollout", fire)).decision)
+        rejected = self.surface.execute(self.request("run_rollout", fire),
+                                        self.specs["run_rollout"])
+        self.assertEqual("UNSUPPORTED_CAPABILITY", rejected.status)
+        # tep-sim's own pre-commit scenario rejection inside the runner
+        self.surface._tools["run_rollout"] = replace(self.surface._tools["run_rollout"],
+                                                     validate=lambda arguments: None)
+        rejected = self.surface.execute(self.request("run_rollout", fire),
+                                        self.specs["run_rollout"])
+        self.assertEqual("UNSUPPORTED_CAPABILITY", rejected.status)
+        self.assertTrue(self.surface.sandbox.has_branch(branch_id))
+        self.assertEqual(state, self.state(branch_id))
+
+
+class NumericalProvenanceTests(SurfaceCase):
+    def test_results_identify_the_attested_numpy_version(self):
+        pins = json.loads((Path(__file__).resolve().parents[1]
+                           / "dependency-pins.json").read_text())
+        result = self.call("get_safety_margins")
+        self.assertEqual(numpy.__version__, result.provenance["world"]["numpy_version"])
+        self.assertEqual(pins["numpy"], numpy.__version__)
 
 
 class ResultVerificationTests(SurfaceCase):

@@ -1,4 +1,5 @@
 {
   "industrial-agent-runtime": "2f243bd607ff94cc5b78a4d699362893fefdd1cd",
-  "tep-sim": "ae1c14dc3d4848acc011b359e74da74b558fcc3a"
+  "tep-sim": "ae1c14dc3d4848acc011b359e74da74b558fcc3a",
+  "numpy": "2.4.6"
 }

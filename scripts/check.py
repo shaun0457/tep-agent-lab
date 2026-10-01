@@ -3,7 +3,10 @@
 Usage: py -3.13 scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
 
 Both dependencies must be clean checkouts at the exact revisions recorded in
-``dependency-pins.json``; a floating branch head is never accepted.
+``dependency-pins.json``; a floating branch head is never accepted. The numerical
+stack is attested too: the NumPy imported by the test interpreter must equal the
+recorded ``numpy`` pin. Exact Git revisions are owned by ``dependency-pins.json``,
+this script, and CI; ``pyproject.toml`` declares package-level dependencies only.
 """
 
 import argparse
@@ -36,6 +39,17 @@ def attest(name: str, checkout: Path, pin: str) -> bool:
     return True
 
 
+def attest_numpy(pin: str) -> bool:
+    """The interpreter that runs the tests imports exactly the pinned NumPy."""
+    actual = subprocess.check_output(
+        [sys.executable, "-c", "import numpy; print(numpy.__version__)"], text=True).strip()
+    if actual != pin:
+        print(f"NumPy pin mismatch: expected {pin}, got {actual}", flush=True)
+        return False
+    print(f"Verified numpy pin: {actual}", flush=True)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", required=True, type=Path)
@@ -45,7 +59,8 @@ def main() -> int:
     runtime, tep_sim = args.runtime.resolve(), args.tep_sim.resolve()
     pins = json.loads((root / "dependency-pins.json").read_text())
     if not (attest("industrial-agent-runtime", runtime, pins["industrial-agent-runtime"])
-            and attest("tep-sim", tep_sim, pins["tep-sim"])):
+            and attest("tep-sim", tep_sim, pins["tep-sim"])
+            and attest_numpy(pins["numpy"])):
         return 1
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((

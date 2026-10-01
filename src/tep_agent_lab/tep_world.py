@@ -187,15 +187,21 @@ class ReferenceWorld:
         return f"{prefix}-{self._handles:04d}"
 
     def designate_baseline(self) -> str:
-        """Harness only: register the current state as a pre-incident baseline snapshot.
+        """Trusted harness only: register the current state as a counterfactual origin.
 
-        Semantic scenarios are applied only on branches descending from a baseline
-        (see ``SimulationSandbox``). Re-applying a cause already active in a fork of
-        the incident state is a no-op, which would reveal the hidden cause, so a
-        baseline must not carry injected hidden state.
+        Semantic scenarios run only on branches descending from such an origin (see
+        ``SimulationSandbox``): re-applying a cause already active in a fork of the
+        incident state is a no-op that would reveal the hidden cause.
+
+        The benchmark harness is authoritative for calling this before any hidden
+        incident mutation; neither the Agent nor ``active_disturbances`` decides it.
+        The ``active_disturbances`` check below is only an additional guard for IDV
+        injections. It cannot detect other hidden incident state (XMV, constraint, or
+        operating-condition manipulation) and is not proof that a state is clean.
         """
         if self.environment.observe().active_disturbances:
-            raise ValueError("a baseline must be taken before any hidden state is injected")
+            raise ValueError("IDV guard: a counterfactual origin must precede hidden "
+                             "disturbance injection")
         handle = self.new_handle("snapshot")
         self._baselines[handle] = self.environment.snapshot(snapshot_id=handle)
         return handle
@@ -303,9 +309,15 @@ class SimulationSandbox:
         return handle, branch
 
     def retire(self, handle: str) -> None:
-        """Remove a failed branch and the snapshots it owns (they can no longer fork)."""
+        """Remove a failed branch and the snapshots it owns (they can no longer fork).
+
+        Removal happens first, so the branch is unavailable even if closing fails.
+        """
         entry = self._branches.pop(handle, None)
         if entry is not None:
             for name in [key for key, value in self._snapshots.items() if value[2] == handle]:
                 del self._snapshots[name]
-            entry[0].close()
+            try:
+                entry[0].close()
+            except Exception:
+                pass

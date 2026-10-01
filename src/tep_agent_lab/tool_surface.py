@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any
 
+import numpy
 from industrial_agent_runtime import (
     GateDecision, GatePolicy, InformationRef, SideEffectClass, StateDelta, Task,
     ToolCallRequest, ToolResult, ToolSpec, Visibility, checksum, to_jsonable,
@@ -59,6 +60,10 @@ BLIND_RCA_EXCLUDED_TOOLS = frozenset({
 })
 INGESTIBLE_OPERATIONS = frozenset({"REGISTER_OBSERVATION", "REGISTER_ARTIFACT_REF"})
 _ENABLED_CLASSES = frozenset({SideEffectClass.READ, SideEffectClass.SIMULATE})
+# tep-sim errors raised by validation before any intervention is committed: the
+# branch is unchanged. Every other failure after execution starts retires it.
+_REJECTED_BEFORE_COMMIT = (InvalidIntervention, IncompatibleControlMode,
+                           UnsupportedCapability, InvalidEnvironmentState)
 _DEFAULT_PREVIEW = tuple(dict.fromkeys(limit.variable for limit in SAFETY_LIMITS))
 
 
@@ -225,6 +230,7 @@ class BlindRcaToolSurface:
             "environment_version": ENVIRONMENT_VERSION, "capability_version": CAPABILITY_VERSION,
             "scenario_mapping_version": SCENARIO_MAPPING_VERSION,
             "safety_limits_version": SAFETY_LIMITS_VERSION, "upstream_revision": UPSTREAM_REVISION,
+            "numpy_version": numpy.__version__,
             "process_graph": {"fixture_id": graph.fixture_id,
                               "fixture_version": graph.fixture_version,
                               "content_sha256": graph.content_sha256,
@@ -318,6 +324,8 @@ class BlindRcaToolSurface:
         tool = self._registered(request.tool_name, spec)
         if tool is None:
             fail("result is not from a registered blind-RCA tool")
+        if not isinstance(result, ToolResult) or result.status != SUCCESS:
+            fail("only successful tool results are ingestible")
         audit = self._audit.get(request.request_id)
         if audit is None or audit[2] != checksum(result):
             fail("result was not produced unmodified by this surface's executor")
@@ -357,7 +365,7 @@ class BlindRcaToolSurface:
                       deltas: Sequence[StateDelta], expected_state_revision: Any) -> bool:
         try:
             self.check_result(result, request, spec, deltas)
-        except ResultInvariantError:
+        except Exception:  # any invariant that cannot be established fails closed
             return False
         return True
 
@@ -492,8 +500,7 @@ class BlindRcaToolSurface:
                       "semantic_scenarios": {"type": "object"},
                       "rollout_interventions": _TEXT, "scenario_application": _TEXT,
                       "baseline_snapshots": {"type": "array", "items": _obj(
-                          {"snapshot_id": _TEXT, "simulation_time_hours": _NUMBER},
-                          ("snapshot_id", "simulation_time_hours"))},
+                          {"snapshot_id": _TEXT}, ("snapshot_id",))},
                       "tool_limits": _NUMBERS},
                      ("capability_version", "backend", "control_mode", "snapshot_fidelity",
                       "supported_consequence_domains", "unsupported_consequence_domains",
@@ -792,9 +799,9 @@ class BlindRcaToolSurface:
                                    "query_tool": "check_scenario_capability"},
             "rollout_interventions": "SUPPORTED_SEMANTIC_SCENARIOS_ONLY",
             "scenario_application": "BASELINE_LINEAGE_BRANCHES_ONLY",
-            "baseline_snapshots": [
-                {"snapshot_id": handle, "simulation_time_hours": float(snapshot.simulation_time)}
-                for handle, snapshot in sorted(self.world.baselines().items())],
+            # Ids only: origin timing could encode hidden injection timing (D0 policy).
+            "baseline_snapshots": [{"snapshot_id": handle}
+                                   for handle in sorted(self.world.baselines())],
             "tool_limits": {
                 "max_history_window_hours": limits.max_history_window_hours,
                 "max_variables": limits.max_variables,
@@ -870,25 +877,44 @@ class BlindRcaToolSurface:
         handle, horizon = arguments["branch_id"], arguments["horizon_hours"]
         branch = self.sandbox.branch(handle)
         start = branch.observe().simulation_time
-        applied = []
-        for scenario in arguments.get("scenarios", ()):
-            # tep-sim validates every intervention before committing: a rejection
-            # leaves the branch unchanged.
-            compiled = branch.apply_scenario(ScenarioRequest(
-                scenario["scenario_id"], dict(scenario.get("parameters", {}))))
-            applied.append({"scenario_id": compiled.scenario_id,
-                            "parameters": dict(compiled.provenance["parameters"]),
-                            "intervention_count": len(compiled.interventions)})
-        usage["simulation_rollouts"] = 1
+        mutated = False
         try:
+            applied = []
+            for scenario in arguments.get("scenarios", ()):
+                try:
+                    compiled = branch.apply_scenario(ScenarioRequest(
+                        scenario["scenario_id"], dict(scenario.get("parameters", {}))))
+                except _REJECTED_BEFORE_COMMIT:
+                    raise  # tep-sim validated before committing: branch unchanged
+                except Exception:
+                    mutated = True  # commit may have started
+                    raise
+                mutated = True
+                applied.append({"scenario_id": compiled.scenario_id,
+                                "parameters": dict(compiled.provenance["parameters"]),
+                                "intervention_count": len(compiled.interventions)})
+            usage["simulation_rollouts"] = 1
+            mutated = True
             rollout = branch.rollout(horizon)
-        except Exception:
             usage["simulated_horizon_seconds"] = round(
                 (branch.observe().simulation_time - start) * 3600)
-            self.sandbox.retire(handle)  # a failed run cannot be continued
+            return self._rollout_output(arguments, handle, branch, start, rollout, applied,
+                                        created_at, usage)
+        except BaseException:
+            if mutated:
+                # Report what was actually simulated, then never leave a silently
+                # intervened or advanced branch available after a failed result.
+                try:
+                    usage["simulated_horizon_seconds"] = round(
+                        (branch.observe().simulation_time - start) * 3600)
+                except Exception:
+                    pass
+                self.sandbox.retire(handle)
             raise
-        usage["simulated_horizon_seconds"] = round(
-            (branch.observe().simulation_time - start) * 3600)
+
+    def _rollout_output(self, arguments, handle, branch, start, rollout, applied,
+                        created_at, usage):
+        horizon = arguments["horizon_hours"]
         records = [sanitize_observation(record) for record in read_telemetry(rollout.telemetry)]
         safety = branch.evaluate_safety(rollout)
         artifact = self.artifacts.put_records("RolloutTelemetryArtifact", records, created_at)

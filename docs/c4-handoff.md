@@ -1,34 +1,60 @@
 # C4 blind-RCA Tool Surface handoff
 
 - Branch: `feat/tool-surface-v0`; base: lab `main` `ed70c01`.
-- Owning spec: `docs/specs/tool-surface-v0.md` (implementation notes appended).
-- Dependency pins (`dependency-pins.json`, CI, `scripts/check.py`):
+- Owning spec: `docs/specs/tool-surface-v0.md` (accepted adjudications and
+  implementation notes appended).
+- Exact dependency attestation is owned by `dependency-pins.json`,
+  `scripts/check.py`, and CI (`pyproject.toml` declares package-level dependencies
+  only and does not encode Git revisions):
   - `tep-sim` = `ae1c14dc3d4848acc011b359e74da74b558fcc3a` (A1-A4);
-  - `industrial-agent-runtime` = `2f243bd607ff94cc5b78a4d699362893fefdd1cd` (B1-B3).
+  - `industrial-agent-runtime` = `2f243bd607ff94cc5b78a4d699362893fefdd1cd` (B1-B3);
+  - numerical stack: `numpy` = `2.4.6` (attested against the test interpreter and
+    recorded in every result's `provenance.world.numpy_version`).
 
 ## Implemented
 
 - `tep_world.py`: harness-owned `ReferenceWorld` (sanitized history, salted
-  revision, `designate_baseline` for pre-incident snapshots), `SimulationSandbox`
-  (opaque world-unique snapshot/branch handles over tep-sim snapshot/fork, with
-  `baseline`/`reference` lineage), `ArtifactStore` (sanitized, checksummed,
-  never-overwritten, exact-ref resolver), `leakage_findings`, `sanitize_observation`.
+  revision, `designate_baseline` for trusted counterfactual origins),
+  `SimulationSandbox` (opaque world-unique snapshot/branch handles over tep-sim
+  snapshot/fork, with `baseline`/`reference` lineage), `ArtifactStore`
+  (sanitized, checksummed, never-overwritten, exact-ref resolver),
+  `leakage_findings`, `sanitize_observation`.
 - `tool_surface.py`: `BlindRcaToolSurface` with 14 explicit `ToolSpec`s and the
   trusted runtime hooks `validate_request`, `execute`, `verify_result`,
   `reference_revision`, plus `gate_policy()` and `registered_tool_set_version`.
 - Lab consumer validation delegates capability, control-mode, bounds, and scenario
   compilation to tep-sim; the lab adds only blind-RCA policy (allowlist, classes,
-  visible variables, branch/snapshot handles, horizon/variable/preview bounds).
-- Lab result invariants: executor audit binding (result checksum, reference
-  revision before/after), provenance/tool version, leakage screen, artifact
-  existence/checksum, branch identity/parent, exact actual simulation draw, and
-  ingestion limited to `REGISTER_OBSERVATION`/`REGISTER_ARTIFACT_REF`.
+  visible variables, branch/snapshot handles, horizon/variable/preview bounds,
+  baseline-lineage scenario rule).
+- Lab result invariants (fail closed on any error): `SUCCESS` only, executor audit
+  binding (result checksum, reference revision before/after), provenance/tool
+  version, leakage screen, artifact existence/checksum, branch identity/parent,
+  exact actual simulation draw, and ingestion limited to
+  `REGISTER_OBSERVATION`/`REGISTER_ARTIFACT_REF`.
+- Failed-branch retirement: once `run_rollout` has applied a scenario or started
+  advancing a branch, any failure that prevents a `SUCCESS` result (simulation,
+  telemetry read/sanitization, safety evaluation, artifact persistence,
+  post-processing) retires the branch and its snapshots, while still reporting the
+  actually simulated draw. tep-sim validation rejections before any commit, and
+  deterministic pre-execution denials, leave the branch available.
 - Results are ingested unchanged by the C1 `RcaResultIngestor`: observation, not
   evidence.
 
-Not implemented (out of C4 scope): C5 Tool Bridge analysis including
-`compare_rollouts`, B4 subagents, MUTATE/recovery tools, real model providers,
-D0 benchmark fixtures, disturbance-relation ablation tools.
+Not implemented (out of C4 scope): C5 Tool Bridge analysis including rollout and
+trajectory comparison, B4 subagents, MUTATE/recovery tools, real model providers,
+D0 benchmark fixtures, scenario enumeration or alias contracts, disturbance-relation
+ablation tools, baseline-management Agent tools.
+
+## Counterfactual origin (baseline) semantics
+
+The trusted benchmark harness is authoritative for calling
+`ReferenceWorld.designate_baseline()` before any hidden incident mutation. Neither
+the Agent nor `active_disturbances` designates an origin. The method's
+`active_disturbances` check is only an additional IDV-specific guard: it cannot
+detect other hidden incident state such as XMV, constraint, or operating-condition
+manipulation, and is not proof that a state is clean. `get_capability_summary`
+lists baseline snapshot ids only, without timing; branch telemetry still carries
+simulation time, so origin-timing visibility is a D0 policy decision.
 
 ## Verification
 
@@ -36,10 +62,11 @@ D0 benchmark fixtures, disturbance-relation ablation tools.
 py -3.13 scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
 ```
 
-Attests both clean exact pins, then runs **88 tests** (22 new C4 tests + 66 lab
-regressions) and `compileall`. CI runs the same on Python 3.11 and 3.13 with
-numpy pinned to 2.4.6. tep-sim is private: CI checks it out with the read-only
-deploy key secret `TEP_SIM_DEPLOY_KEY` (deploy key on `shaun0457/tep-sim`).
+Attests both clean exact Git pins and the NumPy pin, then runs **92 tests** (26 C4
+tests + 66 lab regressions) and `compileall`. An interpreter with another NumPy
+fails attestation (`NumPy pin mismatch`). CI runs the same on Python 3.11 and 3.13
+and installs NumPy from `dependency-pins.json`. tep-sim is private: CI checks it
+out with the read-only deploy key secret `TEP_SIM_DEPLOY_KEY`.
 
 Acceptance coverage (`tests/test_tool_surface.py`):
 
@@ -50,8 +77,8 @@ Acceptance coverage (`tests/test_tool_surface.py`):
    observation hash, history, and provenance file unchanged;
 6. reference MUTATE unknown/ungranted/denied; SIMULATE on `reference` denied;
 7. structured UNSUPPORTED/AMBIGUOUS/INVALID results and denials without simulation;
-   scenarios on forks of the incident state are denied by lineage (also on a
-   healthy plant, so the rule itself reveals nothing);
+   scenarios on incident-lineage forks are denied by lineage (also on a healthy
+   plant, so the rule itself reveals nothing);
 8. dense rollout telemetry as sanitized artifact refs;
 9. actual rollout/horizon draws reconcile against runtime reservations;
 10. B3 `TOOL_VERSION_MISMATCH` on forged provenance; genuine results accepted;
@@ -59,49 +86,31 @@ Acceptance coverage (`tests/test_tool_surface.py`):
 12. full runtime Coordinator run: 4 ObservationRecords, 0 evidence links,
     unsupported and reference-targeted SIMULATE requests denied.
 
-## SPEC_CONFLICT
+Closure tests: forced artifact-persistence, telemetry-read, and safety-evaluation
+failures after a rollout (with and without a scenario) retire the advanced branch,
+report the real draw, and leave the reference and a sibling branch unchanged and
+usable; pre-commit rejections do not retire; results record the attested NumPy.
 
-**SC-1: semantic scenario discovery vs. candidate-cause isolation.**
-Evidence: `tool-surface-v0.md` hides the "candidate-cause catalog" but lists
-`check_scenario_capability(scenario)` without saying whether supported semantic
-scenarios may be enumerated. The A4 `supported_semantic_scenarios` are exactly the
-reactor/condenser cooling-water family chosen as the first RCA family (OQ-1), so
-enumerating them would hand over the candidate list.
-Implemented (conservative): no enumeration; query by id; `AMBIGUOUS` answers and
-denials withhold the tested candidates (a generic term such as `loss_of_cooling`
-would otherwise list the whole family). Consequence: the Agent must name specific
-mechanisms; this usability cost needs an explicit decision.
-Smallest correction: add to the blind-RCA boundary section: "Supported semantic
-scenario enumeration is not in the default blind-RCA allowlist; enabling it is a
-recorded `tool_policy` ablation, like disturbance relation tools."
+## Accepted adjudications (C4 review closure)
 
-**SC-2 (minor): success status vocabulary.** The spec failure list says `OK`; the
-runtime B3 contract ingests only `SUCCESS`. Implemented `SUCCESS`. Correction:
-replace `OK` with `SUCCESS (runtime RESULT_SUCCESS)`.
+- **SC-1 semantic scenario discovery:** no enumeration of the supported scenario
+  catalog or evaluator candidate family; query by proposed scenario/mechanism;
+  `AMBIGUOUS` returns no candidate mappings; enumeration only as a later explicit,
+  recorded tool-policy/capability ablation. A versioned non-enumerative
+  alias/normalization contract may be studied in D0, not added now.
+- **SC-2 result status:** runtime canonical `SUCCESS`; the spec's `OK` replaced.
+- **SC-3 rollout comparison:** removed from the C4 simulation surface; C5 Tool
+  Bridge trajectory analysis owns it.
+- **SC-4 counterfactual origin:** scenarios only on branches descending from a
+  trusted harness-designated origin; incident/reference-lineage branches roll
+  forward only; harness authoritative; `active_disturbances` is defense in depth,
+  never proof of cleanliness; D0 defines origin-timing visibility.
+- **SC-5 dynamic request reservation:** accepted runtime gap. Conservative maximum
+  reservation stays; the lab does not parse or evaluate budget expressions. A
+  runtime B2.1 request-bound reservation contract (preserving D-037, no expression
+  DSL) is planned before D0.
 
-**SC-4: counterfactual base state.** The spec does not say from which state
-scenario interventions may be applied. tep-sim forks are exact (cloned RNG) and
-disturbance application is idempotent, so applying a cause to a fork of the
-incident state and comparing with an unperturbed fork reveals, byte for byte,
-whether that cause is already active. Implemented: scenarios apply only to
-branches descending from a harness-designated pre-incident baseline
-(`ReferenceWorld.designate_baseline`, which refuses a state with injected hidden
-state); the rule depends on lineage only, never on hidden state. Forward rollouts
-without scenarios stay available on incident forks. Correction: add to Simulation
-tools: "Scenario interventions apply only on branches descending from a
-harness-designated baseline snapshot."
-
-**SC-5: per-request SIMULATE reservation (runtime gap).** Runtime v0 B2 reserves
-`max_budget_draw` for expression draws and rejects consumer reservations that
-differ (`RESERVATION_MISMATCH`), so every `run_rollout` reserves the full maximum
-horizon; the final `max_rollout_horizon_hours` of any horizon quota is unusable.
-Fail-safe, not a leak. Smallest correction: a runtime-owned per-request
-reservation (evaluate the declared expression on validated arguments, or accept a
-consumer reservation that does not exceed the declared maximum).
-
-**SC-3 (minor): `compare_rollouts` placement.** Listed under simulation tools, but
-it is trajectory analysis, which belongs to the C5 Tool Bridge. Deferred.
-Correction: move it to `tool-bridge-v0.md` alongside `compare_trajectories`.
+No open `SPEC_CONFLICT` remains in C4.
 
 ## Notes for later batches
 
@@ -109,11 +118,9 @@ Correction: move it to `tool-bridge-v0.md` alongside `compare_trajectories`.
   truth by design (world plane); every Agent-facing consumer must sanitize as C4 does.
 - A3 ProcessGraph remains `PENDING_HUMAN_REVIEW`; topology tools report this in
   provenance (`process_graph_review_status`).
-- `run_rollout` reserves the maximum horizon per call (SC-5); size quotas with
-  that in mind until the runtime supports per-request reservation.
-- D0 benchmark design: because forks clone the RNG, a baseline fork with the true
-  cause applied at the injection instant reproduces the reference history exactly.
-  Simulate-and-match is legitimate physics inference, but exact replay makes it
-  trivial; D0 should decide on baseline offset or seed policy (OQ-1).
+- D0: because forks clone the RNG, a baseline fork with the true cause applied at
+  the injection instant reproduces the reference history exactly. Simulate-and-match
+  is legitimate physics inference, but exact replay makes it trivial; D0 decides
+  origin offset/timing visibility and seed policy (OQ-1).
 - One scenario per rollout: tep-sim applies one scenario atomically; several would
   each be validated against a state the earlier ones change.
