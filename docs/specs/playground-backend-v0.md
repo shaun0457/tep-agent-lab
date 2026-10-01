@@ -75,9 +75,13 @@ P0 MUST NOT introduce a new `PlaygroundState` that duplicates hypotheses, eviden
 
 Materialized application views are derived projections and may be rebuilt from their sources.
 
-## RunStatus v0
+## Run lifecycle
 
-P0 defines only lifecycle states supported by current contracts:
+### RunStatus v0
+
+`RunStatus` is an **application-hosting lifecycle**, not runtime `TaskStatus`. It must not replace, mirror-write, or become the canonical task-state status owned by the runtime/consumer store.
+
+P0 defines only:
 
 ```text
 CREATED
@@ -89,14 +93,22 @@ CREATED
 
 Rules:
 
-- transitions are deterministic and validated;
-- terminal states do not transition back to RUNNING;
+- `create()` produces `CREATED` only;
+- `prepare()` is atomic with respect to readiness: it either resolves/attests all required sources and publishes the immutable manifest, transitioning `CREATED -> READY`, or fails without publishing a partial manifest and leaves the run `CREATED`;
+- `start()` is accepted only from `READY`, transitions once to `RUNNING`, and gives exactly one application execution owner responsibility for one Coordinator run;
+- concurrent/duplicate `start()` attempts for the same run fail deterministically;
+- after execution begins, the application records `RUNNING -> COMPLETED` or `RUNNING -> FAILED` from the execution outcome;
+- terminal states do not transition back to `RUNNING`;
 - `PAUSED`, `CANCELLED`, checkpoint/resume, and distributed worker states are not part of v0;
 - adding interruption semantics later requires an explicit runtime/application contract rather than a UI-only flag.
 
-## RunManifest
+Whether a transport adapter invokes `start()` synchronously or asynchronously is not part of the P0 semantic contract. The invariant is one active execution owner, not a second scheduler.
 
-`RunManifest` is immutable after publication for a run. It is the reproducibility root for post-run inspection.
+## RunManifest and terminal outcome
+
+### RunManifest
+
+`RunManifest` is published atomically when the run becomes `READY` and is immutable thereafter. It is the reproducibility root describing **what was prepared to run**, not a mutable status record.
 
 Conceptual fields:
 
@@ -146,14 +158,36 @@ RunManifest
   artifact/run storage refs
 ```
 
-Exact field names may evolve during P0 implementation, but the following are required properties:
+Required properties:
 
 1. exact repo/context revisions are identifiable;
 2. numerical environment is identifiable;
 3. world/process/tool/policy/model versions are identifiable;
-4. hidden evaluator truth is referenced through visibility-controlled refs, not copied into Agent-visible manifest views;
+4. hidden evaluator truth is represented only by visibility-controlled refs, never copied into AGENT-visible manifest projections;
 5. secrets, API tokens, deploy keys, credentials, and raw private keys never appear in the manifest;
-6. mutating a source after a run cannot silently change what version the manifest claims the run used.
+6. mutating a source after a run cannot silently change what version the manifest claims the run used;
+7. the canonical-context source inventory used by the run is frozen with the manifest at `READY`; changing that inventory requires preparing a different run/manifest rather than mutating the ready run.
+
+The canonical/internal manifest is application/evaluator-owned metadata. It is not automatically an AGENT-visible payload. `RunSummaryView` and `ContextInventoryView` provide visibility-filtered projections; source ids/paths/refs that would reveal hidden truth must be withheld.
+
+### RunOutcome
+
+Terminal execution metadata is stored separately rather than mutating `RunManifest`.
+
+Conceptual record:
+
+```text
+RunOutcome
+  run_id
+  terminal_status     # COMPLETED | FAILED
+  started_at
+  finished_at
+  runtime_result_ref?
+  failure_ref_or_summary?
+  provenance
+```
+
+Outcome/error projections remain visibility-aware. A hidden evaluator/setup error must not become an Agent-side oracle merely because it is useful for debugging.
 
 ## RunSession
 
@@ -189,16 +223,16 @@ get(run_id)
 Exact method names are implementation details, but responsibilities are fixed:
 
 - assign/validate run identity;
-- resolve exact canonical context sources;
+- resolve and attest exact canonical-context sources during `prepare`;
 - assemble pinned world/runtime/lab components;
-- publish one immutable `RunManifest` before/at READY according to the implementation contract;
-- validate lifecycle transitions;
-- start execution through the existing runtime Coordinator/provider path;
-- persist terminal completion/failure metadata;
+- freeze the source inventory and atomically publish one immutable `RunManifest` when entering `READY`;
+- validate lifecycle transitions and reject duplicate execution ownership;
+- execute through the existing runtime Coordinator/provider path;
+- persist a separate `RunOutcome` for terminal completion/failure;
 - clean up owned resources deterministically;
 - expose read-only run/query services.
 
-`RunManager` does not authorize individual model tool calls and does not duplicate B2/B3.
+`RunManager` does not authorize individual model tool calls, does not duplicate B2/B3, and is not a second task scheduler.
 
 ## Canonical long-term context
 
@@ -215,7 +249,7 @@ Git repository canonical source
         v
 CanonicalContextRegistry
         |
- visibility + authority + provenance
+ visibility + governance + provenance
         |
         v
 bounded resolver/projection
@@ -239,18 +273,20 @@ ContextSourceRef
   content_checksum
   kind
   schema_version
-  authority
   visibility
   provenance?
+  governance?
 ```
 
 A source ref MUST identify immutable content strongly enough that a run can later determine exactly what was used.
+
+`governance` is source-kind-specific metadata, not a universal Rule authority field. When the owning source contract defines `origin × validation × authority` (for example an ENGINEERING_RULE or policy rule), those semantics may be carried without reinterpretation. ProcessGraph fixtures, benchmark cases, scoring policy, and evaluator ground truth are not forced into Rule Registry authority categories merely because they are canonical sources.
 
 Repository + Git revision alone may be insufficient for generated/materialized content; in that case include a content checksum/ref as well.
 
 ### Candidate source kinds
 
-The registry should support an extensible kind identifier. Initial examples:
+The registry supports an extensible kind identifier. Initial examples:
 
 ```text
 PROCESS_GRAPH
@@ -268,37 +304,36 @@ SCORING_POLICY
 
 This list is illustrative rather than a permanently closed enum.
 
-### Authority
+### Visibility and projection scope
 
-Context-source authority reuses or aligns with existing governance semantics where possible. Examples include REFERENCE, ADVISORY, PLANNING, or HARD_GATE as defined by owning rule/policy contracts.
-
-The registry records authority; it does not let the Agent self-promote authority.
-
-### Visibility
-
-At minimum:
+P0 requires at least logical projection scopes:
 
 ```text
 AGENT
 EVALUATOR
 ```
 
-A future broader visibility model may reuse generic `InformationRef.Visibility`; P0 must at least guarantee that evaluator-only source material cannot be resolved through AGENT views.
+These are application projection scopes. Source/ref visibility should reuse existing generic visibility semantics where compatible rather than inventing an incompatible second runtime visibility model.
 
-Local materialization NEVER implies Agent visibility.
+P0 must guarantee that evaluator-only source material cannot be resolved through AGENT views. Local materialization NEVER implies Agent visibility.
 
 ### CanonicalContextRegistry
 
+The registry is trusted application/harness state, never model-authored state.
+
 Responsibilities:
 
-- register immutable `ContextSourceRef`s for a run;
+- register immutable `ContextSourceRef`s during run preparation;
 - validate exact source revision/ref/checksum where applicable;
 - resolve sources deterministically;
 - enforce caller/view visibility;
 - expose a visibility-filtered source inventory;
-- provide stable refs from which ContextProjection or application views may be built.
+- provide stable refs from which `ContextProjection` or application views may be built;
+- freeze the run's source inventory at `READY` together with the manifest.
 
-It is NOT:
+After `READY`, the Agent/model cannot add, remove, replace, or relabel canonical sources for that run. Run-generated observations/results remain run state; they do not become new canonical-context sources automatically.
+
+The registry is NOT:
 
 - chat memory;
 - model memory;
@@ -345,7 +380,7 @@ P0 exposes transport-neutral derived views.
 
 ### RunSummaryView
 
-Contains lifecycle, manifest ref/version, task/investigation identifiers, high-level resource state, and terminal outcome where visible.
+Contains application `RunStatus`, manifest ref/version, task/investigation identifiers, high-level resource state, and terminal `RunOutcome` information where visible. It does not replace runtime `TaskStatus`.
 
 ### ProcessGraphView
 
@@ -420,8 +455,6 @@ The backend may expose a transport-neutral `get_artifact(ref)` style service. HT
 
 ## Blind versus evaluator projections
 
-P0 defines at least two logical projection scopes:
-
 ### AGENT / blind
 
 Default while observing an Agent investigation.
@@ -442,7 +475,7 @@ Explicit trusted view for benchmark/debug/scoring use.
 
 May resolve evaluator-only sources needed to create/score the case.
 
-Evaluator scope is never implicitly inherited by Agent ContextProjection construction.
+Evaluator scope is never implicitly inherited by Agent `ContextProjection` construction.
 
 ## ContextProjection relationship
 
@@ -450,7 +483,7 @@ Evaluator scope is never implicitly inherited by Agent ContextProjection constru
 
 The registry answers:
 
-> What canonical sources are available to this run, at exactly what version, authority and visibility?
+> What canonical sources are available to this run, at exactly what version, governance/provenance and visibility?
 
 `ContextProjection` answers:
 
@@ -460,10 +493,11 @@ A model turn never receives the entire local repo checkout merely because the re
 
 ## Run reproducibility
 
-A completed or failed run should be inspectable from:
+A completed or failed execution should be inspectable from:
 
 ```text
 RunManifest
++ RunOutcome
 + exact repository/context sources
 + runtime TraceRecorder
 + lab RunLog/RcaState records
@@ -538,22 +572,26 @@ Flow visualization must distinguish direct measured/bound flow values from topol
 
 ## Acceptance criteria for future P0 implementation
 
-1. A run assembled from exact pinned world/runtime/lab sources publishes one immutable `RunManifest`.
-2. Illegal lifecycle transitions fail deterministically.
-3. A fake-provider run executes through the existing Coordinator, B2 gates, consumer validation, Executor and B3 verifier rather than a backend shortcut.
-4. ProcessGraph, telemetry, investigation state, branch tree, runtime budget/resource usage, run events and artifacts are queryable as read projections.
-5. `CanonicalContextRegistry` resolves exact pinned source refs deterministically and detects revision/checksum mismatch.
-6. AGENT resolution/view cannot access EVALUATOR-only truth even when evaluator sources are locally materialized.
-7. Evaluator projection is explicit and cannot silently enter Agent ContextProjection/tool results.
-8. Entire repository contents are never automatically injected into `ContextProjection`.
-9. Agent tool calls continue through existing runtime authority contracts.
-10. Runtime Trace, Observation and Evidence semantics remain distinct through application projections.
-11. Artifact access uses exact typed refs/checksums and exposes no arbitrary raw paths.
-12. A completed/failed run retains enough manifest/source/provenance/artifact information for deterministic post-run inspection of the engineering/runtime state that was used.
-13. No mandatory distributed/database/RAG infrastructure is required to pass P0 acceptance.
-14. Application/backend projections do not become a second `TaskStateStore`, ProcessGraph, or process-world truth store.
-15. Context-source inventory itself is visibility-safe and cannot leak hidden benchmark truth via evaluator-only ids/paths/counts.
-16. P&ID-like ProcessGraph projection contains only semantics available to its visibility scope and preserves source/review provenance.
+1. `prepare()` atomically resolves/attests the pinned world/runtime/lab/context sources, freezes the context-source inventory, publishes one immutable `RunManifest`, and transitions `CREATED -> READY`; failed preparation leaves no partial manifest and no READY state.
+2. Illegal lifecycle transitions and duplicate/concurrent `start()` attempts fail deterministically.
+3. One accepted `start()` owns one Coordinator execution; a fake-provider run executes through Coordinator, B2 gates, consumer validation, Executor and B3 verifier rather than a backend shortcut or second scheduler.
+4. Terminal execution writes a separate `RunOutcome`; `RunManifest` remains unchanged after READY.
+5. ProcessGraph, telemetry, investigation state, branch tree, runtime budget/resource usage, run events and artifacts are queryable as read projections.
+6. `CanonicalContextRegistry` resolves exact pinned source refs deterministically and detects revision/checksum mismatch.
+7. The registry/source inventory is trusted application state, frozen at READY, and cannot be model-authored or mutated by the Agent during the run.
+8. AGENT resolution/view cannot access EVALUATOR-only truth even when evaluator sources are locally materialized.
+9. Evaluator projection is explicit and cannot silently enter Agent `ContextProjection`/tool results.
+10. The canonical/internal manifest is not exposed raw to AGENT scope when it contains evaluator-only refs; AGENT manifest/context views are visibility-filtered.
+11. Entire repository contents are never automatically injected into `ContextProjection`.
+12. Agent tool calls continue through existing runtime authority contracts.
+13. Application `RunStatus` and runtime/consumer `TaskStatus` remain distinct ownership domains.
+14. Runtime Trace, Observation and Evidence semantics remain distinct through application projections.
+15. Artifact access uses exact typed refs/checksums and exposes no arbitrary raw paths.
+16. A completed/failed execution retains enough manifest/outcome/source/provenance/artifact information for deterministic post-run inspection of the engineering/runtime state that was used.
+17. No mandatory distributed/database/RAG infrastructure is required to pass P0 acceptance.
+18. Application/backend projections do not become a second `TaskStateStore`, ProcessGraph, or process-world truth store.
+19. Context-source inventory itself is visibility-safe and cannot leak hidden benchmark truth via evaluator-only ids/paths/counts.
+20. P&ID-like ProcessGraph projection contains only semantics available to its visibility scope and preserves source/review provenance.
 
 ## Related decisions
 
@@ -565,7 +603,7 @@ Program Decision Register:
 - D-045 Application/UI vs Agent tool authority;
 - D-046 P0 required before D0 freeze;
 - D-047 local-first/single-process P0;
-- D-050 Git/repository-backed canonical context and visibility-aware local materialization.
+- D-050 repository-backed canonical context and visibility-aware local materialization.
 
 ## Implementation gate
 
