@@ -22,6 +22,9 @@ from industrial_agent_runtime.gates import GateDenied, reconcile
 from industrial_agent_runtime.schema import instance_errors, schema_errors
 from tep_sim import (REGISTRY, UPSTREAM_REVISION, ControlMode, DisturbanceIntervention,
                      EnvironmentConfig, TEPEnvironment)
+from tep_sim.evaluator_bindings import (PACKAGED_EVALUATOR_FIXTURE,
+                                        load_evaluator_disturbance_bindings)
+from tep_sim.process import read_fixture
 from tep_sim.snapshot import observation_sha256
 
 from tep_agent_lab import tep_world, tool_surface
@@ -37,6 +40,7 @@ from tep_agent_lab.tool_surface import (
 
 NOW = "2026-10-01T00:00:00Z"
 INJECTED = "IDV(4)"  # evaluator-chosen hidden cause of the incident fixture
+PROMOTED_GRAPH_SHA256 = "cc8ccc81e9f421238863457438465877850b19d9760740279e54a52468fe9a87"
 HIDDEN_NAMES = tuple(variable.name.lower() for key, variable in REGISTRY.items()
                      if key.startswith("IDV(") and variable.name != "Unknown")
 
@@ -239,8 +243,7 @@ class ReadToolTests(SurfaceCase):
                                                         "include_incident_streams": True})
         self.assertIn("XMV(10)", {b["runtime_variable_id"]
                                   for b in actuators.structured_output["bindings"]})
-        self.assertEqual("PENDING_HUMAN_REVIEW",
-                         measured.provenance["process_graph_review_status"])
+        self.assertEqual("HUMAN_VERIFIED", measured.provenance["process_graph_review_status"])
         unknown = self.decide(self.request("get_process_node", {"node_id": "no_such_node"}))
         self.assertEqual(("DENY", "INVALID_REQUEST"), (unknown.decision, unknown.reason_code))
 
@@ -540,6 +543,54 @@ class NumericalProvenanceTests(SurfaceCase):
         result = self.call("get_safety_margins")
         self.assertEqual(numpy.__version__, result.provenance["world"]["numpy_version"])
         self.assertEqual(pins["numpy"], numpy.__version__)
+
+
+class PromotedGraphProvenanceTests(SurfaceCase):
+    """tep-sim 0.2.0: the Agent-facing graph is the pinned HUMAN_VERIFIED 0.2.0 fixture."""
+
+    GRAPH = {"fixture_id": "tep-process-graph", "fixture_version": "0.2.0",
+             "content_sha256": PROMOTED_GRAPH_SHA256}
+
+    def test_reference_world_and_world_provenance_use_the_promoted_graph(self):
+        provenance = self.world.graph.provenance
+        self.assertEqual(self.GRAPH, {"fixture_id": provenance.fixture_id,
+                                      "fixture_version": provenance.fixture_version,
+                                      "content_sha256": provenance.content_sha256})
+        self.assertTrue(provenance.pinned)
+        result = self.call("get_process_node", {"node_id": "reactor"})
+        self.assertEqual(self.GRAPH, result.structured_output["graph"])
+        self.assertEqual({**self.GRAPH, "review_status": "HUMAN_VERIFIED"},
+                         result.provenance["world"]["process_graph"])
+
+    def test_evaluator_status_and_truth_stay_out_of_agent_graph_views(self):
+        # harness side only: the packaged evaluator fixture bound to this exact graph
+        evaluator = load_evaluator_disturbance_bindings(self.world.graph)
+        self.assertEqual("EVALUATOR_ONLY", evaluator.visibility)
+        self.assertEqual(("0.2.0", PROMOTED_GRAPH_SHA256),
+                         (evaluator.provenance.graph_fixture_version,
+                          evaluator.provenance.graph_content_sha256))
+        raw = read_fixture(None, PACKAGED_EVALUATOR_FIXTURE)
+        self.assertEqual("PENDING_HUMAN_REVIEW", raw["source"]["review_status"])
+        hidden = {binding.runtime_variable_id.lower() for binding in evaluator.bindings()}
+        self.assertTrue(hidden)
+        located = {binding.attached_to for binding in evaluator.bindings()}
+        nodes = sorted(located & {node.node_id for node in self.world.graph.nodes()})
+        self.assertTrue(nodes)
+        for node_id in nodes:
+            for name in ("get_process_node", "get_neighbors", "get_related_measurements",
+                         "get_related_actuators"):
+                arguments = {"node_id": node_id}
+                if name == "get_neighbors":
+                    arguments["max_depth"] = 3
+                elif name != "get_process_node":
+                    arguments["include_incident_streams"] = True
+                result = self.call(name, arguments)  # includes assert_blind
+                self.assertEqual("HUMAN_VERIFIED",
+                                 result.provenance["process_graph_review_status"])
+                text = canonical_json(to_jsonable(result)).lower()
+                self.assertNotIn("pending_human_review", text)
+                for runtime_id in hidden:
+                    self.assertNotIn(runtime_id, text)
 
 
 class ResultVerificationTests(SurfaceCase):
