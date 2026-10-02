@@ -6,18 +6,23 @@ Both dependencies must be clean checkouts at the exact revisions recorded in
 ``dependency-pins.json``; a floating branch head is never accepted. The numerical
 stack is attested too: the NumPy imported by the test interpreter must equal the
 recorded ``numpy`` pin. Exact Git revisions are owned by ``dependency-pins.json``,
-this script, and CI; ``pyproject.toml`` declares package-level dependencies only.
+this script, and CI; ``pyproject.toml`` declares package-level dependencies only, and
+each pinned checkout's package version must equal that exact ``==`` declaration.
 """
 
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import tomllib
 
 # tep-sim imports the vendored upstream ``tep`` package from its pinned submodule.
 TEP_UPSTREAM_SOURCE = Path("vendor/tep-sim-upstream/src")
+# One exact ``name==version`` requirement (no extras); environment markers are ignored.
+_EXACT_PIN = re.compile(r"\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*(?P<version>[^\s=]+)\s*")
 
 
 def attest(name: str, checkout: Path, pin: str) -> bool:
@@ -36,6 +41,33 @@ def attest(name: str, checkout: Path, pin: str) -> bool:
         print(f"{name} checkout is dirty; cannot attest the pinned revision", flush=True)
         return False
     print(f"Verified {name} pin: {actual}", flush=True)
+    return True
+
+
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()  # PEP 503 name normalization
+
+
+def attest_version(name: str, checkout: Path, declared: list[str]) -> bool:
+    """The pinned checkout's package version equals the lab's exact ``name==`` pin."""
+    exact = (_EXACT_PIN.fullmatch(item.split(";", 1)[0]) for item in declared)
+    expected = [match["version"] for match in exact
+                if match and _canonical(match["name"]) == _canonical(name)]
+    if len(expected) != 1:
+        print(f"Lab must declare exactly one {name}==<version> pin, found {expected}",
+              flush=True)
+        return False
+    try:
+        with open(checkout / "pyproject.toml", "rb") as file:
+            actual = tomllib.load(file)["project"]["version"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        print(f"Cannot read {name} package version: {error!r}", flush=True)
+        return False
+    if expected != [actual]:
+        print(f"Package version mismatch for {name}: lab declares {expected}, "
+              f"checkout is {actual}", flush=True)
+        return False
+    print(f"Verified {name} package version: {actual}", flush=True)
     return True
 
 
@@ -58,8 +90,16 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     runtime, tep_sim = args.runtime.resolve(), args.tep_sim.resolve()
     pins = json.loads((root / "dependency-pins.json").read_text())
+    try:
+        with open(root / "pyproject.toml", "rb") as file:
+            declared = tomllib.load(file)["project"]["dependencies"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        print(f"Cannot read lab dependency declarations: {error!r}", flush=True)
+        return 1
     if not (attest("industrial-agent-runtime", runtime, pins["industrial-agent-runtime"])
             and attest("tep-sim", tep_sim, pins["tep-sim"])
+            and attest_version("industrial-agent-runtime", runtime, declared)
+            and attest_version("tep-sim", tep_sim, declared)
             and attest_numpy(pins["numpy"])):
         return 1
     env = os.environ.copy()
