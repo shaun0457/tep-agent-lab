@@ -466,6 +466,46 @@ class ConcurrencyTests(PlaygroundCase):
         self.assertEqual([], secret_findings(outcome.record()))
 
 
+class RuntimeTaskOutcomeTests(PlaygroundCase):
+    """Frozen P0 semantic: application COMPLETED != task success.
+
+    A real ``Coordinator.run()`` that returns a valid ``RuntimeResult`` is a hosted
+    COMPLETED run whatever the runtime ``TaskStatus``; only a hosting/execution-path
+    failure is application FAILED.
+    """
+
+    def assert_completed_with_task_status(self, outcome, task_status):
+        self.assertEqual(RunStatus.COMPLETED, outcome.terminal_status)
+        self.assertIsNone(outcome.failure_category)
+        self.assertEqual(task_status, outcome.runtime_result["task_status"])
+        self.assertEqual(RunStatus.COMPLETED, self.manager.get("run-1").status)
+        for manager in (self.manager, self.make_manager()):  # in-process and reloaded
+            summary = manager.queries("run-1").run_summary()
+            self.assertEqual("COMPLETED", summary["run_status"])
+            self.assertEqual(task_status, summary["runtime_task_status"]["status"])
+            self.assertEqual(task_status, summary["outcome"]["runtime_result"]["task_status"])
+            assert_blind(self, summary)
+
+    def test_budget_exhaustion_is_completed_hosting_with_exhausted_task(self):
+        self.prepare(budget=Budget(1, 12, 0, 0, 30, extra_dimensions=simulation_quota(
+            snapshots=1, branches=1, rollouts=1, horizon_seconds=3600)))
+        outcome = self.manager.start("run-1")
+        self.assert_completed_with_task_status(outcome, "EXHAUSTED")
+        self.assertEqual(1, outcome.runtime_result["budget_usage"]["model_calls"])
+
+    def test_runtime_task_failure_without_exception_is_completed_hosting(self):
+        provider = FakeProvider([turn()])
+        self.prepare(provider=provider, budget=Budget(
+            12, 12, 0, 0, 30, max_total_tokens=1000, extra_dimensions=simulation_quota(
+                snapshots=1, branches=1, rollouts=1, horizon_seconds=3600)))
+        outcome = self.manager.start("run-1")  # Coordinator.run() returns; it does not raise
+        self.assert_completed_with_task_status(outcome, "FAILED")
+        self.assertIn("token-metered provider execution requires downstream accounting",
+                      outcome.runtime_result["errors"])
+        self.assertEqual(0, outcome.runtime_result["budget_usage"]["model_calls"])
+        self.assertEqual([], provider.projections)  # fail-closed before any provider turn
+
+
 class ExecutionTests(unittest.TestCase):
     """One real fake-provider run: Coordinator -> B2 -> consumer -> Executor -> B3."""
 

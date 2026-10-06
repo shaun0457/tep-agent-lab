@@ -72,12 +72,28 @@ trusted/EVALUATOR-only reads)
 retired-branch bookkeeping for the branch-tree view.
 No existing behavior changed.
 
+## Frozen P0 semantic decision
+
+**Application COMPLETED != task success.** Decided by the architecture owner and now
+normative in the spec (`RunOutcome`, terminal status semantics):
+
+- `COMPLETED`: the execution owner's `Coordinator.run()` returned a valid `RuntimeResult`
+  and the terminal application outcome was constructed, whatever the runtime
+  `TaskStatus` (DONE/FAILED/EXHAUSTED/CANCELLED).
+- `FAILED`: the hosting/execution path itself failed (the Coordinator raised, or the
+  terminal outcome could not be constructed). It is not a task-outcome mapping.
+- The task outcome is represented separately by runtime `TaskStatus`, reported beside the
+  application status (`runtime_task_status`, `outcome.runtime_result.task_status`) and
+  never mirrored into `RunStatus`.
+
+Regression coverage uses the real Coordinator: budget exhaustion
+(`COMPLETED + EXHAUSTED`) and the fail-closed token-metered path
+(`COMPLETED + FAILED`, no exception), beside the existing raised-Coordinator test
+(application `FAILED`). `RunManager.start()` needed no change.
+
 ## Interpretations (spec is conceptual here; not SPEC_CONFLICTs)
 
-1. **COMPLETED vs FAILED.** `COMPLETED` means the owner's `Coordinator.run()` returned a
-   `RuntimeResult`, whatever the runtime `TaskStatus` (DONE/FAILED/EXHAUSTED). `FAILED`
-   means the hosted execution raised. The runtime status is reported beside the
-   application status (`runtime_task_status`) and never mirrored into it.
+1. *(Resolved; see the frozen P0 semantic decision above.)*
 2. **Revision attestation.** `SourceRevisions` is supplied by the trusted host. CI
    attests the dependency checkouts with `scripts/check.py`. `RunManager` additionally
    requires the runtime/tep-sim revisions to equal `dependency-pins.json` and NumPy to
@@ -109,7 +125,7 @@ abstraction, F-11, pause/resume/cancel, distributed execution.
 py -3.13 scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
 ```
 
-158 tests (117 existing regressions + 41 P0) pass locally on Python 3.13 against the exact
+160 tests (117 existing regressions + 43 P0) pass locally on Python 3.13 against the exact
 pins. CI runs the same on 3.11 and 3.13. The P0 acceptance coverage in
 `tests/test_playground.py` includes:
 
@@ -122,6 +138,7 @@ pins. CI runs the same on 3.11 and 3.13. The P0 acceptance coverage in
 - credential redaction in failure details;
 - rejection of AGENT sources that alias hidden content;
 - a FAILED outcome without an AGENT oracle;
+- `COMPLETED` hosting with runtime `EXHAUSTED` and runtime `FAILED` task results;
 - one fake-provider run through Coordinator/B2/consumer/Executor/B3 (4 observations,
   0 evidence links);
 - the manifest unchanged after READY, with the outcome kept separate;
@@ -167,7 +184,6 @@ code-reviewer, python-reviewer and security-reviewer passes, then the built-in `
 
 Accepted as follow-ups:
 
-- the COMPLETED-vs-runtime-status semantics (interpretation 1, a spec-owner decision);
 - runs loaded as CREATED after a restart cannot be prepared (the request object is not
   rebuilt from the log);
 - `case_setup` content is attested only once D0 provides a benchmark case ref.

@@ -79,7 +79,7 @@ Materialized application views are derived projections and may be rebuilt from t
 
 ### RunStatus v0
 
-`RunStatus` is an **application-hosting lifecycle**, not runtime `TaskStatus`. It must not replace, mirror-write, or become the canonical task-state status owned by the runtime/consumer store.
+`RunStatus` is an **application-hosting lifecycle**, not runtime `TaskStatus`. It must not replace, mirror-write, or become the canonical task-state status owned by the runtime/consumer store. Terminal `COMPLETED`/`FAILED` semantics are defined under `RunOutcome`.
 
 P0 defines only:
 
@@ -186,6 +186,15 @@ RunOutcome
   failure_ref_or_summary?
   provenance
 ```
+
+Terminal status semantics (normative):
+
+- `COMPLETED` means the accepted execution owner invoked the Coordinator, obtained a valid `RuntimeResult`, and constructed the terminal application outcome.
+- The runtime task terminal status (`TaskStatus` DONE/FAILED/EXHAUSTED/CANCELLED) is stored and reported separately, in the runtime result and the runtime/consumer task state. It is never mirror-written into `RunStatus`.
+- A runtime `FAILED` or `EXHAUSTED` task does not imply application `FAILED`. `COMPLETED + DONE`, `COMPLETED + FAILED` and `COMPLETED + EXHAUSTED` are valid, distinct combinations.
+- `FAILED` represents a hosting/execution-path failure before a valid `RuntimeResult`/terminal outcome exists (for example, the Coordinator raises or outcome construction fails). It is not a task-outcome mapping.
+
+Application `COMPLETED` therefore answers "did the Playground successfully host and record the execution?", not "did the Agent task succeed?".
 
 Outcome/error projections remain visibility-aware. A hidden evaluator/setup error must not become an Agent-side oracle merely because it is useful for debugging.
 
