@@ -39,8 +39,10 @@ from tep_sim import ControlMode, DisturbanceIntervention
 from tep_agent_lab.canonical_context import ProjectionScope
 from tep_agent_lab.playground import (LifecycleError, ModelSpec, PrepareError, RunManager,
                                       RunOutcome, RunRequest, RunStatus, SourceRevisions,
-                                      WorldSpec, _write_once, load_dependency_pins,
+                                      WorldSpec, load_dependency_pins,
                                       pinned_tep_sim_sources)
+# P0's write-once publication (temp + fsync + hard link), reused rather than re-implemented.
+from tep_agent_lab.playground import _write_once
 from tep_agent_lab.playground_views import MAX_TELEMETRY_RECORDS, RunQueries
 from tep_agent_lab.tep_world import ReferenceWorld, leakage_findings
 from tep_agent_lab.tool_surface import simulation_quota
@@ -121,7 +123,10 @@ class DemoHarness:
 
 # -- scripted provider: typed turns only, through the normal Coordinator path -----------
 def _artifact(state: Mapping[str, Any], kind: str) -> Mapping[str, Any]:
-    return next(ref for ref in state["artifact_refs"] if ref["kind"] == kind)
+    for ref in state["artifact_refs"]:
+        if ref["kind"] == kind:
+            return ref
+    raise LookupError(f"no {kind} in the projected task state; an earlier step failed")
 
 
 def scripted_provider(baseline: BaselineHandle) -> FakeProvider:
@@ -194,6 +199,18 @@ def git_revision(path: Path) -> str:
         text=True, stderr=subprocess.DEVNULL).strip()
 
 
+def lab_checkout_dirty(path: Path) -> bool:
+    """Uncommitted tracked or untracked changes (git-ignored run output excluded)."""
+    posix = path.as_posix()
+    try:
+        status = subprocess.check_output(
+            ["git", "-c", f"safe.directory={posix}", "-C", posix, "status", "--porcelain"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return bool(status.strip())
+
+
 @dataclass(frozen=True)
 class DemoRun:
     manager: RunManager
@@ -253,11 +270,19 @@ def _model_turns(observations: Sequence[Mapping[str, Any]],
     turn runs from one runtime ``MODEL_TURN`` to the next. Observation refs are appended
     in state-revision order, one per ``REGISTER_OBSERVATION`` operation of the lab
     state-update events (the lab log records accepted updates only), so the k-th such
-    operation registered the k-th observation. Any count mismatch fails closed.
+    operation registered the k-th observation. Each registration must directly follow
+    its anchoring ACCEPTED ``RESULT_INGESTION`` trace item (P0 places unanchored lab
+    events at the feed's end); otherwise, or on any count mismatch, this fails closed.
     """
     turns: list[dict[str, Any]] = []
     counts: list[int] = []
+    previous: Mapping[str, Any] = {}
     for event in events:
+        if "REGISTER_OBSERVATION" in event.get("operations", ()) and (
+                previous.get("source"), previous.get("type"), previous.get("status")) != (
+                "runtime_trace", "RESULT_INGESTION", "ACCEPTED"):
+            raise ValueError("an observation registration has no anchoring ingestion event")
+        previous = event
         if event["source"] == "runtime_trace" and event["type"] == "MODEL_TURN":
             turns.append({"turn": len(turns) + 1, "trace": [], "observations": []})
             counts.append(0)
@@ -462,12 +487,10 @@ _PLACEHOLDERS = re.compile(r"__(AGENT|DEVELOPER)_JSON__")
 def render_html(agent_payload: Mapping[str, Any], developer: Mapping[str, Any]) -> str:
     """Self-contained page: the AGENT payload and the developer block stay separate.
 
-    One substitution pass over the template only, so run data that happens to contain a
-    placeholder token can never pull the developer block into the AGENT block.
+    One substitution pass over the template only (inserted text is never rescanned), so
+    run data that contains a placeholder token cannot pull one block into the other.
     """
     blocks = {"AGENT": _script_json(agent_payload), "DEVELOPER": _script_json(developer)}
-    if any(_PLACEHOLDERS.search(block) for block in blocks.values()):
-        raise ValueError("report data contains a template placeholder token")
     return _PLACEHOLDERS.sub(lambda match: blocks[match.group(1)], _PAGE)
 
 
@@ -531,6 +554,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, subprocess.CalledProcessError):
             print("cannot read the lab git revision; pass --lab-revision", file=sys.stderr)
             return 2
+        if lab_checkout_dirty(ROOT):
+            print(f"warning: the lab checkout has uncommitted changes; the manifest records "
+                  f"{revision}, not the code that actually ran", file=sys.stderr)
     try:
         demo = run_demo(args.output_root, args.run_id, lab_revision=revision)
     except LifecycleError as exc:
@@ -540,8 +566,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except PrepareError as exc:  # atomic: no manifest was published
         print(f"run preparation failed: {exc}", file=sys.stderr)
         return 1
-    except ValueError as exc:  # run id / lab revision rejected before anything ran
-        print(f"invalid argument: {exc}", file=sys.stderr)
+    except (ValueError, KeyError) as exc:  # run id, lab revision, or dependency pins
+        print("invalid run configuration (--run-id, --lab-revision, or "
+              f"dependency-pins.json): {exc!r}", file=sys.stderr)
         return 2
     records = p0_root(args.output_root) / demo.run_id
     try:
@@ -680,7 +707,7 @@ by Agent tools.</p></section>
 state-log records; none of it is evidence. Observations are registered by deterministic
 ingestion; evidence exists only through an explicit evidence link (there are none here).</p>
 <div id="calls"></div>
-<label><input type="checkbox" id="only-major" checked> major events only</label>
+<label><input type="checkbox" id="only-major" checked> hide routine GATE ALLOW / RECONCILIATION</label>
 <div id="events"></div></section>
 
 <section id="g"><h2>G · Investigation / artifacts / budgets</h2><div id="g-body"></div>
@@ -866,11 +893,10 @@ function highlightGraph(name){for(const[id,g]of Object.entries(graphNodes)){cons
    list(o=>code(o.observation_id)),list(o=>o.artifact_refs.map(r=>r.kind).join(", ")||"—")];})),
  el("p",{class:"note"},"Turns are delimited by runtime MODEL_TURN events; each observation is matched to the "+
   "turn whose RESULT_INGESTION registered it (state-revision order). AGENT trace items carry no request payloads."));
- const major=new Set(["RUN_CREATED","RUN_READY","RUN_STARTED","MODEL_TURN","MODEL_OUTPUT","GATE","EXECUTE",
-  "TOOL_RESULT","VERIFY_RESULT","RESULT_INGESTION","VERIFY_FINISH","FINISH","RUN_COMPLETED","RUN_FAILED",
-  "RCA_STATE_INITIALIZED","RCA_STATE_UPDATE_ACCEPTED","RCA_STATUS_TRANSITION_ACCEPTED","TASK_STATUS"]);
+ // Hide only routine control-plane noise; every other event (failures included) stays.
+ const routine=e=>e.source==="runtime_trace"&&(e.type==="RECONCILIATION"||(e.type==="GATE"&&e.status==="ALLOW"));
  const box=document.getElementById("events"),cb=document.getElementById("only-major");
- function render(){const ev=V.events.events.filter(e=>!cb.checked||major.has(e.type)||e.source!=="runtime_trace");
+ function render(){const ev=V.events.events.filter(e=>!cb.checked||!routine(e));
   box.replaceChildren(el("p",{class:"note"},V.events.semantics+" · "+ev.length+" of "+V.events.events.length+" events"),
   table(["pos","source","type","status","request / revision","timestamp"],ev.map(e=>[e.position,
    el("span",{class:"chip "+(SOURCES.has(e.source)?"src-"+e.source:"")},e.source),e.type,e.status||"—",

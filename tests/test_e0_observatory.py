@@ -213,8 +213,10 @@ class E0ObservatoryTests(unittest.TestCase):
         self.assertNotIn("__DEVELOPER_JSON__", self.html)
         self.assertEqual("\\u003c/script\\u003e \\u0026",
                          e0._script_json("</script> &")[1:-1])
-        with self.assertRaises(ValueError):  # run data can never splice the other block
-            e0.render_html({**self.payload, "note": "__DEVELOPER_JSON__"}, self.developer)
+        tricky = {**self.payload, "note": "__DEVELOPER_JSON__ __AGENT_JSON__"}
+        spliced = e0.render_html(tricky, self.developer)  # inserted text is never rescanned
+        self.assertEqual(json.loads(json.dumps(tricky)), agent_block(spliced, "agent-payload"))
+        self.assertEqual(self.developer, agent_block(spliced, "developer-setup"))
         node = shutil.which("node")
         if node is None:
             self.skipTest("node is not installed; inline script syntax not checked")
@@ -249,13 +251,16 @@ class E0ObservatoryTests(unittest.TestCase):
                "operations": ["REGISTER_OBSERVATION", "REGISTER_ARTIFACT_REF",
                               "REGISTER_OBSERVATION"]}
         observations = [{"observation_id": "a"}, {"observation_id": "b"}]
-        events = [trace("MODEL_TURN"), lab, trace("MODEL_TURN")]
+        ingestion = {**trace("RESULT_INGESTION"), "status": "ACCEPTED"}
+        events = [trace("MODEL_TURN"), ingestion, lab, trace("MODEL_TURN")]
         turns = e0._model_turns(observations, events)
         self.assertEqual([["a", "b"], []],
                          [[item["observation_id"] for item in turn["observations"]]
                           for turn in turns])
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError):  # count mismatch
             e0._model_turns(observations[:1], events)
+        with self.assertRaises(ValueError):  # unanchored registration at the feed's end
+            e0._model_turns(observations, [trace("MODEL_TURN"), trace("MODEL_TURN"), lab])
 
     # CLI ------------------------------------------------------------------------------
     def test_cli_refuses_to_overwrite_run_records_or_reports(self):
