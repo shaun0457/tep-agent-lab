@@ -22,6 +22,7 @@ Before implementation, read the relevant owning spec:
 - `docs/specs/hazop-v0.md`
 - `docs/specs/recovery-v0.md`
 - `docs/specs/autoresearch-v0.md`
+- `docs/specs/playground-backend-v0.md`
 - `docs/open-questions.md`
 - `docs/decisions/ADR-001-simulate-before-reference-mutation.md`
 
