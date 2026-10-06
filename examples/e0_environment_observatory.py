@@ -24,7 +24,6 @@ import argparse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -40,7 +39,8 @@ from tep_sim import ControlMode, DisturbanceIntervention
 from tep_agent_lab.canonical_context import ProjectionScope
 from tep_agent_lab.playground import (LifecycleError, ModelSpec, PrepareError, RunManager,
                                       RunOutcome, RunRequest, RunStatus, SourceRevisions,
-                                      WorldSpec, load_dependency_pins, pinned_tep_sim_sources)
+                                      WorldSpec, _write_once, load_dependency_pins,
+                                      pinned_tep_sim_sources)
 from tep_agent_lab.playground_views import MAX_TELEMETRY_RECORDS, RunQueries
 from tep_agent_lab.tep_world import ReferenceWorld, leakage_findings
 from tep_agent_lab.tool_surface import simulation_quota
@@ -230,7 +230,7 @@ def run_demo(output_root: Path, run_id: str = DEFAULT_RUN_ID, *,
 
 # -- AGENT report payload ---------------------------------------------------------------
 def _plain(value: Any) -> Any:
-    return json.loads(json.dumps(to_jsonable(value)))
+    return json.loads(json.dumps(to_jsonable(value), allow_nan=False))  # fail early
 
 
 def _observations(investigation: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -472,15 +472,9 @@ def render_html(agent_payload: Mapping[str, Any], developer: Mapping[str, Any]) 
 
 
 def write_report(path: Path, html: str) -> None:
-    """Publish once: write a temp file, then hard-link it (fails if the report exists)."""
+    """Publish once with P0's write-once helper (temp + fsync + hard link, no overwrite)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-            stream.write(html)
-        os.link(temporary, path)  # never overwrites; no partial report on failure
-    finally:
-        temporary.unlink(missing_ok=True)
+    _write_once(path, html.encode("utf-8"))
 
 
 def lineage_findings(payload: Mapping[str, Any], baseline: str | None) -> list[str]:
@@ -546,11 +540,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except PrepareError as exc:  # atomic: no manifest was published
         print(f"run preparation failed: {exc}", file=sys.stderr)
         return 1
+    except ValueError as exc:  # run id / lab revision rejected before anything ran
+        print(f"invalid argument: {exc}", file=sys.stderr)
+        return 2
     records = p0_root(args.output_root) / demo.run_id
     try:
         payload = build_agent_report(demo.manager.queries(demo.run_id))
         write_report(path, render_html(payload, demo.harness.developer_setup()))
-    except (ValueError, LookupError, OSError) as exc:
+    except (ValueError, LookupError, RuntimeError, OSError) as exc:  # incl. VisibilityViolation
         print(f"run {demo.run_id} ended {demo.outcome.terminal_status.value} but no report "
               f"was written ({exc}); P0 records: {records}", file=sys.stderr)
         return 1
@@ -596,7 +593,7 @@ th{color:var(--muted);font-weight:600}
 code,.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-all}
 .chip{display:inline-block;background:var(--chip);border-radius:10px;padding:0 8px;
 margin:1px 2px;font-size:12px}
-.status{font-weight:700}.ok{color:var(--ok)}
+.status{font-weight:700}.ok{color:var(--ok)}.warn{color:var(--dev)}
 .note{color:var(--muted);font-size:12px}
 .flow{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .flow div{border:1px solid var(--line);border-radius:6px;padding:6px 10px;background:var(--node)}
@@ -715,8 +712,8 @@ const SOURCES = new Set(["application_lifecycle","runtime_trace","lab_run_log"])
  const box=document.getElementById("a-body");
  box.append(el("div",{class:"grid"},
   table(["Status domain","Value","Owner"],[
-   ["Application RunStatus",el("span",{class:"status ok"},W.run_status),W.run_status_owner],
-   ["Runtime TaskStatus",el("span",{class:"status ok"},W.task_status||"—"),W.task_status_owner||"—"]]),
+   ["Application RunStatus",el("span",{class:"status"+(W.run_status==="COMPLETED"?" ok":" warn")},W.run_status),W.run_status_owner],
+   ["Runtime TaskStatus",el("span",{class:"status"+(W.task_status==="DONE"?" ok":" warn")},W.task_status||"—"),W.task_status_owner||"—"]]),
   table(["World","Value"],[["run id",code(W.run_id)],["simulation time",fmt(W.simulation_time_hours)+" h"],
    ["seed",cfg.seed],["control mode",cfg.control_mode],["record interval",cfg.record_interval+" s"],
    ["backend",cfg.backend],["environment",code(W.environment_version)]])));
@@ -889,7 +886,7 @@ function highlightGraph(name){for(const[id,g]of Object.entries(graphNodes)){cons
    ["evidence links",inv.evidence_links.length],["hypotheses",inv.hypotheses.length],
    ["completed experiments",inv.completed_experiments.length],["runtime TaskStatus",inv.runtime_task_status]]),
   table(["budget dimension","limit","used"],Object.entries(Object.assign({},b.limits,b.limits.extra_dimensions||{}))
-   .filter(([k,v])=>k!=="extra_dimensions"&&v!=null).map(([k,v])=>[k,v,b.usage[k]||0]))));
+   .filter(([k,v])=>k!=="extra_dimensions"&&v!=null).map(([k,v])=>[k,v,b.usage[k.replace(/^max_/,"")]||0]))));
  box.append(el("p",{class:"note"},"Observations are automatically registered tool results; evidence links exist only "+
   "through an explicit model state update. This demo proposes none, so evidence links = "+inv.evidence_links.length+"."));
  box.append(el("h3",{},"Issued artifacts (exact refs; content read through get_artifact with checksum verification)"),

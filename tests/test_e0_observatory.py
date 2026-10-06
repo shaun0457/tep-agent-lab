@@ -274,6 +274,19 @@ class E0ObservatoryTests(unittest.TestCase):
             self.assertEqual(2, e0.main(["--output-root", str(self.root),
                                          "--run-id", "e0-other"]))
         self.assertFalse((self.root / "p0-runs" / "e0-other").exists())
+        with mock.patch("sys.stderr"):  # rejected before any run record is created
+            self.assertEqual(2, e0.main(["--output-root", str(self.root), "--run-id", "E0"]))
+            self.assertEqual(2, e0.main(["--output-root", str(self.root), "--run-id",
+                                         "e0-third", "--lab-revision", "abc123"]))
+        self.assertFalse((self.root / "p0-runs" / "e0-third").exists())
+
+    def test_budget_usage_keys_match_the_page_mapping(self):
+        budget = self.payload["views"]["budget"]
+        usage = self.demo.outcome.runtime_result["budget_usage"]
+        for name in ("model_calls", "tool_calls", "steps"):  # page maps max_<name> -> <name>
+            self.assertIn(f"max_{name}", budget["limits"])
+            self.assertEqual(usage[name], budget["usage"][name])
+        self.assertEqual(TURNS, budget["usage"]["model_calls"])
 
 
 if __name__ == "__main__":
