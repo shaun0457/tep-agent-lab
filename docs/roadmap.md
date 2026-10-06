@@ -56,6 +56,20 @@ Contract and error codes: `docs/e0-2b-application-transport.md`.
 
 ### E0.2C — Tauri desktop client
 
+#### E0.2C1 — Python desktop backend process — complete
+
+- shared deterministic E0 developer-demo bootstrap with the static report;
+- one persistent Python-owned P0 session and ApplicationTransport;
+- bounded NDJSON stdin/stdout, protocol-only stdout and diagnostic stderr;
+- existing four AGENT-visible application reads, no new domain/protocol methods.
+
+Contract: `docs/e0-2c-desktop-backend.md`.
+
+#### E0.2C2 — Tauri/TypeScript/Rust shell — pending
+
+Process supervision and packaging Python as a Tauri sidecar remain deferred.
+E0.2C as a whole remains incomplete.
+
 Target UI stack:
 
 - Tauri v2;
