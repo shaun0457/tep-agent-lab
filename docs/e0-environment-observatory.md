@@ -89,10 +89,10 @@ the demo is no evidence that an Agent can localise an onset.
   `HistoryWindowArtifact`; counterfactual = the `RolloutTelemetryArtifact`. Markers:
   branch origin (Agent-visible fork result) and the injection time (developer block).
   C5 metrics table below.
-- **D ProcessGraph**: from `ProcessGraphView`; node kind/name/tag, bound measurements
-  and actuators (node and incident streams), upstream/downstream from edges. Layered
-  layout labelled *Schematic topology — not P&ID geometry*; no geometry or flow physics
-  is inferred.
+- **D Process telemetry overlay**: original embedded equipment/stream SVG, validated
+  against `ProcessGraphView`; select a node or stream for kind/name/tag, measurements,
+  actuators, incident bindings and upstream/downstream. Section C selection highlights
+  exact bindings; `[plot]` buttons reuse section C's existing chart.
 - **E Snapshot/branch tree**: `BranchTreeView` parent links: reference -> baseline
   snapshot -> counterfactual branch -> rollout.
 - **F Runtime event timeline**: `RunEventView` (lifecycle, runtime trace, lab RunLog)
@@ -150,3 +150,79 @@ Influx, MES) remain future work.
 - The AGENT event feed has no request payloads; tool calls are matched to turns by feed
   order and state-revision order.
 - One fixed scenario; no benchmark, no scoring, no real LLM.
+
+## E0.1 — P&ID-style process telemetry overlay
+
+```text
+[SVG presentation geometry]
+       | canonical data-process-node-id / data-process-edge-id
+       v
+[P0 ProcessGraphView: semantic/topology truth]
+       | binding.runtime_variable_id + binding.unit
+       v
+[P0 TelemetryView.current: dynamic truth] -> [detail card / selected-signal readout]
+       | exact Agent-visible history/rollout artifact values
+       v
+[existing section C chart] <-> [selection / exact binding highlight]
+```
+
+The visible label is **TEP process schematic — P&ID-style, not authoritative P&ID
+geometry**. This is a P&ID-style schematic, not an authoritative engineering P&ID.
+`examples/assets/e0/tep_process_schematic.svg` is original curated geometry, with
+simplified vessels, mixer, condenser, compressor, feed/outlet shapes and utilities.
+It contains no bindings, units, telemetry or hidden cause labels. Line crossings
+do not add junctions. No external figure was copied or scraped.
+
+SVG = presentation geometry; ProcessGraph = semantic/topology truth;
+P0 telemetry = dynamic truth. E0.1 owns coordinates, icons and selection only.
+The asset covers all 17 nodes and 18 edges of the pinned human-verified 0.2.0 graph.
+Every interactive group carries exactly one canonical semantic ID. Report rendering
+rejects unknown/duplicate IDs, executable elements and external references before
+publication, then embeds the SVG inline. No sibling file, server or network is needed.
+
+Names, kinds, tags, neighborhoods and incident streams come from `ProcessGraphView`.
+The derived `process_overlay` display payload contains those exact entity records,
+binding-derived signal indexes and values copied from `TelemetryView.current`.
+It is screened with the complete AGENT report. It is not a separate engineering
+graph or manually maintained signal map. Bold labels indicate current telemetry
+availability; purple highlights exact selected bindings; blue outlines selection.
+No color asserts health, warning or fault state.
+
+Click/focus equipment or a stream to inspect bindings. Only signals already present
+in section C's artifact-backed series get `[plot]` buttons. These set the existing
+selector and call the existing chart renderer. Current readouts are explicitly
+reference-world values at the P0 projection timestamp, not counterfactual current
+values. Units are binding metadata. Unobserved bindings say
+`telemetry not present in this E0 projection`.
+
+The current demo shows `XMEAS(9)` (node `reactor`) and `XMEAS(21)` (edge
+`reactor_cooling_water_out`). Both are temperature measurements, so **no edge is
+animated**. Direction arrows represent graph topology only. The optional dash rule
+requires an edge binding with `XMEAS`, `MEASURES`, `quantity == flow`, and a positive
+current value available in the P0 projection. An actuator position, temperature,
+missing, zero or negative flow does not activate it. Dash speed is constant and does
+not encode flow rate. `prefers-reduced-motion` disables motion while retaining the
+static arrow and binding details. This PR does not add flow telemetry to the demo.
+
+All A–G sections and the separate developer setup block remain. The FakeProvider
+sequence, RunManager/runtime/gates/verification/ingestion path, production contracts
+and dependency pins are unchanged. No direct simulator read was added for UI values.
+
+Future replacement path (not implemented here):
+
+```text
+[current curated SVG geometry]
+       | replace presentation asset
+       v
+[future DEXPI / authoritative P&ID geometry]
+       | same canonical semantic ID binding concept
+       v
+[same P0 ProcessGraphView + TelemetryView]
+```
+
+No DEXPI parser, engineering geometry claim or production frontend is introduced.
+The main limitation is schematic spacing and routing: geometry is curated for this
+pinned graph, not scaled equipment, actual pipe routing or a live process monitor.
+SVG identity validation, binding-change regression tests, current-projection tests,
+animation eligibility, leakage, embedded output and inline Node syntax checks cover
+the boundary. `SPEC_CONFLICT: none`.

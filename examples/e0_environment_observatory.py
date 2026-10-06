@@ -30,6 +30,7 @@ import subprocess
 import sys
 from typing import Any
 import webbrowser
+import xml.etree.ElementTree as ET
 
 from industrial_agent_runtime import (Action, Budget, FakeProvider, FinishProposal,
                                       InformationRef, ModelTurn, ToolCallRequest,
@@ -62,7 +63,8 @@ COMPARISON_METRICS = ("MEAN_ABSOLUTE_ERROR", "ROOT_MEAN_SQUARE_ERROR", "FINAL_ER
 # sequential handle after the harness baseline; ``lineage_findings`` checks it after the
 # run against the Agent-visible capability/fork/rollout observations and BranchTreeView.
 EXPECTED_BRANCH = "branch-0002"
-SCHEMATIC_LABEL = "Schematic topology — not P&ID geometry"
+SCHEMATIC_LABEL = "TEP process schematic — P&ID-style, not authoritative P&ID geometry"
+SCHEMATIC_ASSET = ROOT / "examples" / "assets" / "e0" / "tep_process_schematic.svg"
 
 # -- trusted developer-demo setup: never Agent-visible ----------------------------------
 DEMO_PRE_INCIDENT_HOURS = 0.1
@@ -408,6 +410,85 @@ def _topology(graph: Mapping[str, Any]) -> dict[str, Any]:
             "neighborhoods": neighborhoods}
 
 
+def validate_schematic(svg: str, graph: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Fail closed on unknown/duplicate identities and nonlocal or executable SVG."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError as exc:
+        raise ValueError("invalid schematic SVG XML") from exc
+    if root.tag != "{http://www.w3.org/2000/svg}svg":
+        raise ValueError("schematic root must be an SVG element")
+    allowed = {"svg", "g", "path", "rect", "circle", "ellipse", "text", "title",
+               "defs", "marker"}
+    declared: dict[str, list[str]] = {"nodes": [], "edges": []}
+    known = {"nodes": {n["node_id"] for n in graph["nodes"]},
+             "edges": {e["edge_id"] for e in graph["edges"]}}
+    dom_ids: set[str] = set()
+    for element in root.iter():
+        if element.tag.removeprefix("{http://www.w3.org/2000/svg}") not in allowed:
+            raise ValueError("unsupported schematic SVG element")
+        if all(key in element.attrib for key in ("data-process-node-id", "data-process-edge-id")):
+            raise ValueError("schematic element must have only one semantic identity")
+        for key, value in element.attrib.items():
+            if key.lower().startswith("on") or "href" in key or "url(" in value.lower():
+                raise ValueError("schematic must contain only local presentation geometry")
+        if "id" in element.attrib:
+            dom_id = element.attrib["id"]
+            if dom_id in dom_ids:
+                raise ValueError("duplicate schematic DOM id: " + dom_id)
+            dom_ids.add(dom_id)
+        for category, attribute in (("nodes", "data-process-node-id"),
+                                    ("edges", "data-process-edge-id")):
+            if attribute not in element.attrib:
+                continue
+            identity = element.attrib[attribute]
+            if identity not in known[category] or identity in declared[category]:
+                raise ValueError("unknown or duplicate schematic semantic id: " + identity)
+            declared[category].append(identity)
+    if leakage_findings(svg):
+        raise ValueError("schematic failed the AGENT leakage screen")
+    return {key: sorted(value) for key, value in declared.items()}
+
+
+def process_overlay(graph: Mapping[str, Any], telemetry: Mapping[str, Any],
+                    plotted: Sequence[str]) -> dict[str, Any]:
+    """Derived display data only: graph bindings + current P0 projection, never world reads.
+
+    Animation eligibility requires an observed, positive XMEAS MEASURES flow binding.
+    Fixed dash speed signifies availability/direction only, never physical flow rate.
+    """
+    current = telemetry["current"]
+    values = {**current["measurements"], **current["manipulated_variables"]}
+    entities = {"nodes": {}, "edges": {}}
+    signals: dict[str, dict[str, list[str]]] = {}
+    animated: dict[str, list[str]] = {}
+    for category, identity_key in (("nodes", "node_id"), ("edges", "edge_id")):
+        for entity in graph[category]:
+            identity = entity[identity_key]
+            rows = []
+            for binding in entity["bindings"]:
+                variable = binding["runtime_variable_id"]
+                targets = signals.setdefault(variable, {"nodes": [], "edges": []})
+                if identity not in targets[category]:
+                    targets[category].append(identity)
+                present = variable in values
+                rows.append({"binding": binding, "plottable": variable in plotted,
+                             "telemetry_present": present,
+                             "current_value": values.get(variable),
+                             "simulation_time_hours": current["simulation_time_hours"]
+                             if present else None})
+                if (category == "edges" and present and values[variable] > 0
+                        and binding["runtime_variable_kind"] == "XMEAS"
+                        and binding["relation"] == "MEASURES"
+                        and binding["quantity"] == "flow"):
+                    animated.setdefault(identity, []).append(variable)
+            entities[category][identity] = {"entity": entity, "signals": rows}
+    return {"entities": entities, "signal_entities": signals, "animated_edges": animated,
+            "telemetry_source": "P0 TelemetryView.current (reference world)",
+            "animation_note": "Fixed-speed directional dash: observed positive flow measurement; "
+                              "speed does not encode physical flow rate."}
+
+
 def build_agent_report(queries: RunQueries) -> dict[str, Any]:
     """The complete AGENT-derived report payload; fails closed on any leakage finding."""
     if queries.scope != ProjectionScope.AGENT:
@@ -467,6 +548,7 @@ def build_agent_report(queries: RunQueries) -> dict[str, Any]:
         "baseline_snapshots": (by_tool.get("get_capability_summary", {}).get("summary")
                                or {}).get("baseline_snapshots", []),
         "topology": _topology(views["process_graph"]),
+        "process_overlay": process_overlay(views["process_graph"], views["telemetry"], VARIABLES),
         "views": views, "artifact_contents": contents}
     findings = leakage_findings(payload)
     if findings:
@@ -481,7 +563,7 @@ def _script_json(value: Any) -> str:
     return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
-_PLACEHOLDERS = re.compile(r"__(AGENT|DEVELOPER)_JSON__")
+_PLACEHOLDERS = re.compile(r"__(AGENT_JSON|DEVELOPER_JSON|SCHEMATIC_SVG)__")
 
 
 def render_html(agent_payload: Mapping[str, Any], developer: Mapping[str, Any]) -> str:
@@ -490,7 +572,12 @@ def render_html(agent_payload: Mapping[str, Any], developer: Mapping[str, Any]) 
     One substitution pass over the template only (inserted text is never rescanned), so
     run data that contains a placeholder token cannot pull one block into the other.
     """
-    blocks = {"AGENT": _script_json(agent_payload), "DEVELOPER": _script_json(developer)}
+    svg = SCHEMATIC_ASSET.read_text(encoding="utf-8")
+    validate_schematic(svg, agent_payload["views"]["process_graph"])
+    if leakage_findings(agent_payload):
+        raise ValueError("AGENT report payload failed the leakage screen")
+    blocks = {"AGENT_JSON": _script_json(agent_payload),
+              "DEVELOPER_JSON": _script_json(developer), "SCHEMATIC_SVG": svg}
     return _PLACEHOLDERS.sub(lambda match: blocks[match.group(1)], _PAGE)
 
 
@@ -646,17 +733,35 @@ border-left:2px solid var(--line);margin-left:8px}
 .src-runtime_trace{background:#2f2846;color:#ddd3f6}.src-lab_run_log{background:#1f3a2a;color:#cdebd8}}
 #tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);
 border-radius:6px;padding:6px 8px;font-size:12px;display:none;box-shadow:0 2px 8px #0003}
-.node rect{fill:var(--node);stroke:var(--muted)}.node.sel rect{stroke:var(--ref);stroke-width:2.5}
-.node.hl rect{fill:var(--hl)}.node{cursor:pointer}
-.edge{stroke:var(--muted);fill:none}.edge.util{stroke-dasharray:4 3}
+#graph{min-width:850px;display:block}
+#graph .equipment{fill:var(--node);stroke:var(--muted);stroke-width:1.8}
+#graph .symbol{fill:none;stroke:var(--muted);stroke-width:1.4;pointer-events:none}
+#graph .pipe{stroke:var(--muted);fill:none;stroke-width:2.5;pointer-events:stroke}
+#graph .utility .pipe{stroke-dasharray:6 4}
+#graph [data-process-node-id],#graph [data-process-edge-id]{cursor:pointer;outline:none}
+#graph [data-process-node-id] text{text-anchor:middle;font-size:11px}
+#graph [data-process-edge-id] text{font-size:10px;fill:var(--muted)}
+#graph text{paint-order:stroke;stroke:var(--panel);stroke-width:3;stroke-linejoin:round}
+#graph .hl .equipment{fill:var(--hl);stroke:var(--mark);stroke-width:3}
+#graph .hl .pipe{stroke:var(--mark);stroke-width:4}
+#graph .sel .equipment,#graph .sel .pipe,#graph g:focus .equipment,#graph g:focus .pipe{
+stroke:var(--ref);stroke-width:4}
+#graph .has-telemetry text{font-weight:700}
+#graph .zone-label{fill:var(--muted);font-size:11px;letter-spacing:1px}
+#graph .animated .pipe{stroke-dasharray:8 6;animation:process-dash 2s linear infinite}
+@keyframes process-dash{to{stroke-dashoffset:-28}}
+@media(prefers-reduced-motion:reduce){#graph .animated .pipe{animation:none}}
+button.plot{font:inherit;color:var(--ref);background:var(--panel);border:1px solid var(--line);
+border-radius:4px;cursor:pointer;padding:2px 6px}
+.process-scroll{overflow-x:auto}
 </style>
 </head>
 <body>
 <main>
 <h1>E0 — TEP Environment Observatory</h1>
 <p class="sub">Developer/research view of one real P0 run. Not a production UI, not a
-benchmark, and not a source of truth: everything outside the red developer block is
-copied from AGENT-scoped P0 projections of the run.</p>
+benchmark, and not a source of truth: process data outside the red developer block
+comes from AGENT-scoped P0 projections of the run. SVG geometry is presentation only.</p>
 
 <section id="a"><h2>A · Run / World summary</h2><div id="a-body"></div></section>
 
@@ -686,13 +791,15 @@ role="img" aria-label="time series chart"></svg><div id="tip"></div></div>
 <h3>C5 compare_trajectories (descriptive metrics, not scoring)</h3><div id="cmp"></div>
 </section>
 
-<section id="d"><h2>D · ProcessGraph</h2>
+<section id="d"><h2>D · Process telemetry overlay</h2>
 <p class="note"><b id="schem"></b>. <span id="graph-prov"></span></p>
-<svg id="graph" width="100%" role="img" aria-label="process topology"></svg>
-<p class="note">Highlighted: nodes with a binding (node or incident stream) for the
-selected chart variable. Dashed edges are utility streams. Edge direction is topology
-only; dynamic values exist only where a bound runtime variable exists.</p>
-<div id="node-detail"></div>
+<div class="process-scroll">__SCHEMATIC_SVG__</div>
+<p class="note">Purple / pale fill = exact selected signal binding; blue outline = selected
+entity; bold label = current telemetry available. Dashed connections = utility streams.
+Arrows show ProcessGraph direction. Colors do not indicate process health. Line crossings
+are not extra junctions. Click equipment or a stream (or focus and press Enter) for bindings.</p>
+<p class="note" id="overlay-status"></p>
+<div id="node-detail" aria-live="polite"></div>
 <details><summary>All nodes</summary><div id="node-table"></div></details>
 </section>
 
@@ -821,48 +928,83 @@ function drawChart(name){
  box.append(table(["variable","unit",...metrics],c.variables.map(v=>[v.variable,v.unit||"—",
   ...v.metrics.map(m=>fmt(m.value,6))])));})();
 
-// D — ProcessGraph schematic
-let graphNodes={};
-(function(){const g=V.process_graph,T=A.topology,svg=document.getElementById("graph");
- document.getElementById("schem").textContent=T.label;
+// D — presentation geometry resolves canonical IDs through the P0-derived overlay.
+const O=A.process_overlay, graphElements={nodes:{},edges:{}};
+function selectSignal(name){if(!Object.hasOwn(A.series,name))return;sel.value=name;drawChart(name);}
+function signalTable(rows){return table(["signal / plot","quantity / relation","current reference telemetry"],
+ rows.map(r=>{const b=r.binding,name=b.runtime_variable_id;
+ const label=r.plottable?el("button",{class:"plot",type:"button"},name+" [plot]"):code(name);
+ if(r.plottable)label.onclick=()=>selectSignal(name);
+ return[label,b.quantity+" · "+b.relation,r.telemetry_present?
+  fmt(r.current_value,6)+" "+b.unit+" @ "+fmt(r.simulation_time_hours)+" h":
+  "telemetry not present in this E0 projection"];}));}
+function showEntity(category,id){const record=O.entities[category][id],n=record.entity;
+ for(const[k,list]of Object.entries(graphElements))for(const[key,g]of Object.entries(list)){
+  const selected=k===category&&key===id;g.classList.toggle("sel",selected);g.setAttribute("aria-pressed",String(selected));}
+ const box=document.getElementById("node-detail");
+ box.replaceChildren(el("h3",{},n.name+" · "+n.kind+(n.tag?" · tag "+n.tag:"")),
+  el("p",{class:"note"},category.slice(0,-1)+" id: "+id+" · "+O.telemetry_source));
+ if(category==="nodes"){
+  const h=A.topology.neighborhoods[id];
+  box.append(table(["ProcessGraph neighborhood","canonical IDs"],[
+   ["upstream",h.upstream.join(", ")||"—"],["downstream",h.downstream.join(", ")||"—"],
+   ["inlets",h.inlets.join(", ")||"—"],["outlets",h.outlets.join(", ")||"—"]]));
+ }else box.append(table(["ProcessGraph stream","value"],[
+  ["source",n.source_node],["target",n.target_node],["stream number",n.stream_number??"—"]]));
+ for(const[kind,label]of[["XMEAS","Measurements"],["XMV","Actuators"]]){
+  const rows=record.signals.filter(r=>r.binding.runtime_variable_kind===kind);
+  box.append(el("h3",{},label),rows.length?signalTable(rows):el("p",{class:"note"},"No direct bindings."));}
+ if(category==="nodes"){
+  box.append(el("h3",{},"Incident stream bindings"));
+  for(const edge of V.process_graph.edges.filter(e=>e.source_node===id||e.target_node===id)){
+   const button=el("button",{class:"plot",type:"button"},edge.edge_id+" · "+edge.name);
+   button.onclick=()=>showEntity("edges",edge.edge_id);
+   box.append(el("p",{},button));const rows=O.entities.edges[edge.edge_id].signals;
+   box.append(rows.length?signalTable(rows):el("p",{class:"note"},"No direct bindings."));}}
+ box.append(el("details",{},el("summary",{},"ProcessGraph entity (raw P0 view)"),
+  el("pre",{},JSON.stringify(n,null,1))));}
+function highlightGraph(name){const targets=O.signal_entities[name]||{nodes:[],edges:[]};
+ for(const[category,list]of Object.entries(graphElements))for(const[id,g]of Object.entries(list))
+  g.classList.toggle("hl",targets[category].includes(id));
+ const row=[...Object.values(O.entities.nodes),...Object.values(O.entities.edges)]
+  .flatMap(r=>r.signals).find(r=>r.binding.runtime_variable_id===name);
+ document.getElementById("overlay-status").textContent="Selected signal: "+name+" · "+
+  (row&&row.telemetry_present?fmt(row.current_value,6)+" "+row.binding.unit+" (current reference @ "+
+   fmt(row.simulation_time_hours)+" h)":"telemetry not present in this E0 projection")+
+  " · Bound nodes: "+(targets.nodes.join(", ")||"none")+" · Bound streams: "+(targets.edges.join(", ")||"none")+
+  " · "+(Object.keys(O.animated_edges).length?O.animation_note:
+   "Static connections only: no available bound positive flow measurement.");}
+(function(){const g=V.process_graph,svg=document.getElementById("graph");
+ document.getElementById("schem").textContent=A.topology.label;
  document.getElementById("graph-prov").textContent=g.provenance.fixture_id+" "+g.provenance.fixture_version+
-  " · "+g.provenance.review_status+" · "+g.nodes.length+" nodes, "+g.edges.length+" edges · "+T.layout_note;
- const CW=150,RH=62,NW=128,NH=40,M=14;let maxC=0,maxR=0;
- for(const[c,r]of Object.values(T.layout)){maxC=Math.max(maxC,c);maxR=Math.max(maxR,r);}
- const TOP=46,Wd=M*2+(maxC+1)*CW,Ht=TOP+M+(maxR+1)*RH;svg.setAttribute("viewBox",`0 0 ${Wd} ${Ht}`);
- svg.style.maxWidth=Wd+"px";
- const pos=id=>{const[c,r]=T.layout[id];return[M+c*CW,TOP+r*RH];};
- const defs=sv("defs");const mk=sv("marker",{id:"arr",viewBox:"0 0 10 10",refX:9,refY:5,markerWidth:7,markerHeight:7,orient:"auto"});
- mk.append(sv("path",{d:"M0,0L10,5L0,10z",fill:"var(--muted)"}));defs.append(mk);svg.append(defs);
- for(const e of g.edges){const[a,b]=[pos(e.source_node),pos(e.target_node)];
-  const x1=a[0]+NW,y1=a[1]+NH/2,x2=b[0],y2=b[1]+NH/2;let d;
-  if(x2>x1)d=`M${x1},${y1}C${x1+40},${y1} ${x2-40},${y2} ${x2},${y2}`;
-  else{const top=Math.max(4,Math.min(a[1],b[1])-34);d=`M${a[0]+NW/2},${a[1]}C${a[0]+NW/2},${top} ${b[0]+NW/2},${top} ${b[0]+NW/2},${b[1]}`;}
-  const p=sv("path",{d,class:"edge"+(e.kind==="UTILITY_STREAM"?" util":""),"marker-end":"url(#arr)"});
-  p.append(sv("title",{},e.edge_id+": "+e.name+(e.stream_number?" (stream "+e.stream_number+")":"")+
-   (e.bindings.length?" · "+e.bindings.map(b=>b.runtime_variable_id).join(", "):"")));svg.append(p);}
- for(const n of g.nodes){const[x,y]=pos(n.node_id);const grp=sv("g",{class:"node",transform:`translate(${x},${y})`});
-  grp.append(sv("rect",{width:NW,height:NH,rx:6}));
-  grp.append(sv("text",{x:NW/2,y:16,"text-anchor":"middle","font-weight":"600"},n.name.length>22?n.name.slice(0,21)+"…":n.name));
-  grp.append(sv("text",{x:NW/2,y:31,"text-anchor":"middle",style:"fill:var(--muted)"},n.kind+(n.tag?" · "+n.tag:"")));
-  grp.append(sv("title",{},n.node_id));grp.onclick=()=>showNode(n.node_id);svg.append(grp);graphNodes[n.node_id]=grp;}
- const rows=g.nodes.map(n=>{const h=T.neighborhoods[n.node_id];
-  return[code(n.node_id),n.kind,n.name+(n.tag?" ("+n.tag+")":""),h.measurements.join(", ")||"—",
-   h.actuators.join(", ")||"—",h.upstream.join(", ")||"—",h.downstream.join(", ")||"—"];});
- document.getElementById("node-table").append(table(["node","kind","name / tag","measurements","actuators","upstream (edges)","downstream (edges)"],rows));
- showNode(T.layout.reactor?"reactor":g.nodes[0].node_id);})();
-function showNode(id){const n=V.process_graph.nodes.find(x=>x.node_id===id),h=A.topology.neighborhoods[id];
- for(const[k,g]of Object.entries(graphNodes))g.classList.toggle("sel",k===id);
- const chips=a=>a.length?el("span",{},...a.map(x=>el("span",{class:"chip"},x))):"—";
- document.getElementById("node-detail").replaceChildren(el("h3",{},n.name+" · "+n.kind+(n.tag?" · tag "+n.tag:"")),
-  table(["",""],[["node id",code(id)],["measurements bound to node",chips(h.measurements)],
-   ["actuators bound to node",chips(h.actuators)],["measurements on incident streams",chips(h.stream_measurements)],
-   ["actuators on incident streams",chips(h.stream_actuators)],
-   ["upstream (edge direction, incl. utility/recycle)",chips(h.upstream)],
-   ["downstream (edge direction, incl. utility/recycle)",chips(h.downstream)],["inlet streams",chips(h.inlets)],["outlet streams",chips(h.outlets)]]),
-  el("details",{},el("summary",{},"bindings (raw)"),el("pre",{},JSON.stringify(n.bindings,null,1))));}
-function highlightGraph(name){for(const[id,g]of Object.entries(graphNodes)){const h=A.topology.neighborhoods[id];
- g.classList.toggle("hl",[...h.measurements,...h.actuators,...h.stream_measurements,...h.stream_actuators].includes(name));}}
+  " · "+g.provenance.review_status+" · "+g.nodes.length+" nodes, "+g.edges.length+" edges";
+ for(const[category,attr]of[["nodes","data-process-node-id"],["edges","data-process-edge-id"]]){
+  for(const element of svg.querySelectorAll("["+attr+"]")){
+   const id=element.getAttribute(attr),record=O.entities[category][id],n=record.entity;
+   graphElements[category][id]=element;
+   element.setAttribute("tabindex","0");element.setAttribute("role","button");
+   element.setAttribute("aria-label",n.name+" ("+id+")");
+   element.append(sv("title",{},n.name+" · "+n.kind+" · "+id));
+   const text=element.querySelector("text"),label=category==="edges"&&n.stream_number!=null?
+    String(n.stream_number)+" · "+n.name:n.name;
+   const words=label.split(" "),lines=[],limit=category==="nodes"?23:21;
+   let line="";
+   for(const word of words){if(line&&(line+" "+word).length>limit){lines.push(line);line=word;}
+    else line=(line+" "+word).trim();}if(line)lines.push(line);
+   const x=text.getAttribute("x")||0;
+   lines.forEach((line,i)=>text.append(sv("tspan",{x,dy:i?12:-(lines.length-1)*6},line)));
+   if(category==="edges"){
+    element.querySelector(".pipe").setAttribute("marker-end","url(#process-arrow)");
+    element.classList.toggle("utility",n.kind==="UTILITY_STREAM");
+    element.classList.toggle("animated",Object.hasOwn(O.animated_edges,id));}
+   element.classList.toggle("has-telemetry",record.signals.some(r=>r.telemetry_present));
+   element.onclick=()=>showEntity(category,id);
+   element.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();showEntity(category,id);}};
+  }}
+ document.getElementById("node-table").append(table(["node","kind","name / tag"],
+  g.nodes.map(n=>[code(n.node_id),n.kind,n.name+(n.tag?" ("+n.tag+")":"")])));
+ const first=Object.keys(graphElements.nodes)[0];if(first)showEntity("nodes",first);
+})();
 
 // E — branch tree from BranchTreeView parent links
 (function(){const bt=V.branch_tree,box=document.getElementById("tree");
