@@ -61,8 +61,12 @@ trusted/EVALUATOR-only reads)
 - AGENT views pass the lab `leakage_findings` screen or raise `VisibilityViolation`.
   The AGENT manifest projection is an allowlist. The AGENT event feed omits failed
   prepare attempts and carries no payloads.
-- Live-world views (`telemetry`, `branch_tree`) raise `ViewUnavailable` while RUNNING.
-  v0 takes no world lock, and the execution owner mutates world/sandbox state.
+- Live-world views (`telemetry`, `branch_tree`) use the per-run `world_lock`. The
+  accepted execution owner holds it for the whole `Coordinator.run()`. Live-world
+  queries acquire it without blocking and raise `ViewUnavailable` while the run is
+  RUNNING. So the application never reads live world/sandbox state mid-mutation. The
+  lock only serializes access; world/sandbox ownership is unchanged, and the Playground
+  does not become a canonical world store.
 - `get_artifact` accepts only an exact `InformationRef` that the run issued and the
   caller's scope can see, and verifies its checksum. Strings, mappings and paths are
   refused alike.
@@ -74,8 +78,9 @@ No existing behavior changed.
 
 ## Frozen P0 semantic decision
 
-**Application COMPLETED != task success.** Decided by the architecture owner and now
-normative in the spec (`RunOutcome`, terminal status semantics):
+**Application COMPLETED != task success.** Frozen by the P0 spec-owner review and
+normative in `docs/specs/playground-backend-v0.md` (`RunOutcome`, terminal status
+semantics), which is the authoritative source:
 
 - `COMPLETED`: the execution owner's `Coordinator.run()` returned a valid `RuntimeResult`
   and the terminal application outcome was constructed, whatever the runtime
