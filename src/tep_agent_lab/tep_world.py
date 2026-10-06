@@ -249,6 +249,10 @@ class SimulationSandbox:
         self._snapshots: dict[str, tuple[Snapshot, TEPEnvironment, str, str]] = {}
         # handle -> (environment, parent snapshot handle, lineage)
         self._branches: dict[str, tuple[TEPEnvironment, str, str]] = {}
+        # no longer usable handle -> (kind, parent/source handle, lineage, status);
+        # read-projection bookkeeping only
+        self._retired: dict[str, tuple[str, str, str, str]] = {}
+        self._closed = False
 
     def _snapshot_entry(self, handle: Any):
         if not isinstance(handle, str):
@@ -315,9 +319,46 @@ class SimulationSandbox:
         """
         entry = self._branches.pop(handle, None)
         if entry is not None:
+            self._retired[handle] = ("BRANCH", entry[1], entry[2], "RETIRED")
             for name in [key for key, value in self._snapshots.items() if value[2] == handle]:
-                del self._snapshots[name]
+                _, _, source, lineage = self._snapshots.pop(name)
+                self._retired[name] = ("SNAPSHOT", source, lineage, "RETIRED")
             try:
                 entry[0].close()
+            except Exception:
+                pass
+
+    def lineage_records(self) -> tuple[dict[str, Any], ...]:
+        """Opaque-handle lineage for read projections; no paths, run ids, or random state."""
+        released = "RELEASED" if self._closed else None
+        records = [{"handle": handle, "kind": "SNAPSHOT", "parent": REFERENCE,
+                    "lineage": BASELINE, "status": released or "DESIGNATED_BASELINE"}
+                   for handle in sorted(self.world.baselines())]
+        records += [{"handle": handle, "kind": "SNAPSHOT", "parent": source,
+                     "lineage": lineage, "status": "AVAILABLE"}
+                    for handle, (_, _, source, lineage) in tuple(self._snapshots.items())]
+        records += [{"handle": handle, "kind": "BRANCH", "parent": parent,
+                     "lineage": lineage, "status": "ACTIVE"}
+                    for handle, (_, parent, lineage) in tuple(self._branches.items())]
+        records += [{"handle": handle, "kind": kind, "parent": parent,
+                     "lineage": lineage, "status": status}
+                    for handle, (kind, parent, lineage, status) in tuple(self._retired.items())]
+        return tuple(sorted(records, key=lambda record: record["handle"]))
+
+    def close(self) -> None:
+        """Release every branch environment (idempotent); lineage stays readable.
+
+        Snapshots can no longer be forked once their environments are closed, so they
+        are reported as released too.
+        """
+        self._closed = True
+        while self._snapshots:
+            handle, (_, _, source, lineage) = self._snapshots.popitem()
+            self._retired[handle] = ("SNAPSHOT", source, lineage, "RELEASED")
+        while self._branches:
+            handle, (environment, parent, lineage) = self._branches.popitem()
+            self._retired[handle] = ("BRANCH", parent, lineage, "RELEASED")
+            try:
+                environment.close()
             except Exception:
                 pass
