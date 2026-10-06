@@ -22,7 +22,7 @@ Architecture decision: `docs/decisions/ADR-002-ui-application-boundary.md`.
 
 The static report remains supported.
 
-### E0.2A — Application View Service — next
+### E0.2A — Application View Service — complete
 
 Implement a transport-neutral Python application read boundary on top of public P0/application queries.
 
@@ -44,11 +44,15 @@ Requirements:
 
 If arbitrary signal history is impossible through the current owning contracts, stop with `SPEC_CONFLICT` and change the owning P0 contract explicitly rather than bypassing it.
 
-### E0.2B — Thin local transport
+### E0.2B — Thin local transport — complete
 
 After E0.2A contracts are stable, expose them through a narrow replaceable local transport.
 
-Transport may be HTTP or another local IPC/sidecar mechanism, but it must contain no industrial/domain logic.
+The versioned JSON dispatcher wraps an already-constructed `ApplicationViewService`
+and exposes only its four reads. No HTTP, Tauri, standalone process, or run
+attachment is introduced. E0.2C owns process lifecycle and IPC framing.
+
+Contract and error codes: `docs/e0-2b-application-transport.md`.
 
 ### E0.2C — Tauri desktop client
 
