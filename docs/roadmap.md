@@ -4,6 +4,89 @@ Phase 0 Design Freeze is complete. The lab may now implement the first RCA infor
 
 Canonical specs live in `docs/specs/`.
 
+
+
+## Observatory / UI decoupling track
+
+This track is intentionally separate from the scientific RCA capability ladder. It turns the current developer/research observatory into a replaceable client architecture without rewriting the industrial backend.
+
+Architecture decision: `docs/decisions/ADR-002-ui-application-boundary.md`.
+
+### E0 / E0.1 — Static observatory and process overlay — complete
+
+- self-contained reproducible HTML report;
+- P&ID-style presentation geometry;
+- canonical ProcessGraph binding;
+- P0 telemetry/artifact projection;
+- file:// developer/research inspection.
+
+The static report remains supported.
+
+### E0.2A — Application View Service — next
+
+Implement a transport-neutral Python application read boundary on top of public P0/application queries.
+
+Initial read models:
+
+- Run;
+- Entity;
+- Signal;
+- bounded SignalHistory.
+
+Requirements:
+
+- no direct simulator/private-session access;
+- no duplicate ProcessGraph/signal registry;
+- no raw artifact paths;
+- bounded result sizes;
+- Agent visibility preserved;
+- static E0/E0.1 remains green.
+
+If arbitrary signal history is impossible through the current owning contracts, stop with `SPEC_CONFLICT` and change the owning P0 contract explicitly rather than bypassing it.
+
+### E0.2B — Thin local transport
+
+After E0.2A contracts are stable, expose them through a narrow replaceable local transport.
+
+Transport may be HTTP or another local IPC/sidecar mechanism, but it must contain no industrial/domain logic.
+
+### E0.2C — Tauri desktop client
+
+Target UI stack:
+
+- Tauri v2;
+- TypeScript;
+- Vite;
+- React for component/state management.
+
+Tauri Rust is initially limited to:
+
+- desktop lifecycle;
+- permissions/OS integration;
+- Python service lifecycle;
+- narrow IPC/process supervision;
+- packaging.
+
+Do not port P0, ProcessGraph, Agent runtime, simulator integration, or Context Layer into Rust.
+
+### E1 — Interactive Industrial Observatory
+
+Build richer interaction on top of the application boundary:
+
+- process/P&ID view;
+- on-demand signal explorer;
+- bounded historical telemetry;
+- run and Agent event views;
+- branch/counterfactual inspection.
+
+The UI must request information on demand rather than preload a giant industrial-world payload.
+
+### Later
+
+Context Layer views can join the same application boundary for SOP/manual/incident/asset context.
+
+Go is not part of this track. A distributed Go control plane is a future independent decision if multi-tenant deployment/fleet orchestration creates a concrete need.
+
 ## Phase 0 — Reproducible lab / benchmark shell
 
 Specs: `evaluation-v0.md`, `benchmark-design-v0.md`
