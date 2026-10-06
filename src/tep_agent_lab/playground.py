@@ -40,9 +40,10 @@ from tep_sim import (CAPABILITY_VERSION, SAFETY_LIMITS_VERSION, SCENARIO_MAPPING
                      build_process_graph)
 from tep_sim.snapshot import ENVIRONMENT_VERSION
 
-from .canonical_context import (CanonicalContextRegistry, ContextSourceRef,
+from .canonical_context import (CANONICAL_JSON_SHA256, RESERVED_NAMES,
+                                CanonicalContextRegistry, ContextSourceRef,
                                 PackageSourceMaterializer, ProjectionScope,
-                                SourceMaterializer, inventory_checksum)
+                                SourceMaterializer, content_checksum, inventory_checksum)
 from .investigation import (RcaResultIngestor, RcaState, RcaStateStore,
                             readiness_deficiencies)
 from .persistence import RunLog, canonical_json
@@ -74,8 +75,6 @@ EVALUATOR_BINDINGS_CONTENT_CHECKSUM = (
     "d0cc9f81f043d8aea4b413efc1b5416ff79e540e79fbc976e425e09bfc4dc6ae")
 
 _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,63}")
-_RESERVED_NAMES = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)),
-                             *(f"lpt{i}" for i in range(10))})
 _SESSION_DIR = re.compile(r"prepare-[0-9]{4,}")
 _GIT_REVISION = re.compile(r"[0-9a-f]{40}")
 # Keys are compared after lowercasing and dropping separators, so authToken,
@@ -174,6 +173,12 @@ class SourceRevisions:
         return {"tep_sim_git_revision": self.tep_sim,
                 "industrial_agent_runtime_git_revision": self.industrial_agent_runtime,
                 "tep_agent_lab_git_revision": self.tep_agent_lab}
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, str]) -> "SourceRevisions":
+        return cls(record["tep_sim_git_revision"],
+                   record["industrial_agent_runtime_git_revision"],
+                   record["tep_agent_lab_git_revision"])
 
 
 def load_dependency_pins(path: str | Path) -> dict[str, str]:
@@ -466,6 +471,9 @@ class _Run:
     session: RunSession | None = None
     outcome: RunOutcome | None = None
     owner: str | None = None
+    # Held by the execution owner for the whole Coordinator run; live-world views
+    # take it without blocking, so they never read world/sandbox state mid-run.
+    world_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @dataclass(frozen=True)
@@ -526,7 +534,7 @@ class RunManager:
     # -- identity and lookup ------------------------------------------------------------
     def _checked_id(self, run_id: Any) -> str:
         if (not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id)
-                or run_id in _RESERVED_NAMES):
+                or run_id in RESERVED_NAMES):
             raise ValueError("run_id must match [a-z0-9][a-z0-9-]{2,63} and not be reserved")
         return run_id
 
@@ -534,7 +542,9 @@ class RunManager:
         """Caller holds the lock. Runs from another process are loaded read-only."""
         run_id = self._checked_id(run_id)
         run = self._runs.get(run_id)
-        if run is None:
+        if run is None or run.request_object is None:
+            # Not owned by this process: re-read the durable lifecycle every time, so
+            # another process's progress is observed rather than a stale snapshot.
             run = self._load(run_id)
             self._runs[run_id] = run
         return run
@@ -646,6 +656,32 @@ class RunManager:
             with self._lock:
                 run.preparing = False
 
+    @staticmethod
+    def _reject_hidden_aliases(registry: CanonicalContextRegistry) -> None:
+        """No AGENT source may name or contain the content of a hidden source.
+
+        Content is compared by exact bytes and, where it parses, canonical JSON, so a
+        different path or checksum method cannot smuggle hidden truth into AGENT scope.
+        """
+        def fingerprints(ref: ContextSourceRef) -> set[Any]:
+            data = registry.resolve(ref.source_id, ProjectionScope.EVALUATOR).content
+            found: set[Any] = {(ref.repository, ref.path_or_ref),
+                               hashlib.sha256(data).hexdigest()}
+            try:
+                found.add(content_checksum(data, CANONICAL_JSON_SHA256))
+            except ValueError:
+                pass
+            return found
+
+        everything = registry.inventory(ProjectionScope.EVALUATOR)
+        hidden: set[Any] = set()
+        for ref in everything:
+            if ref.visibility != Visibility.AGENT:
+                hidden |= fingerprints(ref)
+        for ref in everything:
+            if ref.visibility == Visibility.AGENT and fingerprints(ref) & hidden:
+                raise PrepareError("an AGENT source aliases hidden source content")
+
     def _attest_dependencies(self) -> None:
         expected = {"tep-sim": self.revisions.tep_sim,
                     "industrial-agent-runtime": self.revisions.industrial_agent_runtime}
@@ -668,16 +704,7 @@ class RunManager:
         registry = CanonicalContextRegistry(self.revisions.by_repository(), self.materializers)
         for source in sources:
             registry.register(source)
-        hidden_content = {(ref.repository, ref.path_or_ref) for ref in
-                          registry.inventory(ProjectionScope.EVALUATOR)
-                          if ref.visibility != Visibility.AGENT}
-        hidden_checksums = {ref.content_checksum for ref in
-                            registry.inventory(ProjectionScope.EVALUATOR)
-                            if ref.visibility != Visibility.AGENT}
-        for ref in registry.inventory(ProjectionScope.AGENT):
-            if ((ref.repository, ref.path_or_ref) in hidden_content
-                    or ref.content_checksum in hidden_checksums):
-                raise PrepareError("an AGENT source aliases hidden source content")
+        self._reject_hidden_aliases(registry)
         graph_sources = [source for source in registry.inventory(ProjectionScope.AGENT)
                          if source.kind == "PROCESS_GRAPH"]
         if len(graph_sources) != 1:
@@ -712,14 +739,14 @@ class RunManager:
             if case_setup is not None:
                 case_setup(world)  # trusted harness setup; never an Agent tool
             session = self._session(run, request, directory, world, provider, registry)
-        except Exception:
+        except BaseException:
             if environment is not None:
                 environment.close()
             raise
         try:
             return session, self._manifest(run, attempt, request, session, registry,
                                            graph_source, hidden, case_setup is not None)
-        except Exception:
+        except BaseException:
             session.close()
             raise
 
@@ -830,7 +857,12 @@ class RunManager:
                                      "v0 sessions are not resumable")
             owner = f"execution-owner:{run.run_id}"
             started_at = self.clock()
-            run.lifecycle.append("RUN_STARTED", {"at": started_at, "owner": owner})
+            run.world_lock.acquire()  # waits only for an in-flight live-world read
+            try:
+                run.lifecycle.append("RUN_STARTED", {"at": started_at, "owner": owner})
+            except BaseException:
+                run.world_lock.release()
+                raise
             run.status, run.owner = RunStatus.RUNNING, owner
             session = run.session
         request = run.request_object
@@ -848,7 +880,10 @@ class RunManager:
         except BaseException as exc:  # the hosted execution did not reach a RuntimeResult
             failure = exc
         finally:
-            session.close()
+            try:
+                session.close()
+            finally:
+                run.world_lock.release()
         try:
             outcome = self._outcome(run, owner, started_at, result, failure)
         except Exception as exc:  # e.g. a non-JSON runtime result: still terminal FAILED

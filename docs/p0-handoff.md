@@ -109,7 +109,7 @@ abstraction, F-11, pause/resume/cancel, distributed execution.
 py -3.13 scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
 ```
 
-155 tests (117 existing regressions + 38 P0) pass locally on Python 3.13 against the exact
+158 tests (117 existing regressions + 41 P0) pass locally on Python 3.13 against the exact
 pins. CI runs the same on 3.11 and 3.13. The P0 acceptance coverage in
 `tests/test_playground.py` includes:
 
@@ -143,7 +143,7 @@ pins. CI runs the same on 3.11 and 3.13. The P0 acceptance coverage in
 
 ## Review
 
-code-reviewer, python-reviewer and security-reviewer passes ran before the PR. Fixed:
+code-reviewer, python-reviewer and security-reviewer passes, then the built-in `code-review` (high), ran before the PR. Fixed:
 
 - event-feed order (`RUN_STARTED` before trace);
 - durable-first outcome and `BaseException` handling in `start`/`prepare`;
@@ -154,7 +154,16 @@ code-reviewer, python-reviewer and security-reviewer passes ran before the PR. F
 - canonical paths, reserved names, and AGENT-to-hidden source aliasing;
 - `create` id burn, and write-once publication via hard link;
 - test robustness: a deterministic RUNNING contender, timeouts, class cleanup,
-  Windows path assertions, and no hard git dependency.
+  Windows path assertions, and no hard git dependency;
+- read-only, torn-line-tolerant RcaState/lab-log reads in views;
+- live-world views held under a per-run world lock that the execution owner holds
+  for the whole run;
+- AGENT lifecycle feed renumbered, so no sequence gap reveals a failed attempt;
+- the alias check compares bytes and canonical JSON across paths and checksum
+  methods;
+- retired/released snapshot lineage stays connected;
+- runs not owned by this process are re-read on every access;
+- telemetry `current` honors the variable filter.
 
 Accepted as follow-ups:
 

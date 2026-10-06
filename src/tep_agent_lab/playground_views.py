@@ -13,7 +13,7 @@ model ``ContextProjection`` or tool result.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import hashlib
 import json
 import re
@@ -27,12 +27,12 @@ from tep_sim.evaluator_bindings import build_evaluator_disturbance_bindings
 
 from .canonical_context import (CanonicalContextRegistry, ProjectionScope,
                                 inventory_checksum, visible_in)
-from .persistence import RunLog
 from .tep_world import ARTIFACT_OWNER, leakage_findings
 
 VIEW_VERSION = "tep-agent-lab.playground-views/v0"
 MAX_TELEMETRY_RECORDS = 1000
 _LAB_ARTIFACT_ID = re.compile(r"tep-artifact-[0-9]{6,}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _STATE_EVENTS = {"RCA_STATE_INITIALIZED", "RCA_STATE_UPDATE_ACCEPTED",
                  "RCA_STATUS_TRANSITION_ACCEPTED"}
 
@@ -78,15 +78,23 @@ class RunQueries:
             raise ViewUnavailable("run has no prepared session")
         return self._run.session_dir
 
-    def _live(self):
-        session = self._run.session
-        if self._run.status.value == "RUNNING":
-            # The single execution owner mutates world/sandbox state; v0 takes no
-            # world lock, so live-world views are offered only outside RUNNING.
+    def _with_live(self, read: Callable[[Any], Any]) -> Any:
+        """Run ``read`` on the in-process session while holding the run's world lock.
+
+        The execution owner holds that lock for the whole Coordinator run, so a
+        live-world view never observes world/sandbox state mid-mutation.
+        """
+        run = self._run
+        if not run.world_lock.acquire(blocking=False):
             raise ViewUnavailable("live world views are unavailable while RUNNING")
-        if session is None:
-            raise ViewUnavailable("no in-process session; world views are ephemeral in v0")
-        return session
+        try:
+            if run.status.value == "RUNNING":
+                raise ViewUnavailable("live world views are unavailable while RUNNING")
+            if run.session is None:
+                raise ViewUnavailable("no in-process session; world views are ephemeral in v0")
+            return read(run.session)
+        finally:
+            run.world_lock.release()
 
     def registry(self) -> CanonicalContextRegistry:
         """The live frozen registry, or one rebuilt and re-attested from the manifest."""
@@ -94,37 +102,46 @@ class RunQueries:
         if session is not None:
             return session.registry
         if self._registry is None:
+            from .playground import SourceRevisions
             manifest = self._manifest()
-            revisions = {}
-            for repository, key in (("shaun0457/tep-sim", "tep_sim_git_revision"),
-                                    ("shaun0457/industrial-agent-runtime",
-                                     "industrial_agent_runtime_git_revision"),
-                                    ("shaun0457/tep-agent-lab", "tep_agent_lab_git_revision")):
-                revisions[repository] = manifest.source_revisions[key]
-            registry = CanonicalContextRegistry(revisions, self._manager.materializers)
+            revisions = SourceRevisions.from_record(manifest.source_revisions)
+            registry = CanonicalContextRegistry(revisions.by_repository(),
+                                                self._manager.materializers)
             for source in manifest.canonical_context_sources:
                 registry.register(source)  # a source changed after the run fails here
             registry.freeze()
             self._registry = registry
         return self._registry
 
-    def _trace_events(self) -> list[dict[str, Any]]:
-        path = self._session_dir() / "trace" / "events.jsonl"
+    @staticmethod
+    def _complete_lines(path) -> list[dict[str, Any]]:
+        """Read-only JSONL read that ignores a final line still being written."""
         if not path.exists():
             return []
         raw = path.read_bytes()
-        complete = raw[:raw.rfind(b"\n") + 1]  # ignore a final line still being written
+        complete = raw[:raw.rfind(b"\n") + 1]
         return [json.loads(line) for line in complete.decode("utf-8").splitlines()]
 
-    def _state_log(self) -> RunLog:
-        return RunLog(self._session_dir() / "state")
+    def _trace_events(self) -> list[dict[str, Any]]:
+        return self._complete_lines(self._session_dir() / "trace" / "events.jsonl")
+
+    def _lab_events(self) -> list[dict[str, Any]]:
+        if self._run.session_dir is None:
+            return []
+        return self._complete_lines(self._session_dir() / "state" / "events.jsonl")
 
     def _state_snapshot(self) -> dict[str, Any]:
-        log = self._state_log()
-        accepted = [event for event in log.events() if event["type"] in _STATE_EVENTS]
+        """Latest accepted RcaState snapshot, checksum-verified, without opening a writer."""
+        accepted = [event for event in self._lab_events() if event["type"] in _STATE_EVENTS]
         if not accepted:
             raise ViewUnavailable("investigation state has not been initialized")
-        return log.read_artifact(accepted[-1]["payload"]["snapshot_checksum"])
+        digest = accepted[-1]["payload"]["snapshot_checksum"]
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ViewUnavailable("invalid state snapshot reference")
+        data = (self._session_dir() / "state" / "artifacts" / f"{digest}.json").read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ViewUnavailable("state snapshot checksum mismatch")
+        return json.loads(data)
 
     # -- RunSummaryView -----------------------------------------------------------------
     def run_summary(self) -> Any:
@@ -240,25 +257,33 @@ class RunQueries:
         scope = self.scope
         if type(max_records) is not int or not 1 <= max_records <= MAX_TELEMETRY_RECORDS:
             raise ValueError(f"max_records must be in [1, {MAX_TELEMETRY_RECORDS}]")
-        if variables is not None and (isinstance(variables, str) or any(
-                not isinstance(name, str) for name in variables)):
-            raise ValueError("variables must be a sequence of variable ids")
-        history = self._live().world.history()
-        selected = history[-max_records:]
+        wanted = None
         if variables is not None:
-            wanted = set(variables)
-            selected = tuple({**record,
-                              "measurements": {k: v for k, v in record["measurements"].items()
-                                               if k in wanted},
-                              "manipulated_variables": {
-                                  k: v for k, v in record["manipulated_variables"].items()
-                                  if k in wanted}} for record in selected)
+            if isinstance(variables, str):
+                raise ValueError("variables must be a sequence of variable ids")
+            wanted = frozenset(variables)  # materialized once, so generators work
+            if any(not isinstance(name, str) for name in wanted):
+                raise ValueError("variables must be a sequence of variable ids")
+
+        def pick(record: Mapping[str, Any]) -> dict[str, Any]:
+            if wanted is None:
+                return dict(record)
+            return {**record,
+                    "measurements": {k: v for k, v in record["measurements"].items()
+                                     if k in wanted},
+                    "manipulated_variables": {k: v for k, v in
+                                              record["manipulated_variables"].items()
+                                              if k in wanted}}
+
+        history = self._with_live(lambda session: session.world.history())
+        selected = tuple(pick(record) for record in history[-max_records:])
         dense = [to_jsonable(ref) for ref in self._issued_lab_artifacts()
                  if ref.kind in ("HistoryWindowArtifact", "RolloutTelemetryArtifact")]
         return self._view("TelemetryView", scope, {
             "source": "ReferenceWorld sanitized history",
             "total_records": len(history), "returned_records": len(selected),
-            "current": history[-1], "records": list(selected), "artifact_refs": dense})
+            "current": pick(history[-1]), "records": list(selected),
+            "artifact_refs": dense})
 
     # -- InvestigationView --------------------------------------------------------------
     def investigation(self) -> Any:
@@ -284,11 +309,12 @@ class RunQueries:
 
     # -- BranchTreeView -----------------------------------------------------------------
     def branch_tree(self) -> Any:
-        scope, session = self.scope, self._live()
-        records = session.surface.surface.sandbox.lineage_records()
+        scope = self.scope
+        closed, records = self._with_live(lambda session: (
+            session.closed, session.surface.surface.sandbox.lineage_records()))
         return self._view("BranchTreeView", scope, {
             "root": {"handle": "reference", "kind": "REFERENCE",
-                     "status": "RELEASED" if session.closed else "LIVE"},
+                     "status": "RELEASED" if closed else "LIVE"},
             "nodes": list(records)})
 
     # -- BudgetView ---------------------------------------------------------------------
@@ -318,18 +344,21 @@ class RunQueries:
         The feed is a view; it is never engineering evidence.
         """
         scope = self.scope
-        lifecycle = [self._event("application_lifecycle", event["sequence"],
-                                 f"lifecycle-{event['sequence']:06d}", event["type"], None,
+        records = list(self._run.lifecycle.events())
+        if scope == ProjectionScope.AGENT:
+            # Failed setup attempts are not an AGENT signal: drop them and renumber, so
+            # neither the event nor a gap in the sequence reveals that one happened.
+            records = [event for event in records if event["type"] != "PREPARE_FAILED"]
+        lifecycle = [self._event("application_lifecycle", index,
+                                 f"lifecycle-{index:06d}", event["type"], None,
                                  event["payload"].get("at"), event["payload"], scope)
-                     for event in self._run.lifecycle.events()]
-        if scope == ProjectionScope.AGENT:  # failed setup attempts are not an AGENT signal
-            lifecycle = [item for item in lifecycle if item["type"] != "PREPARE_FAILED"]
+                     for index, event in enumerate(records)]
         after = [item for item in lifecycle if item["type"] in ("RUN_COMPLETED", "RUN_FAILED")]
         started = [item for item in lifecycle if item["type"] == "RUN_STARTED"]
         before = [item for item in lifecycle if item not in after and item not in started]
         lab, anchors = [], {}
-        if self._run.session_dir is not None and (self._session_dir() / "state").exists():
-            for event in self._state_log().events():
+        if self._run.session_dir is not None:
+            for event in self._lab_events():
                 item = self._event("lab_run_log", event["sequence"],
                                    f"rca-{event['sequence']:06d}", event["type"], None, None,
                                    event["payload"], scope)

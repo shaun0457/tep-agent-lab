@@ -39,7 +39,7 @@ _KIND = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 _SOURCE_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
-_RESERVED_SEGMENTS = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)),
+RESERVED_NAMES = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)),
                                 *(f"lpt{i}" for i in range(10))})
 
 
@@ -82,7 +82,7 @@ def checked_relative_path(path: Any) -> str:
     if (path.startswith("/") or not parts or path != "/".join(parts)
             or any(part in (".", "..") or part.endswith(".")
                    or not _PATH_SEGMENT.fullmatch(part)
-                   or part.split(".")[0].lower() in _RESERVED_SEGMENTS for part in parts)):
+                   or part.split(".")[0].lower() in RESERVED_NAMES for part in parts)):
         raise ValueError("path_or_ref must be a repository-relative POSIX path")
     return path
 

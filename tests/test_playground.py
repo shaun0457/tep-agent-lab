@@ -30,7 +30,7 @@ from tep_agent_lab.playground import (
     pinned_tep_sim_sources, secret_findings,
 )
 from tep_agent_lab.playground_views import UnknownArtifact, ViewUnavailable
-from tep_agent_lab.tep_world import leakage_findings
+from tep_agent_lab.tep_world import SimulationSandbox, leakage_findings
 from tep_agent_lab.tool_surface import simulation_quota
 from test_tool_surface import INJECTED, NOW, assert_blind
 
@@ -297,8 +297,11 @@ class LifecycleTests(PlaygroundCase):
         broken = replace(self.case_source, content_checksum="0" * 64)
         self.failed_prepare((*pinned_tep_sim_sources(REVISIONS.tep_sim), broken))
         self.assertFalse((self.root / "runs" / "run-1" / "prepare-0001").exists())
-        self.assertNotIn("PREPARE_FAILED",
-                         canonical_json(self.manager.queries("run-1").events()))
+        agent_feed = self.manager.queries("run-1").events()["events"]
+        self.assertNotIn("PREPARE_FAILED", canonical_json(agent_feed))
+        # no sequence gap reveals the hidden failed attempt
+        self.assertEqual(list(range(len(agent_feed))),
+                         [event["source_sequence"] for event in agent_feed])
         manifest = self.manager.prepare(
             "run-1", provider=investigation_script(), context_sources=self.sources(),
             case_setup=harness_case)
@@ -331,6 +334,40 @@ class LifecycleTests(PlaygroundCase):
         alias = replace(self.case_source, source_id="innocent-notes",
                         visibility=Visibility.AGENT)
         self.failed_prepare((*self.sources(), alias))
+
+    def test_alias_check_spans_paths_and_checksum_methods(self):
+        copy = self.case_repo / "notes" / "copy.json"
+        copy.parent.mkdir()
+        copy.write_bytes((self.case_repo / CASE_PATH).read_bytes())
+        alias = replace(self.case_source, source_id="innocent-notes", path_or_ref="notes/copy.json",
+                        visibility=Visibility.AGENT, checksum_method=BYTES_SHA256,
+                        content_checksum=hashlib.sha256(copy.read_bytes()).hexdigest())
+        self.failed_prepare((*self.sources(), alias))
+
+    def test_other_process_progress_is_observed(self):
+        self.prepare(provider=FakeProvider([turn()]))
+        observer = self.make_manager()
+        self.assertEqual(RunStatus.READY, observer.get("run-1").status)
+        self.manager.start("run-1")
+        info = observer.get("run-1")
+        self.assertEqual((RunStatus.COMPLETED, "COMPLETED"),
+                         (info.status, info.outcome.terminal_status.value))
+
+    def test_retired_snapshots_keep_lineage_connected(self):
+        world = mock.Mock()
+        world.baselines.return_value = {}
+        sandbox = SimulationSandbox(world)
+        sandbox._branches["branch-0001"] = (mock.Mock(), "snapshot-0000", "baseline")
+        sandbox._snapshots["snapshot-0002"] = (None, None, "branch-0001", "baseline")
+        sandbox._branches["branch-0003"] = (mock.Mock(), "snapshot-0002", "baseline")
+        sandbox.retire("branch-0001")
+        records = {record["handle"]: record for record in sandbox.lineage_records()}
+        self.assertEqual("RETIRED", records["snapshot-0002"]["status"])
+        self.assertEqual("snapshot-0002", records["branch-0003"]["parent"])
+        sandbox.close()
+        sandbox.close()  # idempotent
+        self.assertEqual({"RETIRED", "RELEASED"},
+                         {record["status"] for record in sandbox.lineage_records()})
 
     def test_process_graph_source_is_required(self):
         self.failed_prepare((self.case_source,))
@@ -584,6 +621,10 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(5, view["returned_records"])
         self.assertGreater(view["total_records"], 5)
         self.assertEqual({"XMEAS(9)"}, set(view["records"][0]["measurements"]))
+        self.assertEqual({"XMEAS(9)"}, set(view["current"]["measurements"]))
+        generated = self.queries.telemetry(variables=(name for name in ["XMEAS(9)"]),
+                                           max_records=1)
+        self.assertEqual({"XMEAS(9)"}, set(generated["current"]["measurements"]))
         self.assertEqual({"HistoryWindowArtifact", "RolloutTelemetryArtifact"},
                          {ref["kind"] for ref in view["artifact_refs"]})
         for bad in (0, 1001, 2.5):
@@ -603,7 +644,7 @@ class ExecutionTests(unittest.TestCase):
     def test_branch_tree_view(self):
         view = self.queries.branch_tree()
         nodes = {node["handle"]: node for node in view["nodes"]}
-        self.assertEqual(("SNAPSHOT", "baseline", "DESIGNATED_BASELINE"),
+        self.assertEqual(("SNAPSHOT", "baseline", "RELEASED"),  # reference env closed
                          (nodes["snapshot-0001"]["kind"], nodes["snapshot-0001"]["lineage"],
                           nodes["snapshot-0001"]["status"]))
         self.assertEqual(("BRANCH", "snapshot-0001", "baseline", "RELEASED"),
