@@ -1,5 +1,6 @@
 """E0 Environment Observatory tests (docs/e0-environment-observatory.md)."""
 
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -242,6 +243,118 @@ class E0ObservatoryTests(unittest.TestCase):
                              {pair for pair in pairs if pair[1] == node})
         reactor = topology["neighborhoods"]["reactor"]
         self.assertIn("XMEAS(9)", reactor["measurements"])  # bound in the ProcessGraph view
+
+    # E0.1: geometry, semantic resolution and P0-only dynamic overlay -------------------
+    def test_schematic_covers_actual_p0_graph_exactly_once(self):
+        graph = self.payload["views"]["process_graph"]
+        svg = e0.SCHEMATIC_ASSET.read_text(encoding="utf-8")
+        coverage = e0.validate_schematic(svg, graph)
+        self.assertEqual(sorted(n["node_id"] for n in graph["nodes"]), coverage["nodes"])
+        self.assertEqual(sorted(e["edge_id"] for e in graph["edges"]), coverage["edges"])
+        self.assertEqual("0.2.0", graph["provenance"]["fixture_version"])
+        self.assertEqual("HUMAN_VERIFIED", graph["provenance"]["review_status"])
+        self.assertEqual("cc8ccc81e9f421238863457438465877850b19d9760740279e54a52468fe9a87",
+                         graph["provenance"]["content_sha256"])
+
+    def test_schematic_unknown_and_duplicate_ids_fail_closed(self):
+        svg = e0.SCHEMATIC_ASSET.read_text(encoding="utf-8")
+        graph = self.payload["views"]["process_graph"]
+        for attr, identity in (("data-process-node-id", "reactor"),
+                               ("data-process-edge-id", "stream_6")):
+            for broken in (svg.replace(f'{attr}="{identity}"', f'{attr}="unknown"'),
+                           svg.replace("</svg>", f'<g {attr}="{identity}"/></svg>')):
+                with self.subTest(attribute=attr), self.assertRaises(ValueError):
+                    e0.validate_schematic(broken, graph)
+                with mock.patch.object(Path, "read_text", return_value=broken):
+                    with self.assertRaises(ValueError):
+                        e0.render_html(self.payload, self.developer)
+
+    def test_schematic_rejects_executable_external_and_hidden_content(self):
+        svg = e0.SCHEMATIC_ASSET.read_text(encoding="utf-8")
+        for extra in ('<script/>', '<g onclick="run()"/>', '<g href="file.svg"/>',
+                      '<path style="fill:url(https://example.com/x)"/>', '<text>IDV(4)</text>'):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                e0.validate_schematic(svg.replace("</svg>", extra + "</svg>"),
+                                      self.payload["views"]["process_graph"])
+        for hidden in ("IDV", "active_disturbances", "fault", "candidate_cause", "evaluator"):
+            self.assertNotIn(hidden.lower(), svg.lower())
+
+    def test_highlights_equal_binding_search_and_follow_changed_graph(self):
+        graph = self.payload["views"]["process_graph"]
+        overlay = self.payload["process_overlay"]
+        for name in e0.VARIABLES:
+            expected = {category: [entity[key] for entity in graph[category]
+                                   if any(b["runtime_variable_id"] == name
+                                          for b in entity["bindings"])]
+                        for category, key in (("nodes", "node_id"), ("edges", "edge_id"))}
+            self.assertEqual(expected, overlay["signal_entities"][name])
+        changed = copy.deepcopy(graph)
+        source = next(n for n in changed["nodes"]
+                      if any(b["runtime_variable_id"] == "XMEAS(9)" for b in n["bindings"]))
+        binding = next(b for b in source["bindings"] if b["runtime_variable_id"] == "XMEAS(9)")
+        source["bindings"].remove(binding)
+        binding["attached_to"] = changed["edges"][0]["edge_id"]
+        changed["edges"][0]["bindings"].append(binding)
+        derived = e0.process_overlay(changed, self.payload["views"]["telemetry"], e0.VARIABLES)
+        self.assertEqual({"nodes": [], "edges": [changed["edges"][0]["edge_id"]]},
+                         derived["signal_entities"]["XMEAS(9)"])
+
+    def test_detail_entities_and_plottable_bindings_come_from_p0(self):
+        overlay = self.payload["process_overlay"]
+        for category, key in (("nodes", "node_id"), ("edges", "edge_id")):
+            for entity in self.payload["views"]["process_graph"][category]:
+                record = overlay["entities"][category][entity[key]]
+                self.assertEqual(entity, record["entity"])
+                self.assertEqual(entity["bindings"], [r["binding"] for r in record["signals"]])
+                for row in record["signals"]:
+                    self.assertEqual(row["binding"]["runtime_variable_id"] in self.payload["series"],
+                                     row["plottable"])
+
+    def test_current_values_are_copied_only_from_p0_telemetry(self):
+        telemetry = copy.deepcopy(self.payload["views"]["telemetry"])
+        telemetry["current"]["measurements"]["XMEAS(9)"] = 123.456
+        telemetry["current"]["measurements"].pop("XMEAS(21)")
+        with mock.patch.object(RunQueries, "telemetry", return_value=telemetry):
+            report = e0.build_agent_report(self.queries)
+        current = telemetry["current"]
+        values = {**current["measurements"], **current["manipulated_variables"]}
+        for category in ("nodes", "edges"):
+            for entity in report["process_overlay"]["entities"][category].values():
+                for row in entity["signals"]:
+                    name = row["binding"]["runtime_variable_id"]
+                    self.assertEqual(name in values, row["telemetry_present"])
+                    self.assertEqual(values.get(name), row["current_value"])
+                    self.assertEqual(current["simulation_time_hours"] if name in values else None,
+                                     row["simulation_time_hours"])
+        self.assertNotEqual(report["series"]["XMEAS(9)"]["reference"]["points"][-1][1],
+                            values["XMEAS(9)"])  # current projection is independent of artifacts
+
+    def test_animation_requires_observed_positive_edge_flow_measurement(self):
+        graph = self.payload["views"]["process_graph"]
+        self.assertEqual({}, self.payload["process_overlay"]["animated_edges"])
+        flow_edge = next(e for e in graph["edges"] if any(
+            b["quantity"] == "flow" and b["relation"] == "MEASURES" for b in e["bindings"]))
+        flow = next(b for b in flow_edge["bindings"]
+                    if b["quantity"] == "flow" and b["relation"] == "MEASURES")
+        telemetry = copy.deepcopy(self.payload["views"]["telemetry"])
+        for value in (0, -1, 2):
+            telemetry["current"]["measurements"][flow["runtime_variable_id"]] = value
+            overlay = e0.process_overlay(graph, telemetry, e0.VARIABLES)
+            expected = {flow_edge["edge_id"]: [flow["runtime_variable_id"]]} if value > 0 else {}
+            self.assertEqual(expected, overlay["animated_edges"])
+        telemetry["current"]["measurements"].pop(flow["runtime_variable_id"])
+        actuator = next(b for b in flow_edge["bindings"] if b["relation"] == "ACTUATES")
+        telemetry["current"]["manipulated_variables"][actuator["runtime_variable_id"]] = 50
+        self.assertEqual({}, e0.process_overlay(graph, telemetry, e0.VARIABLES)["animated_edges"])
+        self.assertIn("prefers-reduced-motion", self.html)
+
+    def test_schematic_is_embedded_without_asset_dependencies(self):
+        self.assertEqual(1, self.html.count('id="graph"'))
+        self.assertIn('data-process-node-id="reactor"', self.html)
+        self.assertIn('data-process-edge-id="stream_6"', self.html)
+        self.assertIn("not authoritative P&amp;ID geometry", self.html)
+        self.assertNotIn("__SCHEMATIC_SVG__", self.html)
+        self.assertIsNone(re.search(r'\b(?:src|href)\s*=\s*[\"\']', self.html))
 
     def test_model_turn_matching_counts_operations_and_fails_closed(self):
         def trace(kind):

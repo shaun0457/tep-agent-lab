@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="graph" viewBox="0 0 1120 750" width="100%" aria-labelledby="process-title">
+  <title id="process-title">TEP process schematic — P&amp;ID-style, not authoritative P&amp;ID geometry</title>
+  <!-- Original curated presentation geometry. Names, kinds, bindings and direction
+       markers are populated exclusively from the P0 ProcessGraphView. -->
+  <defs><marker id="process-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="context-stroke"/></marker></defs>
+  <text x="24" y="28" class="zone-label">PROCESS MATERIAL</text>
+  <text x="24" y="730" class="zone-label">UTILITIES · topology connections, no inferred piping</text>
+  <g class="streams">
+    <g id="stream-stream_1" data-process-edge-id="stream_1"><path class="pipe" d="M140 140 H205 V205 H238"/><text x="162" y="128"/></g>
+    <g id="stream-stream_2" data-process-edge-id="stream_2"><path class="pipe" d="M140 220 H238"/><text x="168" y="208"/></g>
+    <g id="stream-stream_3" data-process-edge-id="stream_3"><path class="pipe" d="M140 300 H205 V235 H238"/><text x="162" y="320"/></g>
+    <g id="stream-stream_4" data-process-edge-id="stream_4"><path class="pipe" d="M970 430 H851"/><text x="883" y="418"/></g>
+    <g id="stream-stream_5" data-process-edge-id="stream_5"><path class="pipe" d="M789 430 H740 V355 H260 V242"/><text x="445" y="343"/></g>
+    <g id="stream-stream_6" data-process-edge-id="stream_6"><path class="pipe" d="M282 220 H400"/><text x="310" y="208"/></g>
+    <g id="stream-stream_7" data-process-edge-id="stream_7"><path class="pipe" d="M480 220 H580"/><text x="493" y="208"/></g>
+    <g id="stream-condenser_outlet" data-process-edge-id="condenser_outlet"><path class="pipe" d="M660 220 H775"/><text x="665" y="208"/></g>
+    <g id="stream-separator_vapor" data-process-edge-id="separator_vapor"><path class="pipe" d="M820 185 V75 H651"/><text x="701" y="63"/></g>
+    <g id="stream-stream_8" data-process-edge-id="stream_8"><path class="pipe" d="M589 75 H260 V198"/><text x="379" y="63"/></g>
+    <g id="stream-stream_9" data-process-edge-id="stream_9"><path class="pipe" d="M865 220 H970"/><text x="895" y="208"/></g>
+    <g id="stream-stream_10" data-process-edge-id="stream_10"><path class="pipe" d="M820 255 V380"/><text x="831" y="313"/></g>
+    <g id="stream-stream_11" data-process-edge-id="stream_11"><path class="pipe" d="M820 480 V548"/><text x="831" y="514"/></g>
+    <g id="stream-reactor_cooling_water_in" data-process-edge-id="reactor_cooling_water_in"><path class="pipe" d="M350 533 V450 H425 V262"/><text x="299" y="479"/></g>
+    <g id="stream-reactor_cooling_water_out" data-process-edge-id="reactor_cooling_water_out"><path class="pipe" d="M455 262 V450 H530 V533"/><text x="463" y="398"/></g>
+    <g id="stream-condenser_cooling_water_in" data-process-edge-id="condenser_cooling_water_in"><path class="pipe" d="M600 638 V615 H620 V500 H605 V245"/><text x="590" y="606"/></g>
+    <g id="stream-condenser_cooling_water_out" data-process-edge-id="condenser_cooling_water_out"><path class="pipe" d="M635 245 V600 H780 V638"/><text x="643" y="398"/></g>
+    <g id="stream-stripper_steam" data-process-edge-id="stripper_steam"><path class="pipe" d="M970 555 H930 V468 H851"/><text x="895" y="503"/></g>
+  </g>
+  <g id="equipment-feed_a_supply" data-process-node-id="feed_a_supply" transform="translate(80 140)"><path class="equipment" d="M-60 -22 H45 L60 0 L45 22 H-60 Z"/><text y="4"/></g>
+  <g id="equipment-feed_d_supply" data-process-node-id="feed_d_supply" transform="translate(80 220)"><path class="equipment" d="M-60 -22 H45 L60 0 L45 22 H-60 Z"/><text y="4"/></g>
+  <g id="equipment-feed_e_supply" data-process-node-id="feed_e_supply" transform="translate(80 300)"><path class="equipment" d="M-60 -22 H45 L60 0 L45 22 H-60 Z"/><text y="4"/></g>
+  <g id="equipment-feed_ac_supply" data-process-node-id="feed_ac_supply" transform="translate(1030 430)"><path class="equipment" d="M60 -22 H-45 L-60 0 L-45 22 H60 Z"/><text y="4"/></g>
+  <g id="equipment-reactor_feed_mixer" data-process-node-id="reactor_feed_mixer" transform="translate(260 220)"><circle class="equipment" r="22"/><path class="symbol" d="M-10 -10 L10 10 M-10 10 L10 -10"/><text y="47"/></g>
+  <g id="equipment-reactor" data-process-node-id="reactor" transform="translate(440 220)"><rect class="equipment" x="-40" y="-42" width="80" height="84" rx="24"/><path class="symbol" d="M0 -38 V17 M-20 15 L20 19 M-20 19 L20 15"/><text y="-54"/></g>
+  <g id="equipment-condenser" data-process-node-id="condenser" transform="translate(620 220)"><ellipse class="equipment" rx="40" ry="27"/><path class="symbol" d="M-30 0 L-20 -12 L-8 12 L4 -12 L16 12 L28 0"/><text y="-42"/></g>
+  <g id="equipment-separator" data-process-node-id="separator" transform="translate(820 220)"><rect class="equipment" x="-45" y="-35" width="90" height="70" rx="30"/><path class="symbol" d="M-32 12 H32"/><text y="-47"/></g>
+  <g id="equipment-compressor" data-process-node-id="compressor" transform="translate(620 75)"><circle class="equipment" r="31"/><path class="symbol" d="M18 -21 L-23 0 L18 21 Z"/><text y="51"/></g>
+  <g id="equipment-stripper" data-process-node-id="stripper" transform="translate(820 430)"><rect class="equipment" x="-31" y="-50" width="62" height="100" rx="22"/><path class="symbol" d="M-22 -20 H22 M-22 0 H22 M-22 20 H22"/><text x="-45" y="-60"/></g>
+  <g id="equipment-purge_outlet" data-process-node-id="purge_outlet" transform="translate(1030 220)"><path class="equipment" d="M-60 -22 H45 L60 0 L45 22 H-60 Z"/><text y="4"/></g>
+  <g id="equipment-product_outlet" data-process-node-id="product_outlet" transform="translate(820 570)"><path class="equipment" d="M-60 -22 H45 L60 0 L45 22 H-60 Z"/><text y="4"/></g>
+  <g id="equipment-reactor_cooling_water_supply" data-process-node-id="reactor_cooling_water_supply" transform="translate(350 555)"><rect class="equipment" x="-73" y="-22" width="146" height="44" rx="6"/><text y="4"/></g>
+  <g id="equipment-reactor_cooling_water_return" data-process-node-id="reactor_cooling_water_return" transform="translate(530 555)"><rect class="equipment" x="-73" y="-22" width="146" height="44" rx="6"/><text y="4"/></g>
+  <g id="equipment-condenser_cooling_water_supply" data-process-node-id="condenser_cooling_water_supply" transform="translate(600 660)"><rect class="equipment" x="-73" y="-22" width="146" height="44" rx="6"/><text y="4"/></g>
+  <g id="equipment-condenser_cooling_water_return" data-process-node-id="condenser_cooling_water_return" transform="translate(780 660)"><rect class="equipment" x="-73" y="-22" width="146" height="44" rx="6"/><text y="4"/></g>
+  <g id="equipment-stripper_steam_supply" data-process-node-id="stripper_steam_supply" transform="translate(1030 555)"><rect class="equipment" x="-60" y="-22" width="120" height="44" rx="6"/><text y="4"/></g>
+</svg>
