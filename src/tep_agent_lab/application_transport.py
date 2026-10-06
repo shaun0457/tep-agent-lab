@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+import json
 from typing import Any, Literal
 
 from industrial_agent_runtime import to_jsonable
@@ -14,6 +15,7 @@ from .application_views import (
 from .playground_views import ViewUnavailable, VisibilityViolation
 
 PROTOCOL_VERSION = "tep-agent-lab.application-transport/v0"
+MAX_REQUEST_BYTES = 64 * 1024
 
 
 class ErrorCode(StrEnum):
@@ -91,6 +93,32 @@ def _failure(request_id: str | None, code: ErrorCode) -> ApplicationFailure:
     return ApplicationFailure(request_id, TransportError(code, _MESSAGES[code]))
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("invalid JSON constant")
+
+
+def decode_request_json(payload: bytes | str) -> dict[str, Any] | ApplicationFailure:
+    """Bound raw UTF-8 JSON before parsing; schema validation stays in dispatch.
+
+    Codec failures cannot safely recover correlation, so request_id is null.
+    """
+    try:
+        if isinstance(payload, str):
+            raw = payload.encode("utf-8")
+        elif isinstance(payload, bytes):
+            raw = payload
+        else:
+            return _failure(None, ErrorCode.INVALID_REQUEST)
+        if len(raw) > MAX_REQUEST_BYTES:
+            return _failure(None, ErrorCode.INVALID_REQUEST)
+        decoded = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeError, ValueError, RecursionError):
+        return _failure(None, ErrorCode.INVALID_REQUEST)
+    if not isinstance(decoded, dict):
+        return _failure(None, ErrorCode.INVALID_REQUEST)
+    return decoded
+
+
 def _validate(raw: Mapping[str, Any]) -> ErrorCode | None:
     if (set(raw) != {"protocol_version", "request_id", "method", "params"}
             or any(type(raw[key]) is not str
@@ -131,6 +159,13 @@ class ApplicationTransport:
 
     def __init__(self, service: ApplicationViewService) -> None:
         self._service = service
+
+    def dispatch_json(self, payload: bytes | str) -> ApplicationResponse:
+        """Decode bounded raw input, then reuse the decoded-object dispatcher."""
+        request = decode_request_json(payload)
+        if isinstance(request, ApplicationFailure):
+            return request
+        return self.dispatch(request)
 
     def dispatch(self, request: object) -> ApplicationResponse:
         if isinstance(request, ApplicationRequest):

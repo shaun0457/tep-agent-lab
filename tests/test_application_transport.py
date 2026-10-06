@@ -12,7 +12,8 @@ from industrial_agent_runtime import to_jsonable
 from industrial_agent_runtime.serialization import canonical_json
 
 from tep_agent_lab.application_transport import (
-    ApplicationRequest, ApplicationTransport, ErrorCode, PROTOCOL_VERSION,
+    ApplicationRequest, ApplicationTransport, ErrorCode, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
+    decode_request_json,
 )
 from tep_agent_lab.application_views import (
     AmbiguousSignal, ApplicationViewService, UnknownEntity, UnknownSignal,
@@ -144,6 +145,93 @@ class TransportSchemaTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+class TransportCodecTests(unittest.TestCase):
+    def setUp(self):
+        self.service = mock.Mock(spec=ApplicationViewService)
+        self.service.get_run.return_value = {"run_id": "run-1"}
+        self.transport = ApplicationTransport(self.service)
+
+    def assert_invalid(self, payload):
+        response = self.transport.dispatch_json(payload)
+        self.assertEqual({"protocol_version": PROTOCOL_VERSION, "request_id": None,
+                          "ok": False, "error": {"code": "INVALID_REQUEST",
+                                                   "message": "invalid request"}},
+                         to_jsonable(response))
+        self.assertEqual([], self.service.mock_calls)
+
+    def test_valid_utf8_bytes_and_string_dispatch(self):
+        request = {**envelope(), "request_id": "req-中文"}
+        text = json.dumps(request, ensure_ascii=False)
+        for payload in (text, text.encode("utf-8")):
+            with self.subTest(kind=type(payload)):
+                self.service.reset_mock()
+                self.assertEqual(request, decode_request_json(payload))
+                response = self.transport.dispatch_json(payload)
+                self.assertTrue(response.ok)
+                self.assertEqual("req-中文", response.request_id)
+                self.assertEqual({"run_id": "run-1"}, to_jsonable(response.result))
+                self.service.get_run.assert_called_once_with(run_id="run-1")
+
+    def test_malformed_json_is_redacted_and_never_calls_service(self):
+        for text in ("", '{"request_id":"secret",', '{"path":"C:/private/hidden_fault",}',
+                     json.dumps(envelope()) + " trailing", '{"value":NaN}',
+                     '{"value":Infinity}', '{"value":-Infinity}'):
+            for payload in (text, text.encode("utf-8")):
+                with self.subTest(payload=payload):
+                    self.assert_invalid(payload)
+
+    def test_invalid_utf8_is_rejected(self):
+        for payload in (b'\xff', b'{"request_id":"\xc3("}', "\ud800"):
+            self.assert_invalid(payload)
+
+    def test_non_object_json_is_rejected(self):
+        for payload in ("[]", "null", "true", "123", '"request"'):
+            self.assert_invalid(payload)
+
+    def test_exact_and_under_raw_byte_limit_are_accepted(self):
+        text = json.dumps(envelope())
+        for size in (MAX_REQUEST_BYTES - 1, MAX_REQUEST_BYTES):
+            padded = text + " " * (size - len(text.encode("utf-8")))
+            for payload in (padded, padded.encode("utf-8")):
+                with self.subTest(size=size, kind=type(payload)):
+                    self.service.reset_mock()
+                    self.assertTrue(self.transport.dispatch_json(payload).ok)
+                    self.service.get_run.assert_called_once_with(run_id="run-1")
+
+    def test_oversized_raw_input_is_rejected_before_parsing(self):
+        text = json.dumps(envelope())
+        padded = text + " " * (MAX_REQUEST_BYTES + 1 - len(text.encode("utf-8")))
+        with mock.patch("tep_agent_lab.application_transport.json.loads") as parser:
+            for payload in (padded, padded.encode("utf-8")):
+                self.assert_invalid(payload)
+            parser.assert_not_called()
+
+    def test_multibyte_size_uses_encoded_bytes(self):
+        # Legal JSON whitespace leaves room for exactly one three-byte character.
+        request = {**envelope(), "request_id": "中"}
+        text = json.dumps(request, ensure_ascii=False)
+        boundary = text + " " * (MAX_REQUEST_BYTES - len(text.encode("utf-8")))
+        self.assertLess(len(boundary), MAX_REQUEST_BYTES)
+        self.assertTrue(self.transport.dispatch_json(boundary).ok)
+        self.service.reset_mock()
+        above = boundary + " "
+        self.assertLess(len(above), MAX_REQUEST_BYTES)
+        self.assertEqual(MAX_REQUEST_BYTES + 1, len(above.encode("utf-8")))
+        with mock.patch("tep_agent_lab.application_transport.json.loads") as parser:
+            self.assert_invalid(above)
+            parser.assert_not_called()
+
+    def test_raw_requests_reuse_existing_schema_validation(self):
+        for request, code in (({**envelope(), "extra": 1}, ErrorCode.INVALID_REQUEST),
+                              (envelope("start"), ErrorCode.UNSUPPORTED_METHOD),
+                              ({**envelope(), "protocol_version": "v1"},
+                               ErrorCode.UNSUPPORTED_PROTOCOL_VERSION)):
+            self.assertEqual(to_jsonable(self.transport.dispatch(request)),
+                             to_jsonable(self.transport.dispatch_json(json.dumps(request))))
+            self.assertEqual(code, self.transport.dispatch_json(json.dumps(request)).error.code)
+        self.assertEqual([], self.service.mock_calls)
+
+
 class TransportIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -172,6 +260,8 @@ class TransportIntegrationTests(unittest.TestCase):
                 self.assertTrue(response.ok)
                 payload = to_jsonable(response)
                 self.assertEqual(to_jsonable(expected), payload["result"])
+                self.assertEqual(payload, to_jsonable(self.transport.dispatch_json(
+                    canonical_json(request).encode("utf-8"))))
                 self.assertNotIn("error", payload)
                 encoded = canonical_json(response)
                 self.assertEqual(payload, json.loads(encoded))

@@ -1,11 +1,12 @@
 # E0.2B — Thin Application Transport
 
-ADR-002 remains authoritative. This milestone defines a versioned decoded-JSON
+ADR-002 remains authoritative. This milestone defines a versioned bounded JSON
 boundary around an already-constructed `ApplicationViewService`.
 
 ```text
 [future TypeScript UI] -- application request --> [future Tauri Rust adapter]
-[Rust adapter] -- versioned JSON --> [ApplicationTransport]
+[Rust adapter] -- raw UTF-8 JSON --> [bounded JSON codec]
+[bounded JSON codec] -- decoded object --> [ApplicationTransport]
 [ApplicationTransport] -- four application reads --> [ApplicationViewService]
 [ApplicationViewService] -- public AGENT projections --> [P0 RunQueries]
 ```
@@ -32,6 +33,12 @@ response = transport.dispatch({
 })
 payload = to_jsonable(response)
 wire_json = canonical_json(response)  # deterministic JSON; UTF-8 when encoded
+raw_response = transport.dispatch_json(canonical_json({
+    "protocol_version": PROTOCOL_VERSION,
+    "request_id": "req-124",
+    "method": "get_run",
+    "params": {"run_id": run_id},
+}).encode("utf-8"))
 ```
 
 `ApplicationRequest` optionally represents the decoded request as a frozen
@@ -39,6 +46,35 @@ dataclass. Dispatch validates both raw mappings and typed requests. Request para
 and successful serialized results are defensively copied and recursively frozen
 with runtime `freeze_json`. The transport does not define another domain DTO:
 results come directly from the existing application dataclasses via `to_jsonable`.
+
+## Raw JSON codec
+
+`MAX_REQUEST_BYTES = 64 * 1024` (64 KiB) is the fixed local application transport
+protocol limit, not an HTTP/body limit. E0.2C must respect the same bound when
+wiring the future Tauri/Rust adapter to Python. No standalone backend process or
+process loop exists in this milestone.
+
+```text
+[raw UTF-8 JSON] -- raw byte count --> [size bound: 64 KiB]
+[size bound] -- UTF-8 parsing --> [JSON object decode]
+[JSON object] -- dispatch --> [existing schema validation]
+[validated request] -- method selection --> [allowlisted dispatch]
+```
+
+`decode_request_json(payload: bytes | str)` returns a decoded object or an
+`ApplicationFailure`. It checks `len(payload)` for bytes and the encoded UTF-8
+length for strings before JSON parsing. Exactly 64 KiB is accepted; anything
+larger is rejected. Whitespace and multibyte characters count toward the raw
+limit; canonical re-serialization is not used to measure requests.
+
+Invalid UTF-8, malformed JSON (including non-JSON NaN/Infinity constants), parser
+depth failures, oversized input, and non-object top-level JSON return the fixed
+`INVALID_REQUEST` error with `request_id: null`. No parser exception text or raw
+payload is returned. `ApplicationTransport.dispatch_json(payload)` uses this
+codec and passes decoded objects to the existing `dispatch()` schema/allowlist
+owner. Codec failures never call the application service. Decoded Mapping and
+`ApplicationRequest` dispatch remain available for trusted internal callers;
+external raw input must enter through the bounded codec.
 
 ## v0 contract
 
@@ -95,7 +131,8 @@ are needed. Errors do not relax application visibility checks.
 
 `tests/test_application_transport.py` exercises malformed requests before service
 calls, explicit dispatch, error redaction, immutable envelopes, serialization
-failure, deterministic JSON, real four-method E0/P0 equivalence, domain validation,
+failure, raw UTF-8 decoding and byte limits, deterministic JSON, real four-method
+E0/P0 equivalence, domain validation,
 and evaluator-scope rejection. The complete `scripts/check.py` suite also checks
 unchanged static E0/E0.1 behavior and exact dependency pins.
 
