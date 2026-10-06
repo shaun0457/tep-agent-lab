@@ -364,3 +364,55 @@ run log / state / observations / experiments / report
 - unsupported physics stays unsupported;
 - failures/negative experiments remain traceable;
 - rules/tools/scorers/context projections are versioned for reported runs.
+
+
+## Observatory / application UI boundary
+
+The interactive Observatory is a client of the application plane, not part of the canonical industrial state model.
+
+See `docs/decisions/ADR-002-ui-application-boundary.md`.
+
+Target direction:
+
+```text
+Tauri v2 desktop UI
+TypeScript + Vite + React
+          |
+          v
+thin transport adapter
+          |
+          v
+ApplicationViewService (Python)
+          |
+          v
+P0 RunQueries
+ /        |         \
+Process  Telemetry  Artifacts
+Graph
+```
+
+Ownership is strict:
+
+- frontend owns rendering, navigation, selection, and transient UI state;
+- the Tauri Rust host owns native shell/process/permission integration only;
+- `ApplicationViewService` owns bounded application read assembly;
+- P0 owns run/projection truth;
+- ProcessGraph owns semantic/topology truth;
+- telemetry/artifact contracts own dynamic data.
+
+The UI must not read `TEPEnvironment`, `ReferenceWorld`, fixture files, artifact filesystem paths, or private RunManager/session state directly.
+
+E0/E0.1 self-contained HTML remains a supported reproducible research/report client. It is not the target data-access architecture for the future interactive product.
+
+The current industrial backend remains Python. Rust is not a replacement backend merely because Tauri is selected, and Go is not introduced without a separate distributed control-plane need.
+
+The decoupling sequence is:
+
+```text
+E0.2A  transport-neutral Python ApplicationViewService
+E0.2B  thin replaceable local transport
+E0.2C  Tauri v2 + TypeScript/Vite client
+E1     interactive Industrial Observatory
+```
+
+Future Context Layer views may join the same application boundary; they must not be embedded as frontend-owned domain state.
