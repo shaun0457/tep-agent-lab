@@ -202,15 +202,58 @@ not a class proxy. It does frame every case, including healthy ones, as an incid
 can bias any Agent toward an abnormal answer. The pilot keeps it unchanged and discloses
 it. Changing it is a new `projection_policy_version`, never a silent edit.
 
-### Projection invariant
+### Projection invariants
 
-For the twelve pilot projections:
+`AgentCaseProjection` (schema `benchmark-agent-projection/v0`) has no `world` field. The
+world seed reaches the Agent through the AGENT-scoped P0 manifest, whose `world` section
+carries `WorldSpec.record()`. A check over `AgentCaseProjection` alone would therefore
+miss the seed. The invariants are defined over an explicit Agent-visible case view:
+
+```text
+AgentVisibleCaseView
+  projection  = AgentCaseProjection.record()
+  world       = the Agent-visible WorldSpec record (seed, backend, control_mode,
+                record_interval), exactly as the AGENT manifest exposes it
+```
+
+All comparisons use canonical JSON. No field other than the ones named below is removed
+to make a check pass. D0.2C1 tests all four.
+
+**A. Within-seed class invariant.** For each seed in `{21, 22, 23}`, across the four
+EVALUATOR classes of that seed:
+
+```text
+AgentVisibleCaseView minus {projection.case_id, projection.incident_id}
+```
+
+is byte-identical. (For seed 21: the healthy, `IDV(4)`, `IDV(11)` and `IDV(14)` views are
+identical once opaque identity is removed. Same for seeds 22 and 23.)
+
+**B. Cross-seed normalized invariant.** Across all twelve cases:
+
+```text
+AgentVisibleCaseView minus {projection.case_id, projection.incident_id, world.seed}
+```
+
+is byte-identical.
+
+**C. Seed-balance invariant.** Each EVALUATOR class exposes exactly the Agent-visible seed
+multiset:
+
+```text
+{21, 22, 23}
+```
+
+**Projection-only check.** Because `AgentCaseProjection` carries no seed, across all twelve
+cases:
 
 ```text
 AgentCaseProjection minus {case_id, incident_id}
 ```
 
-must be byte-identical (canonical JSON). D0.2C1 tests this.
+is byte-identical too. This is a consequence of A and B for the projection part, and it is
+tested on its own so that a future projection field cannot carry the seed or the class
+unnoticed.
 
 ## Shared timeline
 
@@ -415,8 +458,46 @@ EVALUATOR classes but three primary Agent-scoring equivalence classes:
 {healthy}  {IDV(4), IDV(11)}  {IDV(14)}
 ```
 
-C0 and the identifiability pilot still work on four classes. Reports state which level a
-number refers to.
+This is acceptable and is not engineered away (no topology tool is added and no evaluator
+identifier is exposed to make `entity_id` scorable).
+
+### Target spaces
+
+Two target spaces exist and are never confused:
+
+```text
+EVALUATOR target space (C0 candidate space)     4 classes
+  NO_ABNORMAL_CAUSE, IDV(4), IDV(11), IDV(14)
+
+primary-equivalence target space (scorer-v1)    3 classes unless entity_id is
+                                                identifier-reachable
+  {NO_ABNORMAL_CAUSE}
+  {IDV(4), IDV(11)}   -> TEMPERATURE_DISTURBANCE equivalence class
+  {IDV(14)}           -> VALVE_STICKING equivalence class
+```
+
+The collapse is deterministic and derived from the frozen scorer-v1 primary semantics,
+never hand-written: two EVALUATOR classes fall into the same equivalence class exactly
+when their PRIMARY truth fields (mechanism, plus every identifier field whose role is
+PRIMARY) are equal. If D0.2C1 proves `entity_id` reachable, the collapse is recomputed from
+the frozen roles; with the current truth table it is unchanged, because `IDV(4)` and
+`IDV(11)` share the same entity.
+
+### Comparison rule (hard rule)
+
+> A C0 result and an Agent result may only be compared numerically when both are
+> evaluated on the same target space.
+
+Therefore:
+
+- C0 4-class accuracy is never placed directly against Agent 3-class primary accuracy as
+  though they measured the same task;
+- a later capability table that compares C0 with an Agent condition uses the C0 collapsed
+  primary-equivalence metric against the Agent primary-equivalence metric;
+- the C0 EVALUATOR 4-class result is reported next to it, separately, as a finer
+  identifiability diagnostic.
+
+Every reported number names its target space.
 
 ### Scorer-v1 metric vector
 
@@ -522,9 +603,17 @@ cache them. Cost is reported both ways and is never mixed:
 ### Exact-replay property (disclosed)
 
 The simulator is deterministic and C0 reuses the observed seed. The true candidate's
-rollout therefore reproduces the observed trajectory exactly. Same-seed C0 is an
-upper-bound, exact-world-model baseline: its accuracy mostly measures whether candidate
-trajectories differ at all within the window, not robustness to nuisance variation. D0.2C3
+rollout therefore reproduces the observed trajectory exactly. Same-seed C0 is kept as
+designed, and it is an:
+
+```text
+exact-world-model candidate-identifiability upper bound
+```
+
+It primarily demonstrates whether candidate trajectories differ under the observed
+seed/window. It does **not** demonstrate seed robustness, generalization, noise
+robustness or deployment diagnostic accuracy. Nuisance-robustness claims come only from
+the frozen cross-seed analyses or from a separately versioned future baseline. D0.2C3
 must report how many decisions were exact (zero-distance) matches and must not present
 same-seed C0 accuracy as nuisance-robust identifiability. Cross-seed separability is
 measured by the required cross-seed identifiability outputs below, which never use
@@ -589,9 +678,12 @@ values.
 - between-class distances;
 - the nearest competing class for each case;
 - a pairwise separability matrix over the four EVALUATOR classes;
-- the C0 confusion matrix (four EVALUATOR classes; the three primary equivalence classes
-  shown separately);
-- C0 accuracy, with the exact-match count;
+- C0 EVALUATOR 4-class confusion matrix;
+- C0 EVALUATOR 4-class accuracy, with the exact-match count;
+- C0 collapsed primary-equivalence confusion matrix;
+- C0 collapsed primary-equivalence accuracy;
+- Agent primary-equivalence metrics: not part of D0.2C3; reported later, when an Agent
+  milestone runs, under the comparison rule above;
 - healthy false-positive and false-negative behavior;
 - per-case and total rollout cost;
 - ties and near-ties;
@@ -701,16 +793,16 @@ D0.2C3  Identifiability/separability pilot report
 
 **D0.2C1** — viability check; twelve pilot case/truth pairs under
 `tep-rca-benchmark/v1-pilot`; per-fixture benchmark/scorer versions in the registry;
-scorer-v1 and scoring schema v1; field-role reachability test; projection invariant;
-nuisance-proxy check; structural and cross-case leakage audits; historical fixtures and
-their tests unchanged.
+scorer-v1 and scoring schema v1; field-role reachability test; projection invariants
+A–C plus the projection-only check; nuisance-proxy check; structural and cross-case
+leakage audits; historical fixtures and their tests unchanged.
 
 **D0.2C2** — EVALUATOR-only C0: candidate compiler, isolated deterministic rollouts,
 declared calibration seeds, frozen feature contract, healthy decision rule, cost
 accounting (nominal and unique), input-exclusion tests, shared-function disclosure.
 
-**D0.2C3** — the identifiability report with every output listed above, including
-exclusions and the exact-replay disclosure. No difficulty labels.
+**D0.2C3** — the identifiability report with every output listed above, in both target
+spaces, including exclusions and the exact-replay disclosure. No difficulty labels.
 
 No step runs a real LLM. Agent capability runs on the pilot belong to a later milestone.
 
@@ -720,7 +812,7 @@ D0.2C is complete when:
 
 1. twelve paired pilot cases exist under a new benchmark version, and `rca-dev-001..004`
    are byte-identical to `83a96c19675eed03831f7106834904b667959fbd`;
-2. the projection invariant and nuisance-proxy check pass;
+2. projection invariants A–C, the projection-only check and the nuisance-proxy check pass;
 3. structural leakage audits pass for every pilot case, including the cross-case audit;
 4. scorer-v1 scores and re-scores saved synthetic submissions byte-identically, and
    scorer-v0 output for historical cases is unchanged;
