@@ -312,7 +312,9 @@ impl BackendProcess {
             session.failure = Some(error);
             // Framing may be lost. Stop the same child; never restart implicitly.
             session.stdin.take();
-            let _ = session.child.start_kill();
+            if !self.stopping.load(Ordering::Acquire) {
+                let _ = session.child.start_kill();
+            }
         }
         result
     }
