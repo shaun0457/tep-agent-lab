@@ -122,4 +122,10 @@ without launching a window. No GUI is required by CI. The desktop job runs
 Node/Rust checks and real Python integration on Windows; the existing Python
 3.11/3.13 matrix is preserved.
 
+On Windows MSVC, the build script also embeds a Common Controls v6 manifest into
+Cargo's integration-test executables. Tauri's app manifest normally covers only
+the app binary; mock-runtime tests still link native common-control APIs. This
+avoids the Windows loader's `STATUS_ENTRYPOINT_NOT_FOUND` before tests can run.
+It adds no runtime process API or frontend permission.
+
 SPEC_CONFLICT: none
