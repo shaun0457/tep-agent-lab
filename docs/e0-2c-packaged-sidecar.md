@@ -106,6 +106,13 @@ isolation, timeout, poisoned-session/no-restart behavior, graceful stdin EOF,
 kill/reap fallback and kill_on_drop. Rust's fixed run ID and arguments remain
 host-owned. `desktop_backend` retains precisely its existing CLI/protocol.
 
+PyInstaller one-file has a bootloader and an internal Python worker. Windows
+launch creates the managed child suspended, assigns a kill-on-close Job Object,
+then resumes its primary thread. Workers inherit that job before any user code
+runs. Closing the job on host drop, poisoned session or fallback shutdown kills
+the whole tree; a packaged test forcibly kills the bootloader and verifies worker
+termination. There is still one host process channel and one P0 session.
+
 Packaged output is a fresh `session-*` directory under Tauri's app local data
 directory `/sessions` for every launch. P0 data is never written beside the
 executable and no old ephemeral session is reopened. Paths stay host-private.

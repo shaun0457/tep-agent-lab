@@ -1,4 +1,6 @@
 pub mod bridge;
+#[cfg(windows)]
+mod windows_job;
 
 use bridge::{ApplicationResponse, BackendProcess, BridgeError};
 use serde_json::Value;

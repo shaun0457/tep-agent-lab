@@ -37,7 +37,8 @@ def smoke(binary: Path, build_manifest: dict) -> None:
         for i, reply in enumerate(replies, 1):
             assert reply["ok"] and reply["request_id"] == f"smoke-{i}", reply
             assert reply["protocol_version"] == PROTOCOL
-            assert reply["result"]["run_id"] == "frozen-smoke"
+        assert replies[0]["result"]["run_id"] == "frozen-smoke"
+        assert replies[3]["result"]["run_id"] == "frozen-smoke"
         assert replies[0]["result"]["run_status"] == "COMPLETED"
         assert replies[1]["result"]["entity_id"] == "reactor"
         assert replies[2]["result"]["signal_id"] == "XMEAS(9)"

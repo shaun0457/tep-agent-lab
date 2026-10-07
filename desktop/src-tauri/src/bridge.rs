@@ -140,6 +140,8 @@ async fn read_frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Vec<u8>,
 
 struct Session {
     child: Child,
+    #[cfg(windows)]
+    job: Option<crate::windows_job::ProcessJob>,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     stderr_task: JoinHandle<()>,
@@ -219,11 +221,17 @@ impl BackendProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW: background child, no console popup.
-        let mut child = command.spawn().map_err(|error| {
+        let spawned = crate::windows_job::spawn(&mut command);
+        #[cfg(not(windows))]
+        let spawned = command.spawn();
+        let spawned = spawned.map_err(|error| {
             eprintln!("backend spawn failed: {error}");
             BridgeError::BackendNotRunning
         })?;
+        #[cfg(windows)]
+        let (mut child, job) = spawned;
+        #[cfg(not(windows))]
+        let mut child = spawned;
         let stdin = child.stdin.take().ok_or(BridgeError::BackendNotRunning)?;
         let stdout = BufReader::new(child.stdout.take().ok_or(BridgeError::BackendNotRunning)?);
         let mut stderr = child.stderr.take().ok_or(BridgeError::BackendNotRunning)?;
@@ -239,6 +247,8 @@ impl BackendProcess {
         Ok(Self {
             session: Mutex::new(Session {
                 child,
+                #[cfg(windows)]
+                job: Some(job),
                 stdin: Some(stdin),
                 stdout,
                 stderr_task,
@@ -293,6 +303,8 @@ impl BackendProcess {
             .is_some()
         {
             session.failure = Some(BridgeError::BackendExited);
+            #[cfg(windows)]
+            session.job.take();
             return Err(BridgeError::BackendExited);
         }
         let request_id = format!("desktop-{}", session.next_id);
@@ -339,6 +351,8 @@ impl BackendProcess {
             // Framing may be lost. Stop the same child; never restart implicitly.
             session.stdin.take();
             if !self.stopping.load(Ordering::Acquire) {
+                #[cfg(windows)]
+                session.job.take(); // Also stop the frozen bootloader's worker.
                 let _ = session.child.start_kill();
             }
         }
@@ -352,9 +366,13 @@ impl BackendProcess {
         session.stdin.take(); // EOF is the normal backend shutdown path.
         let graceful = timeout(EXIT_GRACE, session.child.wait()).await;
         if !matches!(graceful, Ok(Ok(_))) {
+            #[cfg(windows)]
+            session.job.take();
             let _ = session.child.start_kill();
             let _ = timeout(EXIT_GRACE, session.child.wait()).await;
         }
+        #[cfg(windows)]
+        session.job.take();
         if timeout(EXIT_GRACE, &mut session.stderr_task).await.is_err() {
             session.stderr_task.abort();
         }

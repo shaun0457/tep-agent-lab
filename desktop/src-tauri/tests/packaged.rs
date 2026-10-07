@@ -7,7 +7,7 @@ use tauri::{
     test::{get_ipc_response, mock_builder, INVOKE_KEY},
     webview::InvokeRequest,
 };
-use tep_desktop::bridge::{BackendProcess, PROTOCOL};
+use tep_desktop::bridge::{BackendProcess, BridgeError, PROTOCOL};
 
 #[test]
 #[ignore = "requires a built target-specific sidecar; Windows packaging CI runs this explicitly"]
@@ -94,4 +94,56 @@ fn frozen_sidecar_via_shell_ext_and_application_ipc() {
     }
     tauri::async_runtime::block_on(backend.shutdown());
     assert_eq!(tauri::async_runtime::block_on(backend.process_id()), None);
+
+    // Killing a one-file bootloader must not leave its Python worker behind.
+    let backend = tauri::async_runtime::block_on(async {
+        BackendProcess::packaged(app.handle()).unwrap()
+    });
+    assert!(tauri::async_runtime::block_on(backend.request("get_run", json!({}))).unwrap().ok);
+    let pid = tauri::async_runtime::block_on(backend.process_id()).unwrap();
+    assert_bootloader_death_reaps_worker(&backend, pid);
+}
+
+fn assert_bootloader_death_reaps_worker(backend: &BackendProcess, pid: u32) {
+    use std::{mem::size_of, os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle}};
+    use windows_sys::Win32::{
+        Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
+        System::{
+            Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+                                  PROCESSENTRY32W, TH32CS_SNAPPROCESS},
+            Threading::{OpenProcess, TerminateProcess, WaitForSingleObject,
+                        PROCESS_TERMINATE, PROCESS_SYNCHRONIZE},
+        },
+    };
+    // SAFETY: owned valid handles are closed once; only the test's backend is killed.
+    unsafe {
+        let raw = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        assert_ne!(raw, INVALID_HANDLE_VALUE);
+        let snapshot = OwnedHandle::from_raw_handle(raw);
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        let mut workers = Vec::new();
+        let mut valid = Process32FirstW(snapshot.as_raw_handle(), &mut entry);
+        while valid != 0 {
+            if entry.th32ParentProcessID == pid {
+                let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, entry.th32ProcessID);
+                assert!(!handle.is_null());
+                workers.push(OwnedHandle::from_raw_handle(handle));
+            }
+            valid = Process32NextW(snapshot.as_raw_handle(), &mut entry);
+        }
+        assert!(!workers.is_empty(), "expected PyInstaller one-file worker");
+        let raw = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
+        assert!(!raw.is_null());
+        let parent = OwnedHandle::from_raw_handle(raw);
+        assert_ne!(TerminateProcess(parent.as_raw_handle(), 1), 0);
+        assert_eq!(WaitForSingleObject(parent.as_raw_handle(), 5000), WAIT_OBJECT_0);
+        assert_eq!(tauri::async_runtime::block_on(backend.request("get_run", json!({})))
+            .unwrap_err(), BridgeError::BackendExited);
+        tauri::async_runtime::block_on(backend.shutdown());
+        for worker in workers {
+            assert_eq!(WaitForSingleObject(worker.as_raw_handle(), 5000), WAIT_OBJECT_0,
+                       "orphaned frozen worker");
+        }
+    }
 }
