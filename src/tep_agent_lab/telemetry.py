@@ -306,7 +306,10 @@ class TelemetryReadSnapshot:
     """Immutable read cutoff: event horizon T (inclusive) and committed revision K.
 
     A read capability/reference only; it is not a simulator snapshot and grants no
-    visibility beyond the reader's own checks.
+    visibility beyond the reader's own checks. ``visibility_policy_ref`` is an
+    opaque immutable policy identifier pinned into the snapshot identity; P1.1A
+    does not evaluate it (caller authorization is later application integration).
+    ``mapping_ref`` is absent because cross-clock mapping is unsupported.
     """
 
     store: StoreRef
@@ -314,6 +317,7 @@ class TelemetryReadSnapshot:
     event_horizon: TimePoint
     event_clock: ClockDescriptor
     context_ref: str
+    visibility_policy_ref: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.store, StoreRef):
@@ -323,12 +327,14 @@ class TelemetryReadSnapshot:
             raise TelemetryError("event_clock must be a ClockDescriptor")
         require_clock(self.event_horizon, self.event_clock, "event_horizon")
         _checked_id("context_ref", self.context_ref)
+        _checked_id("visibility_policy_ref", self.visibility_policy_ref)
 
     def as_json(self) -> dict[str, Any]:
         return {"contract": TELEMETRY_CONTRACT_VERSION, "store": self.store.as_json(),
                 "ingest_sequence": self.ingest_sequence,
                 "event_horizon": self.event_horizon.as_json(),
-                "event_clock": self.event_clock.as_json(), "context_ref": self.context_ref}
+                "event_clock": self.event_clock.as_json(), "context_ref": self.context_ref,
+                "visibility_policy_ref": self.visibility_policy_ref}
 
     @cached_property
     def snapshot_ref(self) -> str:
@@ -341,19 +347,22 @@ class TelemetryReadSnapshot:
 class InMemoryTimeSeriesStore:
     """Deterministic append-only store for one namespace and one event clock domain.
 
-    Registration (identity, clocks, context, source/signal bindings) is frozen at
-    construction. Records are never replaced; the incarnation exists only for the
-    life of this process object and is not durable across restart.
+    Registration (identity, clocks, context, visibility policy ref, source/signal
+    bindings) is frozen at construction. Records are never replaced or evicted; the
+    incarnation exists only for the life of this process object and is not durable
+    across restart.
     """
 
     def __init__(self, *, store_id: str, namespace: str, context_ref: str,
-                 event_clock: ClockDescriptor, ingest_clock: ClockDescriptor,
-                 bindings: Mapping[str, Iterable[str]],
+                 visibility_policy_ref: str, event_clock: ClockDescriptor,
+                 ingest_clock: ClockDescriptor, bindings: Mapping[str, Iterable[str]],
                  incarnation: str | None = None) -> None:
         if incarnation is None:
             incarnation = f"inc-{secrets.token_hex(8)}"
         self.ref = StoreRef(store_id, incarnation, namespace)
         self.context_ref = _checked_id("context_ref", context_ref)
+        self.visibility_policy_ref = _checked_id("visibility_policy_ref",
+                                                 visibility_policy_ref)
         if not (isinstance(event_clock, ClockDescriptor)
                 and isinstance(ingest_clock, ClockDescriptor)):
             raise TelemetryError("event_clock and ingest_clock must be ClockDescriptors")
@@ -448,15 +457,18 @@ class InMemoryTimeSeriesStore:
         with self._lock:
             revision = self._revision if ingest_sequence is None else ingest_sequence
         snapshot = TelemetryReadSnapshot(self.ref, revision, event_horizon,
-                                         self.event_clock, self.context_ref)
+                                         self.event_clock, self.context_ref,
+                                         self.visibility_policy_ref)
         self.resolve(snapshot)
         return snapshot
 
     def resolve(self, snapshot: Any) -> TelemetryReadSnapshot:
-        """Reject snapshots of another incarnation/namespace/clock/context or a future K."""
+        """Reject snapshots of another incarnation/namespace/context/visibility policy,
+        another clock, or a future K."""
         if not isinstance(snapshot, TelemetryReadSnapshot):
             raise TelemetryError("snapshot must be a TelemetryReadSnapshot")
-        if snapshot.store != self.ref or snapshot.context_ref != self.context_ref:
+        if (snapshot.store != self.ref or snapshot.context_ref != self.context_ref
+                or snapshot.visibility_policy_ref != self.visibility_policy_ref):
             raise SnapshotUnavailable("snapshot does not belong to this store incarnation")
         if snapshot.event_clock != self.event_clock:
             raise ClockMismatch("snapshot clock domain differs from the store clock")
@@ -466,18 +478,28 @@ class InMemoryTimeSeriesStore:
         return snapshot
 
     def _eligible(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot,
-                  start_ticks: int | None, end_ticks: int) -> list[SignalSample]:
+                  start_ticks: int | None, end_ticks: int,
+                  max_scan_records: int) -> list[SignalSample]:
         """Records with commit <= K and start <= event <= end (<= T), unordered.
 
         Reader-internal: the reader resolves the snapshot and validates bounds and
         limits first. Both cutoffs apply here, before any sort, reduction or count.
+
+        The candidate set is the binding's K-committed prefix, sized by bisection
+        before any record is read. If it exceeds ``max_scan_records`` the read fails
+        without scanning anything. The prefix is fixed by (binding, K), so a given
+        snapshot passes or fails deterministically regardless of later appends.
         """
         self.require_binding(source_id, signal_id)
         with self._lock:
             stream = self._streams.get((source_id, signal_id), [])
             # Commit order makes the K-visible records an exact prefix.
-            prefix = stream[:bisect_right(stream, snapshot.ingest_sequence,
-                                          key=lambda record: record.commit_revision)]
+            visible = bisect_right(stream, snapshot.ingest_sequence,
+                                   key=lambda record: record.commit_revision)
+            if visible > max_scan_records:
+                # No counts or values in the message: nothing about the candidates leaks.
+                raise ResourceLimitExceeded("candidate scan exceeds the reader limit")
+            prefix = stream[:visible]
         return [record.sample for record in prefix
                 if record.sample.event_time.ticks <= end_ticks
                 and (start_ticks is None or record.sample.event_time.ticks >= start_ticks)]
@@ -509,6 +531,17 @@ class ReadStatus(StrEnum):
     NO_DATA = "NO_DATA"
 
 
+class RetentionCoverage(StrEnum):
+    """What the store retained for the read, never a claim about the source stream.
+
+    COMPLETE_FOR_STORE_INCARNATION: every record this store incarnation accepted
+    (committed at or before K) is retained and was considered. It does NOT claim
+    the physical/source stream had no missing deliveries, gaps or late data.
+    """
+
+    COMPLETE_FOR_STORE_INCARNATION = "COMPLETE_FOR_STORE_INCARNATION"
+
+
 @dataclass(frozen=True)
 class CurrentResult:
     snapshot: TelemetryReadSnapshot
@@ -516,6 +549,7 @@ class CurrentResult:
     signal_id: str
     eligible_count: int
     sample: SignalSample | None
+    coverage: RetentionCoverage = RetentionCoverage.COMPLETE_FOR_STORE_INCARNATION
 
     @property
     def status(self) -> ReadStatus:
@@ -537,6 +571,7 @@ class HistoryResult:
     eligible_count: int
     samples: tuple[SignalSample, ...]
     reduction_policy: str = field(default=REDUCTION_POLICY)
+    coverage: RetentionCoverage = RetentionCoverage.COMPLETE_FOR_STORE_INCARNATION
 
     @property
     def status(self) -> ReadStatus:
@@ -573,13 +608,20 @@ def reduce_indices(n: int, m: int) -> tuple[int, ...]:
 
 
 class TimeSeriesReader:
-    """Bounded deterministic reads; every request pins one snapshot and one binding."""
+    """Bounded deterministic reads; every request pins one snapshot and one binding.
+
+    Service-policy bounds: returned points, event interval and candidate records
+    scanned (``max_scan_records``). Exceeding any of them raises
+    ResourceLimitExceeded; there is no partial scan or silent truncation.
+    """
 
     def __init__(self, store: InMemoryTimeSeriesStore, *, max_interval_ticks: int,
-                 max_points_limit: int = 1000) -> None:
+                 max_scan_records: int, max_points_limit: int = 1000) -> None:
         self._store = store
         self.max_interval_ticks = _checked_int("max_interval_ticks", max_interval_ticks,
                                                minimum=0)
+        self.max_scan_records = _checked_int("max_scan_records", max_scan_records,
+                                             minimum=1)
         self.max_points_limit = _checked_int("max_points_limit", max_points_limit, minimum=1)
 
     def current(self, *, source_id: str, signal_id: str,
@@ -587,7 +629,8 @@ class TimeSeriesReader:
         """Last eligible sample at or before T, whatever its quality, or NO_DATA."""
         self._store.resolve(snapshot)
         samples = self._store._eligible(source_id, signal_id, snapshot, None,
-                                        snapshot.event_horizon.ticks)
+                                        snapshot.event_horizon.ticks,
+                                        self.max_scan_records)
         return CurrentResult(snapshot, source_id, signal_id, len(samples),
                              max(samples, key=read_order) if samples else None)
 
@@ -608,7 +651,8 @@ class TimeSeriesReader:
         if event_end.ticks - event_start.ticks > self.max_interval_ticks:
             raise ResourceLimitExceeded("event interval exceeds the reader limit")
         eligible = sorted(self._store._eligible(source_id, signal_id, snapshot,
-                                                event_start.ticks, event_end.ticks),
+                                                event_start.ticks, event_end.ticks,
+                                                self.max_scan_records),
                           key=read_order)
         selected = tuple(eligible[i] for i in reduce_indices(len(eligible), max_points))
         return HistoryResult(snapshot, source_id, signal_id, event_start, event_end,

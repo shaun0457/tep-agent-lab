@@ -13,7 +13,7 @@ from tep_agent_lab.telemetry import (
     InMemoryTimeSeriesStore, Quality, ReadStatus, ResourceLimitExceeded,
     SampleIdentity, SignalSample, SnapshotUnavailable, SourceObservation,
     TelemetryError, TelemetryIngestor, TelemetryReadSnapshot, TimePoint,
-    TimeSeriesReader, UnknownBinding, reduce_indices,
+    RetentionCoverage, TimeSeriesReader, UnknownBinding, reduce_indices,
 )
 
 # One tick = one simulated second; minutes are expressed as tick multiples.
@@ -41,6 +41,7 @@ def obs(sequence: int, minutes: float, value=1.0, quality=Quality.GOOD,
 def make_store(namespace: str = "reference", incarnation: str = "inc-1",
                **changes) -> InMemoryTimeSeriesStore:
     options = dict(store_id="store-1", namespace=namespace, context_ref="context:rev-1",
+                   visibility_policy_ref="visibility:agent-v1",
                    event_clock=SIM, ingest_clock=INGEST,
                    bindings={"src-1": ("sig-a", "sig-b"), "src-2": ("sig-a",)},
                    incarnation=incarnation)
@@ -53,6 +54,7 @@ class Fixture(unittest.TestCase):
         self.store = make_store()
         self.ingestor = TelemetryIngestor(self.store)
         self.reader = TimeSeriesReader(self.store, max_interval_ticks=24 * 60 * MINUTE,
+                                       max_scan_records=1000,
                                        max_points_limit=500)
         self._clock = 0
 
@@ -305,7 +307,8 @@ class SnapshotTests(Fixture):
             with self.subTest(store=foreign.ref), self.assertRaises(SnapshotUnavailable):
                 self.reader.current(source_id="src-1", signal_id="sig-a",
                                     snapshot=foreign.snapshot(at(10)))
-        forged = TelemetryReadSnapshot(self.store.ref, 1, at(10), SIM, "context:rev-2")
+        forged = TelemetryReadSnapshot(self.store.ref, 1, at(10), SIM, "context:rev-2",
+                                       "visibility:agent-v1")
         with self.assertRaises(SnapshotUnavailable):
             self.reader.current(source_id="src-1", signal_id="sig-a", snapshot=forged)
         # Same clock_id, different descriptor (resolution or origin): not the same domain.
@@ -314,7 +317,7 @@ class SnapshotTests(Fixture):
                       ClockDescriptor(SIM.clock_id, ClockKind.SIMULATION, Fraction(1),
                                       "model-t1")):
             relabeled = TelemetryReadSnapshot(self.store.ref, 1, at(10), clock,
-                                              "context:rev-1")
+                                              "context:rev-1", "visibility:agent-v1")
             with self.subTest(clock=clock), self.assertRaises(ClockMismatch):
                 self.reader.current(source_id="src-1", signal_id="sig-a",
                                     snapshot=relabeled)
@@ -325,7 +328,8 @@ class SnapshotTests(Fixture):
         self.ingest(obs(0, 1))
         with self.assertRaises(SnapshotUnavailable):
             self.store.snapshot(at(10), ingest_sequence=2)
-        future = TelemetryReadSnapshot(self.store.ref, 5, at(10), SIM, "context:rev-1")
+        future = TelemetryReadSnapshot(self.store.ref, 5, at(10), SIM, "context:rev-1",
+                                       "visibility:agent-v1")
         with self.assertRaises(SnapshotUnavailable):
             self.history(future)
         with self.assertRaises(TelemetryError):
@@ -339,6 +343,91 @@ class SnapshotTests(Fixture):
         self.assertEqual(self.reader.current(source_id="src-1", signal_id="sig-a",
                                              snapshot=empty).status, ReadStatus.NO_DATA)
 
+    def test_visibility_policy_ref_is_pinned_into_snapshot_identity(self) -> None:
+        self.ingest(obs(0, 1))
+        snapshot = self.store.snapshot(at(10))
+        self.assertEqual(snapshot.visibility_policy_ref, "visibility:agent-v1")
+        self.assertEqual(snapshot.as_json()["visibility_policy_ref"], "visibility:agent-v1")
+        self.assertNotIn("mapping_ref", snapshot.as_json())
+        relabeled = TelemetryReadSnapshot(self.store.ref, 1, at(10), SIM, "context:rev-1",
+                                          "visibility:evaluator-v1")
+        self.assertNotEqual(relabeled.snapshot_ref, snapshot.snapshot_ref)
+        with self.assertRaises(SnapshotUnavailable):
+            self.reader.current(source_id="src-1", signal_id="sig-a", snapshot=relabeled)
+        with self.assertRaises(SnapshotUnavailable):
+            self.history(relabeled)
+        other_policy = make_store(visibility_policy_ref="visibility:evaluator-v1")
+        TelemetryIngestor(other_policy).ingest((obs(0, 1),), ingest_time=ingest_at(1))
+        with self.assertRaises(SnapshotUnavailable):
+            self.reader.current(source_id="src-1", signal_id="sig-a",
+                                snapshot=other_policy.snapshot(at(10)))
+        for bad in ("", None):
+            with self.subTest(bad=bad), self.assertRaises(TelemetryError):
+                make_store(visibility_policy_ref=bad)
+
+
+class ResourceBoundTests(Fixture):
+    def reader_with(self, limit: int) -> TimeSeriesReader:
+        return TimeSeriesReader(self.store, max_interval_ticks=24 * 60 * MINUTE,
+                                max_scan_records=limit)
+
+    def read_both(self, reader: TimeSeriesReader, snapshot):
+        return (reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot),
+                reader.history(source_id="src-1", signal_id="sig-a", event_start=at(0),
+                               event_end=snapshot.event_horizon, max_points=100,
+                               snapshot=snapshot))
+
+    def test_scan_at_or_below_limit_succeeds(self) -> None:
+        self.ingest(*(obs(i, i) for i in range(5)))
+        snapshot = self.store.snapshot(at(10))
+        for limit in (5, 6):
+            with self.subTest(limit=limit):
+                current, history = self.read_both(self.reader_with(limit), snapshot)
+                self.assertEqual((current.eligible_count, history.eligible_count), (5, 5))
+
+    def test_scan_above_limit_fails_explicitly(self) -> None:
+        self.ingest(*(obs(i, i) for i in range(5)))
+        snapshot = self.store.snapshot(at(10))
+        reader = self.reader_with(4)
+        with self.assertRaises(ResourceLimitExceeded):
+            reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
+        with self.assertRaises(ResourceLimitExceeded):  # even for a narrow interval
+            reader.history(source_id="src-1", signal_id="sig-a", event_start=at(1),
+                           event_end=at(1), max_points=1, snapshot=snapshot)
+        with self.assertRaises(TelemetryError):
+            TimeSeriesReader(self.store, max_interval_ticks=60, max_scan_records=0)
+
+    def test_scan_failure_leaks_no_counts_or_values(self) -> None:
+        # Candidates beyond T (excluded) push the binding prefix over the limit.
+        self.ingest(obs(0, 1, value=1.0), *(obs(i, 20 + i, value=1000.0 + i)
+                                            for i in range(1, 7)))
+        snapshot = self.store.snapshot(at(10))
+        with self.assertRaises(ResourceLimitExceeded) as raised:
+            self.reader_with(3).current(source_id="src-1", signal_id="sig-a",
+                                        snapshot=snapshot)
+        message = str(raised.exception)
+        self.assertEqual(message, "candidate scan exceeds the reader limit")
+        self.assertIsNone(re.search(r"\d", message))
+        self.assertEqual(raised.exception.args, (message,))
+
+    def test_bound_is_deterministic_per_snapshot_and_k_t_unchanged(self) -> None:
+        self.ingest(obs(0, 2), obs(1, 4))
+        self.ingest(obs(2, 6))
+        snapshot = self.store.snapshot(at(10))   # K=2, three candidates
+        reader = self.reader_with(3)
+        before = self.read_both(reader, snapshot)
+        # Later commits grow the stream past the limit but not this snapshot's prefix.
+        self.ingest(obs(3, 8), obs(4, 15))
+        self.ingest(*(obs(i, i) for i in range(5, 12)))
+        self.assertEqual(self.read_both(reader, snapshot), before)
+        self.assertEqual([s.sequence for s in before[1].samples], [0, 1, 2])
+        with self.assertRaises(ResourceLimitExceeded):
+            reader.current(source_id="src-1", signal_id="sig-a",
+                           snapshot=self.store.snapshot(at(10)))
+        # Other bindings' volume never counts against this binding.
+        self.ingest(*(obs(i, 1, source_id="src-2") for i in range(50)))
+        self.assertEqual(self.read_both(reader, snapshot), before)
+
 
 class ReadSemanticsTests(Fixture):
     def test_out_of_order_arrival_sorted_deterministically(self) -> None:
@@ -349,7 +438,8 @@ class ReadSemanticsTests(Fixture):
                 ingestor = TelemetryIngestor(store)
                 for i, observation in enumerate(order):
                     ingestor.ingest((observation,), ingest_time=ingest_at(i))
-                reader = TimeSeriesReader(store, max_interval_ticks=3600)
+                reader = TimeSeriesReader(store, max_interval_ticks=3600,
+                                          max_scan_records=100)
                 result = reader.history(source_id="src-1", signal_id="sig-a",
                                         event_start=at(0), event_end=at(10),
                                         max_points=10, snapshot=store.snapshot(at(10)))
@@ -391,7 +481,8 @@ class ReadSemanticsTests(Fixture):
                               ({"max_points": 501}, ResourceLimitExceeded)):
             with self.subTest(kwargs=kwargs), self.assertRaises(error):
                 self.history(snapshot, **kwargs)
-        narrow = TimeSeriesReader(self.store, max_interval_ticks=5 * MINUTE)
+        narrow = TimeSeriesReader(self.store, max_interval_ticks=5 * MINUTE,
+                                  max_scan_records=100)
         with self.assertRaises(ResourceLimitExceeded):
             narrow.history(source_id="src-1", signal_id="sig-a", event_start=at(0),
                            event_end=at(10), max_points=10, snapshot=snapshot)
@@ -496,6 +587,10 @@ class ReadSemanticsTests(Fixture):
         self.assertEqual(snapshot.store, self.store.ref)
         self.assertEqual(snapshot.context_ref, "context:rev-1")
         self.assertEqual(snapshot.as_json()["event_clock"]["resolution"], "1/1")
+        current = self.reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
+        empty = self.history(snapshot, start=5, end=at(6))
+        for read in (result, current, empty):  # retention coverage, also for NO_DATA
+            self.assertIs(read.coverage, RetentionCoverage.COMPLETE_FOR_STORE_INCARNATION)
         other = self.store.snapshot(at(10), ingest_sequence=0)
         self.assertNotEqual(other.snapshot_ref, snapshot.snapshot_ref)
 

@@ -30,15 +30,30 @@ SourceObservation            source event fields; no ingest_time
   identity conflicts fail the whole batch; an all-duplicate batch does not advance K.
   Registration (store id, incarnation, namespace, context ref, event/ingest clocks,
   source/signal bindings) is frozen at construction; unknown bindings fail closed.
-- Snapshot resolution rejects another incarnation/namespace/context, a different
-  clock and a future K. Historical K stays readable for the life of the incarnation.
+- `TelemetryReadSnapshot` pins store ref, K, T, event clock, `context_ref` and
+  `visibility_policy_ref`; all of them enter `snapshot_ref`. The visibility policy
+  ref is an opaque immutable identifier frozen in store registration; P1.1A does
+  not evaluate it. `mapping_ref` is absent (cross-clock mapping is unsupported).
+- Snapshot resolution rejects another incarnation/namespace/context/visibility
+  policy ref, a different clock and a future K. Historical K stays readable for
+  the life of the incarnation.
 - Reader: `current` returns the last eligible sample at or before T regardless of
   quality, or `NO_DATA`. `history` requires a same-clock inclusive interval with
-  `event_end <= T`, positive `max_points`, and enforces reader limits
-  (`max_points_limit`, `max_interval_ticks`). Reduction is the frozen
+  `event_end <= T`, positive `max_points`. Reduction is the frozen
   `floor(i * (n - 1) / (m - 1))` (m=1 -> last). Results carry the snapshot (and
   `snapshot_ref`), binding, bounds, eligible/returned counts, sample identities,
-  qualities and reduction policy.
+  qualities, reduction policy and retention coverage.
+- Resource bounds (`TimeSeriesReader`): `max_points_limit`, `max_interval_ticks`
+  and `max_scan_records`. The scan bound applies to the binding's K-committed
+  candidate prefix, sized by bisection before any record is read; above the
+  limit the read raises `ResourceLimitExceeded` with no partial scan, no
+  truncation, and no counts or values in the error. Because the prefix is fixed
+  by (binding, K), a snapshot's pass/fail outcome never changes after later
+  appends, and other bindings never count against it.
+- Retention coverage: results report `COMPLETE_FOR_STORE_INCARNATION`, meaning every
+  record this store incarnation accepted at or before K is retained and was
+  considered. It does not claim the physical/source stream had no missing
+  deliveries, gaps or late data; source completeness is never inferred.
 
 ## Ownership
 
@@ -68,15 +83,15 @@ sample is never visible at T=10 min.
   mappings are deferred.
 - Bindings are plain source/signal registrations; `SignalDescriptor`, value-kind
   checks against descriptors, and binding to plant context revisions are later work.
-- No caller authorization/visibility policy, no multi-source resolution policy
-  (callers select `source_id` explicitly), no quarantine store for conflicts (they
-  are rejected), no derived state features.
-- Snapshots carry no `visibility_policy_ref`/`mapping_ref`, and results disclose no
-  retention coverage: the in-memory incarnation retains everything it accepted, so
-  coverage is complete or the snapshot is unavailable. Both arrive with later
-  visibility/retention work.
-- Resource bounds cover the requested interval and returned points only. History
-  scans the selected binding's records in memory; indexing and a scan cap are deferred.
+- No caller authorization: `visibility_policy_ref` is pinned and matched, not
+  evaluated; authorization arrives with application integration.
+- No multi-source resolution policy (callers select `source_id` explicitly), no
+  quarantine store for conflicts (they are rejected), no derived state features.
+- No indexing: within the scan bound, reads filter the binding's K-committed prefix
+  linearly. The bound counts candidates committed at or before K, including those
+  later excluded by T or by the interval.
+- No retention eviction, so coverage is always `COMPLETE_FOR_STORE_INCARNATION`;
+  partial-coverage states arrive with retention policies.
 
 ## Why `ReferenceWorld.history` is unchanged
 
