@@ -31,6 +31,7 @@ The Playground backend is initially an integration layer in this repo, not a fou
 
 ## Benchmark / evaluation
 
+- [`benchmark-case-v0.md`](benchmark-case-v0.md) — frozen D0 per-case identity, evaluator truth, deterministic Agent projection, trusted setup attestation, deterministic scoring vector, re-scoring and leakage-audit contract.
 - [`benchmark-design-v0.md`](benchmark-design-v0.md) — scenario-family design, identifiability pilot, difficulty, partitioning, leakage controls, and strong C0 baseline.
 - [`evaluation-v0.md`](evaluation-v0.md) — environment/runtime/task/scientific-behavior metrics plus canonical capability and orchestration ablations.
 

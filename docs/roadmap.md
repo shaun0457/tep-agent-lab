@@ -124,6 +124,47 @@ Context Layer views can join the same application boundary for SOP/manual/incide
 
 Go is not part of this track. A distributed Go control plane is a future independent decision if multi-tenant deployment/fleet orchestration creates a concrete need.
 
+
+## D0 — Benchmark contract freeze — current
+
+D0 is benchmark infrastructure, not a new Agent capability.
+
+Owning spec: `docs/specs/benchmark-case-v0.md`.
+
+### D0.0 — Contract freeze — complete after this documentation PR
+
+Freeze:
+
+- typed `BenchmarkCase` identity/version/partition;
+- separate EVALUATOR-only ground truth;
+- deterministic `AgentCaseProjection`;
+- trusted `CaseSetupAttestation`;
+- P0 benchmark binding/manifest fields;
+- deterministic metric-vector scoring and re-scoring;
+- hard-fail leakage audit.
+
+D0 deliberately does **not** add C0, empirical difficulty labels, a real LLM,
+multi-fault fixtures, UI features or new simulator capability.
+
+### D0.1 — Benchmark contract implementation — next
+
+Implement one deterministic DEVELOPMENT RCA case proving the frozen contract through
+the normal P0 lifecycle and fake-provider runtime path.
+
+Exit:
+
+```text
+typed fixture + truth
+ -> deterministic Agent projection
+ -> P0 prepare + setup attestation
+ -> blind fake-provider run
+ -> leakage audit
+ -> deterministic saved-result re-score
+```
+
+After D0.1, add the healthy/variant/C0/identifiability pilot before making benchmark
+difficulty or Agent-capability claims.
+
 ## Phase 0 — Reproducible lab / benchmark shell
 
 Specs: `evaluation-v0.md`, `benchmark-design-v0.md`

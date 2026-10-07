@@ -1,9 +1,11 @@
 # Evaluation v0
 
-Status: proposal  
+Status: accepted evaluation matrix; concrete D0 case/scorer contract frozen in `benchmark-case-v0.md`  
 Owner repo: `tep-agent-lab`
 
 ## Goal
+
+The concrete D0 fixture identity, Agent projection, setup attestation, deterministic metric-vector and leakage-audit schemas are owned by [`benchmark-case-v0.md`](benchmark-case-v0.md). This document remains the canonical cross-study evaluation/capability/orchestration matrix.
 
 Provide the sole canonical benchmark/evaluation matrix for the TEP Agent Lab and measure both task outcome and investigation process without conflating capability, orchestration, tool exposure, or hidden scoring information.
 

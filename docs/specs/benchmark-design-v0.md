@@ -1,9 +1,11 @@
 # Benchmark Design and Identifiability v0
 
-Status: proposal  
+Status: accepted design guidance; concrete D0 fixture contract frozen in `benchmark-case-v0.md`  
 Owner repo: `tep-agent-lab`
 
 ## Goal
+
+The concrete per-case schema, hidden/visible split, setup attestation, scorer vector and leakage-audit contract are owned by [`benchmark-case-v0.md`](benchmark-case-v0.md). This document owns later scenario-family design, identifiability, C0 and empirical difficulty policy.
 
 Create benchmark cases that test investigation capability rather than memorization, trivial candidate enumeration, topology leakage, or impossible discrimination.
 
