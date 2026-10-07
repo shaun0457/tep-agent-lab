@@ -146,11 +146,14 @@ class PlaygroundCase(unittest.TestCase):
         return (*pinned_tep_sim_sources(REVISIONS.tep_sim), self.case_source)
 
     def prepare(self, run_id="run-1", provider=None, **changes):
+        """A non-benchmark P0 run that still registers EVALUATOR-only sources.
+
+        Bound benchmark runs (typed setup attestation) are covered in test_benchmark.
+        """
         self.manager.create(run_id, request(**changes))
         return self.manager.prepare(
             run_id, provider=provider or investigation_script(),
-            context_sources=self.sources(), case_setup=harness_case,
-            benchmark=BenchmarkRefs(CASE_SOURCE_ID, EVALUATOR_BINDINGS_SOURCE_ID))
+            context_sources=self.sources(), case_setup=harness_case)
 
     def manifests_on_disk(self, run_id="run-1"):
         return sorted(path.relative_to(self.root).as_posix()
@@ -326,9 +329,17 @@ class LifecycleTests(PlaygroundCase):
         self.failed_prepare((*pinned_tep_sim_sources(REVISIONS.tep_sim), leaky))
 
     def test_hidden_truth_refs_must_be_evaluator_only(self):
-        self.failed_prepare(self.sources(),
-                            benchmark=BenchmarkRefs(evaluator_ground_truth_source_id=(
-                                PROCESS_GRAPH_SOURCE_ID)))
+        refs = BenchmarkRefs(
+            benchmark_version="b/v0", case_id="case-001", case_version="1",
+            partition="DEVELOPMENT", benchmark_case_source_id=CASE_SOURCE_ID,
+            evaluator_ground_truth_source_id=PROCESS_GRAPH_SOURCE_ID,
+            agent_projection_checksum="0" * 64, scorer_version="s/v0",
+            setup_policy_version="p/v0", leakage_policy_version="l/v0")
+        self.failed_prepare(self.sources(), benchmark=refs)
+        failure = [event for event in self.manager.queries(
+            "run-1", ProjectionScope.EVALUATOR).events()["events"]
+            if event["type"] == "PREPARE_FAILED"]
+        self.assertIn("EVALUATOR-only", failure[0]["payload"]["detail"])
 
     def test_agent_source_cannot_alias_hidden_content(self):
         alias = replace(self.case_source, source_id="innocent-notes",
@@ -628,8 +639,9 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotIn("benchmark", agent_manifest["manifest"])
         self.assertNotIn("storage", agent_manifest["manifest"])
         evaluator_manifest = self.evaluator.manifest_view()
-        self.assertEqual(CASE_SOURCE_ID, evaluator_manifest["manifest"]["benchmark"][
-            "benchmark_case_source_id"])
+        # unbound (non-benchmark) run: boolean-only setup record, no hidden refs
+        self.assertEqual({"case_setup_applied": True},
+                         dict(evaluator_manifest["manifest"]["benchmark"]))
         agent_views = [agent_inventory, agent_manifest, self.queries.run_summary(),
                        self.queries.process_graph(), self.queries.telemetry(),
                        self.queries.investigation(), self.queries.branch_tree(),
