@@ -96,23 +96,33 @@ fn frozen_sidecar_via_shell_ext_and_application_ipc() {
     assert_eq!(tauri::async_runtime::block_on(backend.process_id()), None);
 
     // Killing a one-file bootloader must not leave its Python worker behind.
-    let backend = tauri::async_runtime::block_on(async {
-        BackendProcess::packaged(app.handle()).unwrap()
-    });
-    assert!(tauri::async_runtime::block_on(backend.request("get_run", json!({}))).unwrap().ok);
+    let backend =
+        tauri::async_runtime::block_on(async { BackendProcess::packaged(app.handle()).unwrap() });
+    assert!(
+        tauri::async_runtime::block_on(backend.request("get_run", json!({})))
+            .unwrap()
+            .ok
+    );
     let pid = tauri::async_runtime::block_on(backend.process_id()).unwrap();
     assert_bootloader_death_reaps_worker(&backend, pid);
 }
 
 fn assert_bootloader_death_reaps_worker(backend: &BackendProcess, pid: u32) {
-    use std::{mem::size_of, os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle}};
+    use std::{
+        mem::size_of,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
     use windows_sys::Win32::{
         Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
         System::{
-            Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
-                                  PROCESSENTRY32W, TH32CS_SNAPPROCESS},
-            Threading::{OpenProcess, TerminateProcess, WaitForSingleObject,
-                        PROCESS_TERMINATE, PROCESS_SYNCHRONIZE},
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+                PROCESS_TERMINATE,
+            },
         },
     };
     // SAFETY: owned valid handles are closed once; only the test's backend is killed.
@@ -137,13 +147,21 @@ fn assert_bootloader_death_reaps_worker(backend: &BackendProcess, pid: u32) {
         assert!(!raw.is_null());
         let parent = OwnedHandle::from_raw_handle(raw);
         assert_ne!(TerminateProcess(parent.as_raw_handle(), 1), 0);
-        assert_eq!(WaitForSingleObject(parent.as_raw_handle(), 5000), WAIT_OBJECT_0);
-        assert_eq!(tauri::async_runtime::block_on(backend.request("get_run", json!({})))
-            .unwrap_err(), BridgeError::BackendExited);
+        assert_eq!(
+            WaitForSingleObject(parent.as_raw_handle(), 5000),
+            WAIT_OBJECT_0
+        );
+        assert_eq!(
+            tauri::async_runtime::block_on(backend.request("get_run", json!({}))).unwrap_err(),
+            BridgeError::BackendExited
+        );
         tauri::async_runtime::block_on(backend.shutdown());
         for worker in workers {
-            assert_eq!(WaitForSingleObject(worker.as_raw_handle(), 5000), WAIT_OBJECT_0,
-                       "orphaned frozen worker");
+            assert_eq!(
+                WaitForSingleObject(worker.as_raw_handle(), 5000),
+                WAIT_OBJECT_0,
+                "orphaned frozen worker"
+            );
         }
     }
 }
