@@ -54,7 +54,7 @@ attachment is introduced. E0.2C owns process lifecycle and IPC framing.
 
 Contract and error codes: `docs/e0-2b-application-transport.md`.
 
-### E0.2C — Tauri desktop client
+### E0.2C — Tauri desktop client — complete
 
 #### E0.2C1 — Python desktop backend process — complete
 
@@ -74,10 +74,20 @@ Contract: `docs/e0-2c-desktop-backend.md`.
 
 Contract and development setup: `docs/e0-2c-tauri-shell.md`.
 
-#### E0.2C2B — Packaged Python sidecar — pending
+#### E0.2C2B — Packaged Python sidecar — complete
 
-Packaging Python as a distributable external sidecar remains deferred.
-E0.2C as a whole remains incomplete.
+- PyInstaller backend with embedded exact build provenance and canonical pins;
+- Rust-owned release externalBin launch, shared bounded process bridge;
+- Windows x86_64 frozen four-read smoke and unsigned NSIS CI artifact;
+- source/development Python workflow remains available.
+
+Contract: `docs/e0-2c-packaged-sidecar.md`.
+Architecture = platform-neutral; C2B validation matrix = Windows x86_64 only.
+macOS/Linux packaging is deferred.
+
+**E0.2 COMPLETE = MVP UI is no longer an architectural dependency.**
+Static E0 HTML and Tauri Desktop are replaceable clients of Application/P0.
+E1 remains the richer Industrial Observatory UI and is not complete.
 
 Target UI stack:
 

@@ -7,6 +7,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+use tauri_plugin_shell::ShellExt;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -153,6 +154,31 @@ pub struct BackendProcess {
 }
 
 impl BackendProcess {
+    /// Host-resolved externalBin; official Command -> std Command adapter preserves
+    /// ordinary OS pipes, EOF and Tokio kill/reap instead of plugin event framing.
+    pub fn packaged<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Self, BridgeError> {
+        use tauri::Manager;
+        let sessions = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| BridgeError::BackendNotRunning)?
+            .join("sessions");
+        std::fs::create_dir_all(&sessions).map_err(|_| BridgeError::BackendNotRunning)?;
+        let output = tempfile::Builder::new()
+            .prefix("session-")
+            .tempdir_in(sessions)
+            .map_err(|_| BridgeError::BackendNotRunning)?
+            .keep();
+        let sidecar = app
+            .shell()
+            .sidecar("tep-agent-backend") // Installed externalBin basename, beside app.
+            .map_err(|_| BridgeError::BackendNotRunning)?
+            .args(["--run-id", RUN_ID, "--output-root"])
+            .arg(output);
+        let command: std::process::Command = sidecar.into();
+        Self::spawn(Command::from(command))
+    }
+
     /// Host-only development configuration: executable has no frontend input.
     pub fn development() -> Result<Self, BridgeError> {
         let executable = std::env::var_os("TEP_AGENT_PYTHON").unwrap_or_else(|| "python".into());
