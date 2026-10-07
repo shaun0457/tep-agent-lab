@@ -23,6 +23,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from enum import StrEnum
 from fractions import Fraction
 import hashlib
@@ -182,9 +183,13 @@ def _value_key(value: Scalar) -> tuple[str, Any]:
     return (type(value).__name__, value)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, eq=False)
 class SourceObservation:
-    """Source event fields before acceptance; a source cannot supply ingest_time."""
+    """Source event fields before acceptance; a source cannot supply ingest_time.
+
+    Equality and hashing are type-strict on ``value`` (1, 1.0 and True differ; so
+    do 0.0 and -0.0), matching duplicate/conflict identity semantics.
+    """
 
     signal_id: str
     source_id: str
@@ -207,18 +212,6 @@ class SourceObservation:
             if getattr(self, name) is not None:
                 _checked_id(name, getattr(self, name))
 
-
-@dataclass(frozen=True, kw_only=True)
-class SignalSample(SourceObservation):
-    """Canonical immutable sample; ``ingest_time`` is assigned at acceptance."""
-
-    ingest_time: TimePoint
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if not isinstance(self.ingest_time, TimePoint):
-            raise TelemetryError("ingest_time must be a TimePoint")
-
     @property
     def identity(self) -> SampleIdentity:
         return SampleIdentity(self.source_id, self.signal_id, self.sequence)
@@ -232,6 +225,32 @@ class SignalSample(SourceObservation):
         return (self.signal_id, self.source_id, self.event_time, self.sequence,
                 _value_key(self.value), self.quality, self.source_status_code,
                 self.source_metadata_ref)
+
+    def _key(self) -> tuple[Any, ...]:
+        return self.source_content()
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not type(self):
+            return NotImplemented
+        return self._key() == other._key()  # type: ignore[attr-defined]
+
+    def __hash__(self) -> int:
+        return hash(self._key())
+
+
+@dataclass(frozen=True, kw_only=True, eq=False)
+class SignalSample(SourceObservation):
+    """Canonical immutable sample; ``ingest_time`` is assigned at acceptance."""
+
+    ingest_time: TimePoint
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.ingest_time, TimePoint):
+            raise TelemetryError("ingest_time must be a TimePoint")
+
+    def _key(self) -> tuple[Any, ...]:
+        return (*self.source_content(), self.ingest_time)
 
     def as_json(self) -> dict[str, Any]:
         return {"signal_id": self.signal_id, "source_id": self.source_id,
@@ -311,9 +330,11 @@ class TelemetryReadSnapshot:
                 "event_horizon": self.event_horizon.as_json(),
                 "event_clock": self.event_clock.as_json(), "context_ref": self.context_ref}
 
-    @property
+    @cached_property
     def snapshot_ref(self) -> str:
-        body = json.dumps(self.as_json(), sort_keys=True, separators=(",", ":"))
+        # Same canonical JSON settings as persistence.canonical_json.
+        body = json.dumps(self.as_json(), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False)
         return "telemetry-snapshot:sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -329,8 +350,9 @@ class InMemoryTimeSeriesStore:
                  event_clock: ClockDescriptor, ingest_clock: ClockDescriptor,
                  bindings: Mapping[str, Iterable[str]],
                  incarnation: str | None = None) -> None:
-        self.ref = StoreRef(store_id, incarnation or f"inc-{secrets.token_hex(8)}",
-                            namespace)
+        if incarnation is None:
+            incarnation = f"inc-{secrets.token_hex(8)}"
+        self.ref = StoreRef(store_id, incarnation, namespace)
         self.context_ref = _checked_id("context_ref", context_ref)
         if not (isinstance(event_clock, ClockDescriptor)
                 and isinstance(ingest_clock, ClockDescriptor)):
@@ -363,28 +385,38 @@ class InMemoryTimeSeriesStore:
             return self._revision
 
     def require_binding(self, source_id: str, signal_id: str) -> None:
+        if not (isinstance(source_id, str) and isinstance(signal_id, str)):
+            raise TelemetryError("source_id and signal_id must be strings")
         if signal_id not in self._bindings.get(source_id, frozenset()):
             raise UnknownBinding("unregistered source/signal binding")
 
-    def _validate(self, sample: Any) -> SignalSample:
-        if not isinstance(sample, SignalSample):
-            raise TelemetryError("store accepts SignalSample records only")
-        self.require_binding(sample.source_id, sample.signal_id)
-        require_clock(sample.event_time, self.event_clock, "event_time")
-        require_clock(sample.ingest_time, self.ingest_clock, "ingest_time")
-        return sample
+    def _accept(self, observation: Any, ingest_time: TimePoint) -> SignalSample:
+        # Exact type: a prebuilt SignalSample would smuggle in its own ingest_time.
+        if type(observation) is not SourceObservation:
+            raise TelemetryError("store accepts SourceObservation records only")
+        self.require_binding(observation.source_id, observation.signal_id)
+        require_clock(observation.event_time, self.event_clock, "event_time")
+        fields = {name: getattr(observation, name)
+                  for name in SourceObservation.__dataclass_fields__}
+        return SignalSample(**fields, ingest_time=ingest_time)
 
-    def append(self, sample: SignalSample) -> AppendResult:
-        return self.append_batch((sample,))
+    def append(self, observation: SourceObservation, *,
+               ingest_time: TimePoint) -> AppendResult:
+        return self.append_batch((observation,), ingest_time=ingest_time)
 
-    def append_batch(self, samples: Sequence[SignalSample]) -> AppendResult:
-        """Validate everything, then publish all new records under one revision.
+    def append_batch(self, observations: Sequence[SourceObservation], *,
+                     ingest_time: TimePoint) -> AppendResult:
+        """Accept a batch at one trusted ``ingest_time`` under one commit revision.
 
-        Exact duplicates (ignoring proposed ingest_time) resolve to the accepted
-        record; any identity conflict rejects the whole batch; an all-duplicate
-        batch leaves the revision unchanged.
+        The store builds every SignalSample itself. Validation completes before
+        visibility. Exact duplicates (ignoring the newly proposed ingest_time)
+        resolve to the accepted record; any identity conflict rejects the whole
+        batch; an all-duplicate batch leaves the revision unchanged.
         """
-        batch = tuple(self._validate(sample) for sample in samples)
+        if not isinstance(observations, Sequence) or isinstance(observations, (str, bytes)):
+            raise TelemetryError("observations must be a sequence of SourceObservation")
+        require_clock(ingest_time, self.ingest_clock, "ingest_time")
+        batch = tuple(self._accept(observation, ingest_time) for observation in observations)
         if not batch:
             raise TelemetryError("batch must contain at least one sample")
         with self._lock:
@@ -433,25 +465,22 @@ class InMemoryTimeSeriesStore:
                 raise SnapshotUnavailable("snapshot ingest_sequence is not yet committed")
         return snapshot
 
-    def eligible(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot,
-                 event_start: int | None = None) -> list[SignalSample]:
-        """Records with commit <= K and start <= event <= T, in deterministic read order.
+    def _eligible(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot,
+                  start_ticks: int | None, end_ticks: int) -> list[SignalSample]:
+        """Records with commit <= K and start <= event <= end (<= T), unordered.
 
-        Cutoffs are applied here, before any caller sorts, reduces or counts.
+        Reader-internal: the reader resolves the snapshot and validates bounds and
+        limits first. Both cutoffs apply here, before any sort, reduction or count.
         """
-        self.resolve(snapshot)
         self.require_binding(source_id, signal_id)
         with self._lock:
             stream = self._streams.get((source_id, signal_id), [])
             # Commit order makes the K-visible records an exact prefix.
             prefix = stream[:bisect_right(stream, snapshot.ingest_sequence,
                                           key=lambda record: record.commit_revision)]
-        horizon = snapshot.event_horizon.ticks
-        samples = [record.sample for record in prefix
-                   if record.sample.event_time.ticks <= horizon
-                   and (event_start is None or record.sample.event_time.ticks >= event_start)]
-        samples.sort(key=read_order)
-        return samples
+        return [record.sample for record in prefix
+                if record.sample.event_time.ticks <= end_ticks
+                and (start_ticks is None or record.sample.event_time.ticks >= start_ticks)]
 
 
 def read_order(sample: SignalSample) -> tuple[int, str, int]:
@@ -460,22 +489,19 @@ def read_order(sample: SignalSample) -> tuple[int, str, int]:
 
 
 class TelemetryIngestor:
-    """Acceptance boundary: the trusted caller supplies ingest_time, never the source."""
+    """Source-facing acceptance boundary.
+
+    Sources hand over SourceObservations only; the trusted caller supplies
+    ``ingest_time``. The store builds every SignalSample itself, so no caller can
+    insert a prebuilt sample carrying a backdated acceptance time.
+    """
 
     def __init__(self, store: InMemoryTimeSeriesStore) -> None:
         self._store = store
 
     def ingest(self, observations: Sequence[SourceObservation], *,
                ingest_time: TimePoint) -> AppendResult:
-        require_clock(ingest_time, self._store.ingest_clock, "ingest_time")
-        samples = []
-        for observation in observations:
-            if type(observation) is not SourceObservation:
-                raise TelemetryError("ingestor accepts SourceObservation records only")
-            fields = {name: getattr(observation, name)
-                      for name in SourceObservation.__dataclass_fields__}
-            samples.append(SignalSample(**fields, ingest_time=ingest_time))
-        return self._store.append_batch(samples)
+        return self._store.append_batch(observations, ingest_time=ingest_time)
 
 
 class ReadStatus(StrEnum):
@@ -559,9 +585,11 @@ class TimeSeriesReader:
     def current(self, *, source_id: str, signal_id: str,
                 snapshot: TelemetryReadSnapshot) -> CurrentResult:
         """Last eligible sample at or before T, whatever its quality, or NO_DATA."""
-        samples = self._store.eligible(source_id, signal_id, snapshot)
+        self._store.resolve(snapshot)
+        samples = self._store._eligible(source_id, signal_id, snapshot, None,
+                                        snapshot.event_horizon.ticks)
         return CurrentResult(snapshot, source_id, signal_id, len(samples),
-                             samples[-1] if samples else None)
+                             max(samples, key=read_order) if samples else None)
 
     def history(self, *, source_id: str, signal_id: str, event_start: TimePoint,
                 event_end: TimePoint, max_points: int,
@@ -579,9 +607,9 @@ class TimeSeriesReader:
             raise ResourceLimitExceeded("max_points exceeds the reader limit")
         if event_end.ticks - event_start.ticks > self.max_interval_ticks:
             raise ResourceLimitExceeded("event interval exceeds the reader limit")
-        eligible = [sample for sample in self._store.eligible(
-            source_id, signal_id, snapshot, event_start.ticks)
-            if sample.event_time.ticks <= event_end.ticks]
+        eligible = sorted(self._store._eligible(source_id, signal_id, snapshot,
+                                                event_start.ticks, event_end.ticks),
+                          key=read_order)
         selected = tuple(eligible[i] for i in reduce_indices(len(eligible), max_points))
         return HistoryResult(snapshot, source_id, signal_id, event_start, event_end,
                              max_points, len(eligible), selected)

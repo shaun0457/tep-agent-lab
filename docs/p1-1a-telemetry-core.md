@@ -22,7 +22,8 @@ SourceObservation            source event fields; no ingest_time
 - `SignalSample` with identity `(source_id, signal_id, sequence)`, quality
   `GOOD | UNCERTAIN | BAD`, scalar/null values, nonfinite numbers rejected.
 - `AcceptedRecord(sample, commit_revision, store, context_ref)`: commit data lives
-  in the envelope, never in the sample. `ingest_sequence` (K) is store-wide and
+  in the envelope, never in the sample. The store builds every sample from a
+  `SourceObservation` plus trusted `ingest_time`. `ingest_sequence` (K) is store-wide and
   distinct from `sample.sequence`.
 - Store: atomic batches share one revision; exact duplicates (type-strict value
   equality, ignoring the newly proposed ingest_time) resolve to the original record;
@@ -53,7 +54,7 @@ contains no simulator-specific vocabulary.
 > A read pinned to event horizon T and ingestion revision K never observes a sample
 > whose commit revision exceeds K or whose event time exceeds T.
 
-`InMemoryTimeSeriesStore.eligible` applies both cutoffs (and the binding filter)
+The reader-internal `InMemoryTimeSeriesStore._eligible` applies both cutoffs (and the binding filter)
 before sorting; `current`, `history`, counts and reduction only see that set.
 Regression tests: an 8-minute sample committed at K=3 is invisible to a (T=10 min,
 K=2) snapshot, whose repeated reads stay equal and `repr`-identical; a 15-minute

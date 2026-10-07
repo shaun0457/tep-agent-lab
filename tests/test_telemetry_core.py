@@ -108,6 +108,8 @@ class RecordValidationTests(Fixture):
         for bindings in ({}, {"src-1": ()}, {"src-1": "sig-a"}, {"": ("sig-a",)}):
             with self.subTest(bindings=bindings), self.assertRaises(TelemetryError):
                 make_store(bindings=bindings)
+        with self.assertRaises(TelemetryError):  # empty incarnation never becomes random
+            make_store(incarnation="")
         with self.assertRaises(TelemetryError):
             make_store(event_clock="sim-run-1")
 
@@ -141,8 +143,20 @@ class RecordValidationTests(Fixture):
                                  ingest_time=ingest_at(-5))
         with self.assertRaises(TelemetryError):
             self.ingestor.ingest((backdated,), ingest_time=ingest_at(1))
+        with self.assertRaises(TelemetryError):  # the store itself refuses prebuilt samples
+            self.store.append(backdated, ingest_time=ingest_at(1))
+        with self.assertRaises(TelemetryError):  # a bare observation is not a batch
+            self.store.append_batch(obs(0, 1), ingest_time=ingest_at(1))  # type: ignore[arg-type]
+        self.assertEqual(self.store.current_ingest_sequence, 0)
         accepted = self.ingest(obs(0, 1)).records[0].sample
         self.assertEqual(accepted.ingest_time, ingest_at(1000))
+
+    def test_sample_equality_is_type_strict(self) -> None:
+        for left, right in ((1, 1.0), (1, True), (0.0, -0.0)):
+            with self.subTest(left=left, right=right):
+                self.assertNotEqual(obs(0, 1, value=left), obs(0, 1, value=right))
+        self.assertEqual(obs(0, 1, value=1.5), obs(0, 1, value=1.5))
+        self.assertEqual(len({obs(0, 1), obs(0, 1)}), 1)
 
     def test_unregistered_binding_fails_closed(self) -> None:
         with self.assertRaises(UnknownBinding):
@@ -152,6 +166,9 @@ class RecordValidationTests(Fixture):
         self.ingest(obs(0, 1))
         with self.assertRaises(UnknownBinding):
             self.reader.current(source_id="src-9", signal_id="sig-a",
+                                snapshot=self.store.snapshot(at(10)))
+        with self.assertRaises(TelemetryError):  # unhashable id fails closed, not TypeError
+            self.reader.current(source_id=["src-1"], signal_id="sig-a",  # type: ignore[arg-type]
                                 snapshot=self.store.snapshot(at(10)))
 
 
@@ -175,9 +192,8 @@ class AppendSemanticsTests(Fixture):
         self.assertEqual(self.store.current_ingest_sequence, 2)
         snapshot = self.store.snapshot(at(10))
         self.assertEqual(self.history(snapshot).eligible_count, 3)
-        self.assertEqual(self.store.append(SignalSample(
-            signal_id="sig-b", source_id="src-1", event_time=at(1), sequence=0,
-            value="OPEN", quality=Quality.GOOD, ingest_time=ingest_at(1))).ingest_sequence, 3)
+        self.assertEqual(self.store.append(obs(0, 1, value="OPEN", signal_id="sig-b"),
+                                           ingest_time=ingest_at(1)).ingest_sequence, 3)
 
     def test_all_duplicate_batch_is_noop(self) -> None:
         first = self.ingest(obs(0, 1), obs(1, 2))
@@ -487,8 +503,8 @@ class ReadSemanticsTests(Fixture):
 class BoundaryTests(unittest.TestCase):
     SOURCE = Path(telemetry.__file__).read_text(encoding="utf-8")
     ALLOWED_IMPORTS = {"__future__", "bisect", "collections.abc", "dataclasses", "enum",
-                       "fractions", "hashlib", "json", "math", "secrets", "threading",
-                       "typing"}
+                       "fractions", "functools", "hashlib", "json", "math", "secrets",
+                       "threading", "typing"}
 
     def test_generic_module_imports_stdlib_only(self) -> None:
         imported = set()
