@@ -462,6 +462,36 @@ Rules:
 
 The backend may expose a transport-neutral `get_artifact(ref)` style service. HTTP download endpoints are a later adapter.
 
+
+## D0 benchmark binding
+
+The concrete D0 benchmark fixture/scorer contract is owned by
+`benchmark-case-v0.md`. P0 remains the run/provenance owner and MUST NOT gain a
+second benchmark execution path.
+
+For benchmark runs, the existing trusted `BenchmarkRefs` binding is extended to
+carry immutable benchmark identity/version/partition, exact EVALUATOR-only case
+and ground-truth source ids, Agent projection checksum, and policy/scorer versions.
+
+The internal `RunManifest.benchmark` records those values plus the typed
+`CaseSetupAttestation` produced by trusted benchmark setup.
+
+Rules:
+
+- both benchmark fixture and evaluator ground-truth sources are EVALUATOR-only;
+- benchmark READY requires a valid setup attestation;
+- failed/missing benchmark setup attestation aborts preparation atomically;
+- `RunManifest.agent_projection()` excludes the benchmark/internal section;
+- AGENT context/source inventory must not reveal hidden source ids, paths or counts;
+- non-benchmark developer/demo runs may retain the current empty refs and boolean-only
+  `case_setup_applied` behavior;
+- benchmark harness/projection/scorer live in the lab/evaluation layer, not in generic
+  runtime authority or simulator internals.
+
+P0 may persist the typed setup attestation in the internal manifest because the
+internal manifest is trusted/EVALUATOR state. It must not copy the raw hidden
+setup into Agent-visible task metadata or artifacts.
+
 ## Blind versus evaluator projections
 
 ### AGENT / blind
