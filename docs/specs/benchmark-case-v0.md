@@ -206,14 +206,18 @@ Rules:
 - `initial_time_hours` equals the setup timeline (`pre + post` or `pre_observation + observation`);
 - a healthy case is never encoded as a disabled disturbance: `value = 0`, `disturbance_id = null`, an empty or null `intervention`, or any other disturbance spelling is rejected;
 - `EvaluatorGroundTruth.causal_claim.mechanism = NO_ABNORMAL_CAUSE` exactly when the setup is `NO_INTERVENTION`, and `scoring.healthy_outcome_enabled = true` exactly for such a case (checked by the harness, which pairs case and truth);
-- the LeakageAudit of a `NO_INTERVENTION` case also treats its setup kind, setup schema and setup policy version as hidden truth labels.
+- leakage policy v1 (below) also treats a `NO_INTERVENTION` case's setup kind, setup schema and setup policy version as hidden truth labels.
 
-Trusted setup policy versions:
+Trusted setup and leakage policy versions follow the setup schema:
 
 ```text
 benchmark-setup/v0 -> tep-agent-lab.benchmark-setup-policy/v0
+                      tep-agent-lab.benchmark-leakage-policy/v0
 benchmark-setup/v1 -> tep-agent-lab.benchmark-setup-policy/v1
+                      tep-agent-lab.benchmark-leakage-policy/v1
 ```
+
+Leakage policy v1 is leakage policy v0 plus, for a `NO_INTERVENTION` setup, the hidden labels `NO_INTERVENTION`, `tep-agent-lab.benchmark-setup/v1` and `tep-agent-lab.benchmark-setup-policy/v1`. A setup/v1 `DISTURBANCE` case gets no extra labels, so it audits exactly like v0; it is reported as v1 only because the mapping is per setup schema. No registered fixture uses setup/v1 `DISTURBANCE`. `BenchmarkRefs.leakage_policy_version` and `LeakageAudit.leakage_policy_version` name the policy that actually audits the case. Leakage policy v0 behavior and the incident fixtures' v0 identity are unchanged.
 
 A `NO_INTERVENTION` setup may only advance the deterministic reference world, observe the sanitized Agent-visible state and attest. It applies nothing, calls no Agent tool and reads no hidden simulator state. It is still trusted setup and still produces a `CaseSetupAttestation`; benchmark READY without one remains forbidden.
 

@@ -12,6 +12,13 @@ balanced or statistically meaningful.** This change adds no C0, no candidate
 enumeration, no trajectory ranking, no `NO_ABNORMAL` classifier, and no
 identifiability or difficulty claim. Those belong to D0.2C.
 
+**`rca-dev-004` is a DEVELOPMENT candidate/plumbing fixture. The current family is NOT
+valid for healthy-vs-incident comparative evaluation**, because goal wording itself is
+correlated with healthy/incident status, and so are other Agent-visible nuisances (see
+"D0.2C nuisances"). "LeakageAudit PASS" below means the deterministic structural audit:
+no evaluator label, source ref or setup checksum appears on an Agent surface. It does not
+mean the family is blind at the family-comparison level.
+
 ## What changed
 
 | Concern | Change |
@@ -20,13 +27,13 @@ identifiability or difficulty claim. Those belong to D0.2C.
 | Setup policy | `benchmark-setup-policy/v0` for v0 setups (unchanged for `rca-dev-001..003`), `benchmark-setup-policy/v1` for v1 setups. The harness puts the matching version in `BenchmarkRefs` and in the attestation. |
 | Trusted setup | `BenchmarkCaseSetup` runs one timeline. For `NO_INTERVENTION` that is advance `pre_observation_hours`, advance `observation_hours`, observe, attest. It never applies anything. |
 | Outcome consistency | `BenchmarkHarness` rejects any case/truth pair unless `NO_ABNORMAL_CAUSE` truth goes with exactly a `NO_INTERVENTION` setup, and unless `healthy_outcome_enabled` is true exactly for that healthy case. |
-| Leakage labels | For a `NO_INTERVENTION` case, `_truth_labels` also tokenizes the setup kind, setup/v1 schema and setup policy/v1, so the production LeakageAudit fails on them. setup/v0 audits are unchanged. |
+| Leakage policy | `benchmark-leakage-policy/v0` for setup/v0 cases (unchanged identity and behavior for `rca-dev-001..003`), `benchmark-leakage-policy/v1` for setup/v1 cases. v1 adds, for a `NO_INTERVENTION` case, the hidden labels `NO_INTERVENTION`, `tep-agent-lab.benchmark-setup/v1` and `tep-agent-lab.benchmark-setup-policy/v1`. `leakage_policy_version(setup)` selects the policy; `BenchmarkRefs` and every emitted `LeakageAudit` carry the policy that actually audited the case. |
 | Fixture | `rca-dev-004` case and ground-truth pair, appended to the explicit EVALUATOR registry. |
 | Tests | `tests/test_benchmark_healthy.py`. In `tests/test_benchmark_family.py` only the exact-registry assertion now lists four fixtures and probes `rca-dev-005` as the unknown identity. |
 
 Unchanged: `benchmark-case/v0`, `benchmark-ground-truth/v0`, the Agent projection and
-its policy, `CaseSetupAttestation` and P0, the tool and orchestration policies, the
-leakage policy and the scorer (`benchmark-scorer/v0`).
+its policy, `CaseSetupAttestation` and P0, the tool and orchestration policies, leakage
+policy v0 and the scorer (`benchmark-scorer/v0`).
 
 ### Healthy is structurally explicit
 
@@ -108,6 +115,8 @@ Frozen canonical-JSON sha256 values (both sources `visibility = EVALUATOR`):
 | `tep-agent-lab.benchmark-case.rca-dev-004.v1` | `2b30594c0e7f286b7dbb07b1dc25638c80b59d7af202e9c1f8ceba6d513427af` |
 | `tep-agent-lab.benchmark-ground-truth.rca-dev-004.v1` | `f8c146ee10fea247a9e924ab51a06aacf3943632527de4d044b9c328122813cd` |
 
+`BenchmarkRefs` (and so the internal manifest) records `setup_policy_version =
+benchmark-setup-policy/v1` and `leakage_policy_version = benchmark-leakage-policy/v1`.
 The setup attestation of a prepared run records `setup_policy_version =
 benchmark-setup-policy/v1`, `operation_count = 2` (two advances, nothing applied) and
 `final_simulation_time_hours = 0.6`. The run also records the case/truth source
@@ -149,11 +158,34 @@ Incident cases keep `healthy_outcome_enabled = false`, so the metric stays
 - setup applies no disturbance, and the result equals a plain same-seed advance;
 - same-seed setup gives identical attestations, observations and history checksums;
 - one `create -> prepare -> start` run through P0 and the Coordinator ends
-  `COMPLETED` / `DONE`, and the LeakageAudit passes, including cross-case audits against
-  every incident case;
+  `COMPLETED` / `DONE`, and the structural LeakageAudit passes under policy v1; the
+  healthy surfaces also pass each incident harness's v0 audit;
+- incident fixtures report leakage policy v0 and the healthy fixture v1, in
+  `BenchmarkRefs`, the internal manifest and every emitted audit; the Agent manifest
+  exposes no benchmark policy field;
+- policy v1 detects `NO_INTERVENTION`, setup/v1 schema and setup-policy/v1
+  contamination, while the incident v0 labels and audits are unchanged;
 - the scorer gives the healthy outcome semantics in the table above;
 - `rca-dev-004` and the v1 setup types are not referenced from any Agent or application
   module.
+
+## D0.2C nuisances (recorded, not solved here)
+
+These Agent-visible properties are correlated with case identity or class. D0.2C will
+create comparable experimental variants or new case versions as needed.
+
+| Case | Class | `initial_time_hours` | World seed | Goal wording |
+|---|---|---|---|---|
+| `rca-dev-001` | incident | 0.3 | 11 | "observed abnormal ... Do not assume a cause label." |
+| `rca-dev-002` | incident | 0.6 | 12 | same as 001 |
+| `rca-dev-003` | incident | 0.6 | 13 | same as 001 |
+| `rca-dev-004` | healthy | 0.6 | 14 | "observed ... Do not assume that an abnormal cause exists." |
+
+- **Goal wording:** separates healthy from incident by text alone.
+- **`initial_time_hours`:** `rca-dev-001` alone sits at 0.3 h.
+- **World seed:** unique per case. P0's AGENT-scoped manifest currently includes the
+  `world` section and so the seed, which makes each case identifiable from it.
+- **Healthy/incident class imbalance:** one healthy case against three incidents.
 
 ## Known limitations (for D0.2C, not fixed here)
 
@@ -173,8 +205,8 @@ Incident cases keep `healthy_outcome_enabled = false`, so the metric stays
   setup policy v1, so `setup_policy_version` in the internal manifest separates it from
   the incident cases. That field is EVALUATOR-only: P0's Agent manifest projection omits
   the whole `benchmark` section, and the tests check that the healthy run's Agent
-  surfaces contain no setup/v1 or policy/v1 string. The production LeakageAudit
-  tokenizes them for the healthy case (see "Leakage labels").
+  surfaces contain no setup/v1 or policy/v1 string. Leakage policy v1 tokenizes them
+  for the healthy case.
 - **Outcome consistency is a harness check.** `BenchmarkCase` and
   `EvaluatorGroundTruth` are separate sources, so the healthy-truth-iff-`NO_INTERVENTION`
   rule is enforced in `BenchmarkHarness`, which every load path goes through.
@@ -187,5 +219,5 @@ Incident cases keep `healthy_outcome_enabled = false`, so the metric stays
 
 ## Next
 
-- D0.2C — C0 and the identifiability pilot, with goal wording, incident time and
-  healthy/incident balance treated as nuisance variables.
+- D0.2C — C0 and the identifiability pilot, with goal wording, initial time, world seed
+  and healthy/incident class balance treated as nuisance variables.

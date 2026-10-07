@@ -17,14 +17,15 @@ from unittest import mock
 from industrial_agent_runtime import Visibility, canonical_json, checksum
 from tep_sim import UPSTREAM_REVISION, EnvironmentConfig, TEPEnvironment
 
-from tep_agent_lab import (application_transport, application_views, desktop_backend,
+from tep_agent_lab import (application_transport, application_views, benchmark, desktop_backend,
                            playground, playground_views, tool_bridge, tool_surface)
 from tep_agent_lab.benchmark import (
     BENCHMARK_FIXTURES, D0_FIXTURE, HIDDEN_SETUP_SCHEMA, HIDDEN_SETUP_SCHEMA_V1,
-    LEAKAGE_POLICY_VERSION, SETUP_POLICY_VERSION, SETUP_POLICY_VERSION_V1, BenchmarkCase,
-    BenchmarkCaseSetup, BenchmarkContractError, BenchmarkHarness, CausalClaim, CausalMechanism,
-    DisturbanceSetupV1, EvaluatorGroundTruth, HiddenSetup, MetricStatus, ModelInputRecorder,
-    NoInterventionSetup, benchmark_context_sources, collect_agent_surfaces, project_case,
+    LEAKAGE_POLICY_VERSION, LEAKAGE_POLICY_VERSION_V1, SETUP_POLICY_VERSION,
+    SETUP_POLICY_VERSION_V1, BenchmarkCase, BenchmarkCaseSetup, BenchmarkContractError,
+    BenchmarkHarness, CausalClaim, CausalMechanism, DisturbanceSetupV1, EvaluatorGroundTruth,
+    HiddenSetup, MetricStatus, ModelInputRecorder, NoInterventionSetup,
+    benchmark_context_sources, collect_agent_surfaces, leakage_policy_version, project_case,
     score_submission, scripted_blind_provider, submission_from_run,
 )
 from tep_agent_lab.canonical_context import ProjectionScope, content_checksum
@@ -500,7 +501,7 @@ class HealthyBlindRunTests(unittest.TestCase):
 
     def test_leakage_audit_passes(self):  # 17
         audit = self.harness.audit(self.surfaces, tep_sim_revision=REVISIONS.tep_sim)
-        self.assertEqual((True, (), LEAKAGE_POLICY_VERSION, HEALTHY_PROJECTION_CHECKSUM),
+        self.assertEqual((True, (), LEAKAGE_POLICY_VERSION_V1, HEALTHY_PROJECTION_CHECKSUM),
                          (audit.passed, audit.findings, audit.leakage_policy_version,
                           audit.agent_projection_checksum))
         for name, surface in self.surfaces.items():
@@ -523,6 +524,113 @@ class HealthyBlindRunTests(unittest.TestCase):
                                    self.harness.case.scoring).metrics
         self.assertEqual(MetricStatus.NOT_AVAILABLE, metrics["healthy_no_abnormal_correct"].status)
         self.assertEqual(MetricStatus.NOT_AVAILABLE, metrics["top1_causal_claim_exact"].status)
+
+
+class LeakagePolicyVersionTests(unittest.TestCase):
+    """Leakage policy v0 for setup/v0 incidents, v1 for the setup/v1 healthy case."""
+
+    V1_LABELS = ("NO_INTERVENTION", HIDDEN_SETUP_SCHEMA_V1, SETUP_POLICY_VERSION_V1)
+
+    @classmethod
+    def setUpClass(cls):
+        directory = TemporaryDirectory()
+        cls.addClassCleanup(directory.cleanup)
+        cls.manager = make_manager(Path(directory.name))
+        cls.harnesses = {case_id: harness(case_id) for case_id in (*CASES, HEALTHY)}
+        cls.prepared = {case_id: h.create_and_prepare(cls.manager, f"policy-{case_id}",
+                                                      scripted_blind_provider())
+                        for case_id, h in cls.harnesses.items()}
+
+    def expected(self, case_id):
+        return LEAKAGE_POLICY_VERSION_V1 if case_id == HEALTHY else LEAKAGE_POLICY_VERSION
+
+    def audit(self, case_id, surfaces):
+        return self.harnesses[case_id].audit(surfaces, tep_sim_revision=REVISIONS.tep_sim)
+
+    def test_policy_follows_the_setup_schema(self):  # 1, 2
+        self.assertEqual(("tep-agent-lab.benchmark-leakage-policy/v0",
+                          "tep-agent-lab.benchmark-leakage-policy/v1"),
+                         (LEAKAGE_POLICY_VERSION, LEAKAGE_POLICY_VERSION_V1))
+        for case_id, h in self.harnesses.items():
+            with self.subTest(case_id=case_id):
+                self.assertEqual(self.expected(case_id),
+                                 leakage_policy_version(h.case.hidden_setup))
+        v1_disturbance_case = BenchmarkCase.from_record(with_setup(case_record("rca-dev-001"),
+                                                                   v1_disturbance()))
+        self.assertEqual(LEAKAGE_POLICY_VERSION_V1,
+                         leakage_policy_version(v1_disturbance_case.hidden_setup))
+        d0 = self.harnesses["rca-dev-001"]  # v1 DISTURBANCE adds no labels beyond v0
+        self.assertEqual(benchmark._truth_labels(d0.case, d0.truth),
+                         benchmark._truth_labels(v1_disturbance_case, d0.truth))
+        with self.assertRaises(BenchmarkContractError):
+            leakage_policy_version(case_record()["hidden_setup"])  # untyped record
+        # Every setup schema has both a setup policy and a leakage policy.
+        self.assertEqual(set(benchmark._SETUP_POLICY), set(benchmark._LEAKAGE_POLICY))
+
+    def test_clean_audits_pass_under_their_policy(self):  # 3, 4
+        for case_id, h in self.harnesses.items():
+            with self.subTest(case_id=case_id):
+                audit = self.audit(case_id, {"agent_case_projection": h.projection.record()})
+                self.assertEqual((True, (), self.expected(case_id)),
+                                 (audit.passed, audit.findings, audit.leakage_policy_version))
+
+    def test_v1_detects_healthy_setup_contamination(self):  # 5, 6, 7
+        for token in self.V1_LABELS:
+            for text in (f"setup {token}", f"setup {token.lower()}"):
+                audit = self.audit(HEALTHY, {"agent_events": {"text": text}})
+                with self.subTest(text=text):
+                    self.assertEqual((False, LEAKAGE_POLICY_VERSION_V1),
+                                     (audit.passed, audit.leakage_policy_version))
+                    self.assertEqual(["HIDDEN_TRUTH_LABEL"],
+                                     sorted({finding.category.value
+                                             for finding in audit.findings}))
+            keyed = self.audit(HEALTHY, {"agent_events": {token: "x"}})
+            self.assertFalse(keyed.passed)
+            self.assertNotIn(token.lower(), canonical_json(keyed.record()).lower())
+
+    def test_incident_audit_behavior_is_unchanged(self):  # 8
+        for case_id in CASES:
+            h = self.harnesses[case_id]
+            claim = h.truth.causal_claim
+            with self.subTest(case_id=case_id):
+                # exactly the v0 labels: disturbance id, family, mechanism, fault family
+                self.assertEqual(tuple(label.lower() for label in (
+                    h.case.hidden_setup.intervention.disturbance_id, h.case.scenario_family_id,
+                    claim.mechanism.value, claim.fault_family)),
+                    benchmark._truth_labels(h.case, h.truth))
+                # v1-only labels are not v0 behavior
+                clean = self.audit(case_id, {"agent_events": {
+                    "text": " ".join(self.V1_LABELS)}})
+                self.assertEqual((True, LEAKAGE_POLICY_VERSION),
+                                 (clean.passed, clean.leakage_policy_version))
+                leaked = self.audit(case_id, {"agent_events": {
+                    "text": h.case.hidden_setup.intervention.disturbance_id}})
+                self.assertEqual((False, LEAKAGE_POLICY_VERSION),
+                                 (leaked.passed, leaked.leakage_policy_version))
+                self.assertEqual((CASES[case_id]["case"], CASES[case_id]["truth"],
+                                  CASES[case_id]["projection"]),
+                                 (h.fixture.case_checksum, h.fixture.ground_truth_checksum,
+                                  h.projection_checksum))
+
+    def test_benchmark_refs_and_internal_manifest_record_the_policy(self):  # 9, 10
+        for case_id, h in self.harnesses.items():
+            internal = dict(self.manager.manifest(f"policy-{case_id}").benchmark)
+            with self.subTest(case_id=case_id):
+                self.assertEqual(self.expected(case_id), h.benchmark_refs().leakage_policy_version)
+                self.assertEqual(self.expected(case_id), internal["leakage_policy_version"])
+                self.assertEqual(h.benchmark_refs().record(),
+                                 {key: internal[key] for key in h.benchmark_refs().record()})
+
+    def test_agent_manifest_exposes_no_policy_fields(self):  # 11
+        for case_id, prepared in self.prepared.items():
+            agent = self.manager.queries(f"policy-{case_id}").manifest_view()
+            text = canonical_json(agent).lower()
+            with self.subTest(case_id=case_id):
+                self.assertNotIn("benchmark", agent["manifest"])
+                self.assertNotIn("benchmark", prepared.agent_projection())
+                for absent in ("leakage_policy", "leakage-policy", "setup_policy",
+                               "setup-policy", "benchmark-setup", "no_intervention"):
+                    self.assertNotIn(absent, text)
 
 
 class HealthySetupAttestationTests(unittest.TestCase):

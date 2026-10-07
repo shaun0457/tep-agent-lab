@@ -55,7 +55,8 @@ SCORE_SCHEMA = "tep-agent-lab.benchmark-score/v0"
 SCORER_VERSION = "tep-agent-lab.benchmark-scorer/v0"
 SETUP_POLICY_VERSION = "tep-agent-lab.benchmark-setup-policy/v0"  # setup/v0 fixtures
 SETUP_POLICY_VERSION_V1 = "tep-agent-lab.benchmark-setup-policy/v1"  # setup/v1 fixtures
-LEAKAGE_POLICY_VERSION = "tep-agent-lab.benchmark-leakage-policy/v0"
+LEAKAGE_POLICY_VERSION = "tep-agent-lab.benchmark-leakage-policy/v0"  # setup/v0 fixtures
+LEAKAGE_POLICY_VERSION_V1 = "tep-agent-lab.benchmark-leakage-policy/v1"  # setup/v1 fixtures
 TASK_FAMILY = "RCA"
 ORCHESTRATION_CONDITIONS = frozenset({"O0", "O1", "O2", "O3", "O4", "O5"})
 BENCHMARK_CASE_KIND = "BENCHMARK_CASE"
@@ -389,6 +390,12 @@ class NoInterventionSetup:
 BenchmarkSetup = HiddenSetup | DisturbanceSetupV1 | NoInterventionSetup
 _SETUP_POLICY = {HiddenSetup: SETUP_POLICY_VERSION, DisturbanceSetupV1: SETUP_POLICY_VERSION_V1,
                  NoInterventionSetup: SETUP_POLICY_VERSION_V1}
+# Leakage policy follows the setup schema, like the setup policy. v1 = v0 labels plus,
+# for a NO_INTERVENTION setup, its kind, setup schema and setup policy; a v1
+# DISTURBANCE setup (no registered fixture) therefore audits exactly like v0.
+_LEAKAGE_POLICY = {HiddenSetup: LEAKAGE_POLICY_VERSION,
+                   DisturbanceSetupV1: LEAKAGE_POLICY_VERSION_V1,
+                   NoInterventionSetup: LEAKAGE_POLICY_VERSION_V1}
 
 
 def hidden_setup_from_record(record: Any) -> BenchmarkSetup:
@@ -414,6 +421,14 @@ def setup_policy_version(setup: BenchmarkSetup) -> str:
     """The trusted setup policy that executes this setup schema."""
     try:
         return _SETUP_POLICY[type(setup)]
+    except KeyError:
+        raise BenchmarkContractError("hidden_setup must be a typed benchmark setup") from None
+
+
+def leakage_policy_version(setup: BenchmarkSetup) -> str:
+    """The leakage policy that audits a case with this setup schema."""
+    try:
+        return _LEAKAGE_POLICY[type(setup)]
     except KeyError:
         raise BenchmarkContractError("hidden_setup must be a typed benchmark setup") from None
 
@@ -1026,7 +1041,7 @@ class BenchmarkHarness:
             agent_projection_checksum=self.projection_checksum,
             scorer_version=case.scoring.scorer_version,
             setup_policy_version=setup_policy_version(case.hidden_setup),
-            leakage_policy_version=LEAKAGE_POLICY_VERSION)
+            leakage_policy_version=leakage_policy_version(case.hidden_setup))
 
     def case_setup(self) -> BenchmarkCaseSetup:
         return BenchmarkCaseSetup(self)
@@ -1133,15 +1148,17 @@ def _truth_labels(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> tuple[str
     """Evaluator labels whose appearance in Agent data is a leak.
 
     ``entity_id`` is excluded on purpose: it names a ProcessGraph entity that blind
-    topology already shows. ``direction_or_mode`` is a generic word (STEP). A
-    NO_INTERVENTION case adds its setup kind, schema and policy, which would reveal
-    the healthy answer; setup/v0 labels are unchanged.
+    topology already shows. ``direction_or_mode`` is a generic word (STEP). Under
+    leakage policy v1 a NO_INTERVENTION case adds its setup kind, schema and policy,
+    which would reveal the healthy answer; policy v0 labels are unchanged.
     """
     setup = case.hidden_setup
     claim, intervention = truth.causal_claim, _setup_intervention(setup)
     labels = [intervention.disturbance_id if intervention else None, case.scenario_family_id,
               claim.mechanism.value, claim.fault_family]
-    if type(setup) is NoInterventionSetup:
+    # Policy v1 labels exist only for NO_INTERVENTION; a v1 DISTURBANCE audits like v0.
+    if (leakage_policy_version(setup) == LEAKAGE_POLICY_VERSION_V1
+            and type(setup) is NoInterventionSetup):
         labels += [setup.kind, setup.schema_version, setup_policy_version(setup)]
     return tuple(label.lower() for label in labels if label)
 
@@ -1256,7 +1273,8 @@ def audit_agent_surfaces(*, case: BenchmarkCase, truth: EvaluatorGroundTruth,
     findings = tuple(LeakageFinding(surface=surface, location=location, category=category)
                      for surface, location, category in sorted(found))
     return LeakageAudit(
-        schema_version=LEAKAGE_AUDIT_SCHEMA, leakage_policy_version=LEAKAGE_POLICY_VERSION,
+        schema_version=LEAKAGE_AUDIT_SCHEMA,
+        leakage_policy_version=leakage_policy_version(case.hidden_setup),
         benchmark_version=case.benchmark_version, case_id=case.case_id,
         case_version=case.case_version, agent_projection_checksum=agent_projection_checksum,
         findings=findings, passed=not findings)
