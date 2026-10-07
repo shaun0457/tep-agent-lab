@@ -7,6 +7,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+use tauri_plugin_shell::ShellExt;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -139,6 +140,8 @@ async fn read_frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Vec<u8>,
 
 struct Session {
     child: Child,
+    #[cfg(windows)]
+    job: Option<crate::windows_job::ProcessJob>,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     stderr_task: JoinHandle<()>,
@@ -153,6 +156,31 @@ pub struct BackendProcess {
 }
 
 impl BackendProcess {
+    /// Host-resolved externalBin; official Command -> std Command adapter preserves
+    /// ordinary OS pipes, EOF and Tokio kill/reap instead of plugin event framing.
+    pub fn packaged<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Self, BridgeError> {
+        use tauri::Manager;
+        let sessions = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| BridgeError::BackendNotRunning)?
+            .join("sessions");
+        std::fs::create_dir_all(&sessions).map_err(|_| BridgeError::BackendNotRunning)?;
+        let output = tempfile::Builder::new()
+            .prefix("session-")
+            .tempdir_in(sessions)
+            .map_err(|_| BridgeError::BackendNotRunning)?
+            .keep();
+        let sidecar = app
+            .shell()
+            .sidecar("tep-agent-backend") // Installed externalBin basename, beside app.
+            .map_err(|_| BridgeError::BackendNotRunning)?
+            .args(["--run-id", RUN_ID, "--output-root"])
+            .arg(output);
+        let command: std::process::Command = sidecar.into();
+        Self::spawn(Command::from(command))
+    }
+
     /// Host-only development configuration: executable has no frontend input.
     pub fn development() -> Result<Self, BridgeError> {
         let executable = std::env::var_os("TEP_AGENT_PYTHON").unwrap_or_else(|| "python".into());
@@ -193,11 +221,17 @@ impl BackendProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW: background child, no console popup.
-        let mut child = command.spawn().map_err(|error| {
+        let spawned = crate::windows_job::spawn(&mut command);
+        #[cfg(not(windows))]
+        let spawned = command.spawn();
+        let spawned = spawned.map_err(|error| {
             eprintln!("backend spawn failed: {error}");
             BridgeError::BackendNotRunning
         })?;
+        #[cfg(windows)]
+        let (mut child, job) = spawned;
+        #[cfg(not(windows))]
+        let mut child = spawned;
         let stdin = child.stdin.take().ok_or(BridgeError::BackendNotRunning)?;
         let stdout = BufReader::new(child.stdout.take().ok_or(BridgeError::BackendNotRunning)?);
         let mut stderr = child.stderr.take().ok_or(BridgeError::BackendNotRunning)?;
@@ -213,6 +247,8 @@ impl BackendProcess {
         Ok(Self {
             session: Mutex::new(Session {
                 child,
+                #[cfg(windows)]
+                job: Some(job),
                 stdin: Some(stdin),
                 stdout,
                 stderr_task,
@@ -267,6 +303,8 @@ impl BackendProcess {
             .is_some()
         {
             session.failure = Some(BridgeError::BackendExited);
+            #[cfg(windows)]
+            session.job.take();
             return Err(BridgeError::BackendExited);
         }
         let request_id = format!("desktop-{}", session.next_id);
@@ -313,6 +351,8 @@ impl BackendProcess {
             // Framing may be lost. Stop the same child; never restart implicitly.
             session.stdin.take();
             if !self.stopping.load(Ordering::Acquire) {
+                #[cfg(windows)]
+                session.job.take(); // Also stop the frozen bootloader's worker.
                 let _ = session.child.start_kill();
             }
         }
@@ -326,9 +366,13 @@ impl BackendProcess {
         session.stdin.take(); // EOF is the normal backend shutdown path.
         let graceful = timeout(EXIT_GRACE, session.child.wait()).await;
         if !matches!(graceful, Ok(Ok(_))) {
+            #[cfg(windows)]
+            session.job.take();
             let _ = session.child.start_kill();
             let _ = timeout(EXIT_GRACE, session.child.wait()).await;
         }
+        #[cfg(windows)]
+        session.job.take();
         if timeout(EXIT_GRACE, &mut session.stderr_task).await.is_err() {
             session.stderr_task.abort();
         }

@@ -43,9 +43,10 @@ is a unique `tep-desktop-*` directory under the OS temporary directory, retained
 for run history/diagnostics. No prior run is reopened. Each new app session gets
 a fresh output root; changing the environment requires restarting the app.
 
-C2A uses a development Python environment and this source checkout. Python
-packaging is not solved here. C2B will create the packaged external sidecar.
-There is no `externalBin`, embedded Python, bundler, installer or updater.
+C2A's development mode uses a Python environment and this source checkout.
+C2B adds a release-only packaged externalBin and unsigned Windows NSIS bundle;
+see `e0-2c-packaged-sidecar.md`. Debug builds and `npm run tauri dev` still use
+this development path without requiring a sidecar build. No updater is added.
 
 ## Boundary and lifecycle
 
@@ -83,8 +84,9 @@ joins the stderr drain with a bound. `kill_on_drop` covers failed setup/panic.
 Windows child console suppression keeps the host-owned child in the background.
 
 The only capability is `allow-application-request` for the local `main` window,
-with an explicit application command manifest. No shell, filesystem, HTTP or
-other plugin is installed. No remote IPC capability is enabled. Production CSP
+with an explicit application command manifest. C2B registers the shell plugin
+for Rust-side launch only, without any frontend shell permission; filesystem
+and HTTP access are not exposed. No remote IPC capability is enabled. Production CSP
 permits local Tauri IPC only. Vite's loopback dev server/HMR are frontend build
 tooling; they do not carry application requests. There is no application HTTP,
 WebSocket, CORS or network backend. All industrial reads go through Python;

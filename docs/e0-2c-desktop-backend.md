@@ -87,6 +87,6 @@ check. No dependency was added.
 
 E0.2C2A adds the Tauri/TypeScript/Rust live development shell and process
 supervision (`e0-2c-tauri-shell.md`). E0.2C2B owns packaging Python as an external
-sidecar. E0.2C as a whole is not complete.
+sidecar (`e0-2c-packaged-sidecar.md`). E0.2C is complete; E1 remains future UI work.
 
 SPEC_CONFLICT: none

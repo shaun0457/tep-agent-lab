@@ -1,4 +1,6 @@
 pub mod bridge;
+#[cfg(windows)]
+mod windows_job;
 
 use bridge::{ApplicationResponse, BackendProcess, BridgeError};
 use serde_json::Value;
@@ -20,8 +22,18 @@ pub mod commands {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let backend = tauri::async_runtime::block_on(async { BackendProcess::development() });
+            let backend = tauri::async_runtime::block_on(async {
+                #[cfg(debug_assertions)]
+                {
+                    BackendProcess::development()
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    BackendProcess::packaged(app.handle())
+                }
+            });
             match backend {
                 Ok(backend) => {
                     app.manage(Arc::new(backend));

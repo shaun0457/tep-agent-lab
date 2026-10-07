@@ -43,6 +43,9 @@ jobs:
         run: |
           $pin = (Get-Content tep-agent-lab/dependency-pins.json | ConvertFrom-Json).numpy
           python -m pip install "numpy==$pin"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip install -r tep-agent-lab/desktop/sidecar/requirements-build.txt
+          exit $LASTEXITCODE
       - name: Validate frontend
         working-directory: tep-agent-lab/desktop
         run: |
@@ -64,6 +67,35 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo check --locked --features custom-protocol
           exit $LASTEXITCODE
+      - name: Freeze and smoke the real Windows sidecar
+        working-directory: tep-agent-lab
+        shell: pwsh
+        run: |
+          python desktop/sidecar/build_sidecar.py --runtime ../industrial-agent-runtime --tep-sim ../tep-sim
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python desktop/sidecar/smoke_sidecar.py desktop/src-tauri/binaries/tep-agent-backend-x86_64-pc-windows-msvc.exe
+          exit $LASTEXITCODE
+      - name: Validate Rust packaged sidecar IPC and denied shell permissions
+        working-directory: tep-agent-lab/desktop/src-tauri
+        shell: pwsh
+        run: |
+          $env:TEP_FROZEN_SIDECAR = (Resolve-Path binaries/tep-agent-backend-x86_64-pc-windows-msvc.exe).Path
+          cargo test --locked --test packaged -- --ignored
+          exit $LASTEXITCODE
+      - name: Build unsigned Windows NSIS distribution with externalBin
+        working-directory: tep-agent-lab/desktop
+        run: npm run tauri build -- --bundles nsis --target x86_64-pc-windows-msvc
+      - name: Verify final installed bundle layout and backend
+        working-directory: tep-agent-lab
+        run: python desktop/sidecar/verify_bundle.py
+      - name: Upload unsigned Windows research distribution and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: tep-agent-observatory-windows-x86_64-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            tep-agent-lab/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            tep-agent-lab/build/sidecar/resources/build-manifest.json
 
   test:
     runs-on: ubuntu-latest

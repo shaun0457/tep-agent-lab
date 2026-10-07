@@ -14,6 +14,7 @@ from .playground import (ModelSpec, RunManager, RunOutcome, RunRequest, SourceRe
                          WorldSpec, load_dependency_pins, pinned_tep_sim_sources)
 from .tep_world import ReferenceWorld
 from .tool_surface import simulation_quota
+from .sidecar_resources import dependency_pins_path, packaged_lab_revision
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUN_ID = "e0-observatory"
@@ -180,9 +181,10 @@ def run_demo(output_root: Path, run_id: str = DEFAULT_RUN_ID, *,
              lab_revision: str | None = None,
              clock: Callable[[], str] | None = None) -> DemoRun:
     """One real P0 run: create -> prepare (trusted harness) -> start (Coordinator)."""
-    pins = load_dependency_pins(ROOT / "dependency-pins.json")
+    packaged_revision = packaged_lab_revision()
+    pins = load_dependency_pins(dependency_pins_path())
     revisions = SourceRevisions(pins["tep-sim"], pins["industrial-agent-runtime"],
-                                lab_revision or git_revision(ROOT))
+                                packaged_revision or lab_revision or git_revision(ROOT))
     manager = RunManager(p0_root(output_root), revisions=revisions, dependency_pins=pins,
                          clock=clock)
     harness = DemoHarness()
