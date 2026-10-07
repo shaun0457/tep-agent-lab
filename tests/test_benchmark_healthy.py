@@ -253,9 +253,12 @@ class SetupSchemaTests(unittest.TestCase):
                              lab_revision=REVISIONS.tep_agent_lab, fixture=healthy.fixture)
         disabled = replace(healthy.case, scoring=replace(healthy.case.scoring,
                                                          healthy_outcome_enabled=False))
-        with self.assertRaisesRegex(BenchmarkContractError, "healthy outcome"):
+        with self.assertRaisesRegex(BenchmarkContractError, "healthy_outcome_enabled"):
             BenchmarkHarness(disabled, healthy.truth, lab_revision=REVISIONS.tep_agent_lab,
                              fixture=healthy.fixture)
+        enabled = replace(d0.case, scoring=replace(d0.case.scoring, healthy_outcome_enabled=True))
+        with self.assertRaisesRegex(BenchmarkContractError, "healthy_outcome_enabled"):
+            BenchmarkHarness(enabled, d0.truth, lab_revision=REVISIONS.tep_agent_lab)
 
 
 # -- healthy fixture ------------------------------------------------------------------
@@ -504,6 +507,11 @@ class HealthyBlindRunTests(unittest.TestCase):
             with self.subTest(surface=name):
                 assert_blind(self, surface)
                 assert_absent(self, forbidden(self.harness), surface)
+        for token in ("NO_INTERVENTION", HIDDEN_SETUP_SCHEMA_V1, SETUP_POLICY_VERSION_V1):
+            with self.subTest(token=token):  # the production audit itself catches these
+                leaked = self.harness.audit({"agent_events": {"text": f"setup {token}"}},
+                                            tep_sim_revision=REVISIONS.tep_sim)
+                self.assertFalse(leaked.passed)
         for case_id in CASES:  # no incident label reaches the healthy run either
             other = harness(case_id).audit(self.surfaces, tep_sim_revision=REVISIONS.tep_sim)
             self.assertTrue(other.passed, other.findings)

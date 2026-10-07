@@ -19,7 +19,8 @@ identifiability or difficulty claim. Those belong to D0.2C.
 | Setup contract | `benchmark-setup/v1` is a tagged union: `DisturbanceSetupV1` (`kind = DISTURBANCE`) or `NoInterventionSetup` (`kind = NO_INTERVENTION`). `hidden_setup_from_record` dispatches on `schema_version`, then on `kind`. A v0 record still parses to the unchanged `HiddenSetup` and is never rewritten. |
 | Setup policy | `benchmark-setup-policy/v0` for v0 setups (unchanged for `rca-dev-001..003`), `benchmark-setup-policy/v1` for v1 setups. The harness puts the matching version in `BenchmarkRefs` and in the attestation. |
 | Trusted setup | `BenchmarkCaseSetup` runs one timeline. For `NO_INTERVENTION` that is advance `pre_observation_hours`, advance `observation_hours`, observe, attest. It never applies anything. |
-| Outcome consistency | `BenchmarkHarness` rejects any case/truth pair unless `NO_ABNORMAL_CAUSE` truth goes with exactly a `NO_INTERVENTION` setup, and rejects a healthy case whose `healthy_outcome_enabled` is false. |
+| Outcome consistency | `BenchmarkHarness` rejects any case/truth pair unless `NO_ABNORMAL_CAUSE` truth goes with exactly a `NO_INTERVENTION` setup, and unless `healthy_outcome_enabled` is true exactly for that healthy case. |
+| Leakage labels | For a `NO_INTERVENTION` case, `_truth_labels` also tokenizes the setup kind, setup/v1 schema and setup policy/v1, so the production LeakageAudit fails on them. setup/v0 audits are unchanged. |
 | Fixture | `rca-dev-004` case and ground-truth pair, appended to the explicit EVALUATOR registry. |
 | Tests | `tests/test_benchmark_healthy.py`. In `tests/test_benchmark_family.py` only the exact-registry assertion now lists four fixtures and probes `rca-dev-005` as the unknown identity. |
 
@@ -51,8 +52,8 @@ These representations are rejected. None of them can stand for "healthy":
 
 The truth `NO_ABNORMAL_CAUSE` means **no evaluator-injected abnormal cause**. It does
 not mean "all signals constant". The TEP plant runs closed-loop, and normal process and
-control variation continues. In the `rca-dev-004` window, `XMEAS(9)` takes a different
-value at every one of its 37 samples.
+control variation continues. A test checks that `XMEAS(9)` is not constant over the
+`rca-dev-004` window; at authoring time all 37 samples were distinct.
 
 The label comes from the fixture: the setup deliberately applies no abnormal
 intervention. Setup never inspects hidden simulator state to produce or confirm a
@@ -172,8 +173,8 @@ Incident cases keep `healthy_outcome_enabled = false`, so the metric stays
   setup policy v1, so `setup_policy_version` in the internal manifest separates it from
   the incident cases. That field is EVALUATOR-only: P0's Agent manifest projection omits
   the whole `benchmark` section, and the tests check that the healthy run's Agent
-  surfaces contain no setup/v1 or policy/v1 string. The production LeakageAudit does not
-  tokenize these strings. Adding them is a `leakage_policy_version` change.
+  surfaces contain no setup/v1 or policy/v1 string. The production LeakageAudit
+  tokenizes them for the healthy case (see "Leakage labels").
 - **Outcome consistency is a harness check.** `BenchmarkCase` and
   `EvaluatorGroundTruth` are separate sources, so the healthy-truth-iff-`NO_INTERVENTION`
   rule is enforced in `BenchmarkHarness`, which every load path goes through.

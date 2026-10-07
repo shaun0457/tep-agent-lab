@@ -1124,19 +1124,25 @@ def _check_outcome_kind(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> Non
     if healthy_truth != no_intervention:
         raise BenchmarkContractError(
             "NO_ABNORMAL_CAUSE truth requires exactly a NO_INTERVENTION setup")
-    if healthy_truth and not case.scoring.healthy_outcome_enabled:
-        raise BenchmarkContractError("a NO_ABNORMAL_CAUSE case must enable the healthy outcome")
+    if healthy_truth != case.scoring.healthy_outcome_enabled:
+        raise BenchmarkContractError(
+            "healthy_outcome_enabled must be true exactly for a NO_ABNORMAL_CAUSE case")
 
 
 def _truth_labels(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> tuple[str, ...]:
     """Evaluator labels whose appearance in Agent data is a leak.
 
     ``entity_id`` is excluded on purpose: it names a ProcessGraph entity that blind
-    topology already shows. ``direction_or_mode`` is a generic word (STEP).
+    topology already shows. ``direction_or_mode`` is a generic word (STEP). A
+    NO_INTERVENTION case adds its setup kind, schema and policy, which would reveal
+    the healthy answer; setup/v0 labels are unchanged.
     """
-    claim, intervention = truth.causal_claim, _setup_intervention(case.hidden_setup)
+    setup = case.hidden_setup
+    claim, intervention = truth.causal_claim, _setup_intervention(setup)
     labels = [intervention.disturbance_id if intervention else None, case.scenario_family_id,
               claim.mechanism.value, claim.fault_family]
+    if type(setup) is NoInterventionSetup:
+        labels += [setup.kind, setup.schema_version, setup_policy_version(setup)]
     return tuple(label.lower() for label in labels if label)
 
 

@@ -205,7 +205,8 @@ Rules:
 - `NO_INTERVENTION` carries no intervention field at all; `observation_hours` is positive and `pre_observation_hours` is nonnegative;
 - `initial_time_hours` equals the setup timeline (`pre + post` or `pre_observation + observation`);
 - a healthy case is never encoded as a disabled disturbance: `value = 0`, `disturbance_id = null`, an empty or null `intervention`, or any other disturbance spelling is rejected;
-- `EvaluatorGroundTruth.causal_claim.mechanism = NO_ABNORMAL_CAUSE` exactly when the setup is `NO_INTERVENTION`, and such a case must set `scoring.healthy_outcome_enabled = true`.
+- `EvaluatorGroundTruth.causal_claim.mechanism = NO_ABNORMAL_CAUSE` exactly when the setup is `NO_INTERVENTION`, and `scoring.healthy_outcome_enabled = true` exactly for such a case (checked by the harness, which pairs case and truth);
+- the LeakageAudit of a `NO_INTERVENTION` case also treats its setup kind, setup schema and setup policy version as hidden truth labels.
 
 Trusted setup policy versions:
 
