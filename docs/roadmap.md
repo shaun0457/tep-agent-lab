@@ -146,10 +146,12 @@ Freeze:
 D0 deliberately does **not** add C0, empirical difficulty labels, a real LLM,
 multi-fault fixtures, UI features or new simulator capability.
 
-### D0.1 — Benchmark contract implementation — next
+### D0.1 — Benchmark contract implementation — complete
 
 Implement one deterministic DEVELOPMENT RCA case proving the frozen contract through
 the normal P0 lifecycle and fake-provider runtime path.
+
+Implementation note: `docs/d0-benchmark-contract.md`.
 
 Exit:
 

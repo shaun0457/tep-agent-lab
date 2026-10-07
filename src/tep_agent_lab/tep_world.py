@@ -68,6 +68,16 @@ def _hidden_text(text: str) -> bool:
     return bool(_DISTURBANCE_ID.search(text) or _HIDDEN_TERMS.search(text))
 
 
+def names_disturbance_id(text: str) -> bool:
+    """Any spelling of a disturbance id (IDV(4), idv_4, ...)."""
+    return bool(_DISTURBANCE_ID.search(text))
+
+
+def hidden_vocabulary(text: str) -> bool:
+    """Hidden-truth vocabulary that ``leakage_findings`` screens Agent data for."""
+    return _hidden_text(text)
+
+
 def sanitize_observation(record: Any) -> dict[str, Any]:
     """Agent-visible view of a tep-sim Observation or telemetry record.
 

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -75,6 +76,7 @@ EVALUATOR_BINDINGS_CONTENT_CHECKSUM = (
     "d0cc9f81f043d8aea4b413efc1b5416ff79e540e79fbc976e425e09bfc4dc6ae")
 
 _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,63}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _SESSION_DIR = re.compile(r"prepare-[0-9]{4,}")
 _GIT_REVISION = re.compile(r"[0-9a-f]{40}")
 # Keys are compared after lowercasing and dropping separators, so authToken,
@@ -307,12 +309,115 @@ class RunRequest:
                 "require_conclusion": self.require_conclusion}
 
 
-@dataclass(frozen=True)
-class BenchmarkRefs:
-    """Hidden benchmark truth is referenced by EVALUATOR-visible source ids only."""
+class BenchmarkPartition(StrEnum):
+    """Frozen benchmark partitions (benchmark-case-v0.md)."""
 
+    DEVELOPMENT = "DEVELOPMENT"
+    RESEARCH = "RESEARCH"
+    HIDDEN_EVAL = "HIDDEN_EVAL"
+
+
+_BENCHMARK_TEXT_FIELDS = ("benchmark_version", "case_id", "case_version",
+                          "benchmark_case_source_id", "evaluator_ground_truth_source_id",
+                          "scorer_version", "setup_policy_version", "leakage_policy_version")
+_BENCHMARK_REF_FIELDS = (*_BENCHMARK_TEXT_FIELDS, "partition", "agent_projection_checksum")
+
+
+@dataclass(frozen=True, kw_only=True)
+class BenchmarkRefs:
+    """Trusted benchmark binding; hidden truth is referenced by EVALUATOR source ids only.
+
+    Either completely unbound (developer/demo runs) or completely bound (benchmark
+    runs); a half-populated binding is rejected.
+    """
+
+    benchmark_version: str | None = None
+    case_id: str | None = None
+    case_version: str | None = None
+    partition: BenchmarkPartition | None = None
     benchmark_case_source_id: str | None = None
     evaluator_ground_truth_source_id: str | None = None
+    agent_projection_checksum: str | None = None
+    scorer_version: str | None = None
+    setup_policy_version: str | None = None
+    leakage_policy_version: str | None = None
+
+    def __post_init__(self) -> None:
+        unset = [name for name in _BENCHMARK_REF_FIELDS if getattr(self, name) is None]
+        if not unset:
+            for name in _BENCHMARK_TEXT_FIELDS:
+                _text(getattr(self, name), name)
+            object.__setattr__(self, "partition", BenchmarkPartition(self.partition))
+            if not isinstance(self.agent_projection_checksum, str) or not _SHA256.fullmatch(
+                    self.agent_projection_checksum):
+                raise ValueError("agent_projection_checksum must be a sha256 hex digest")
+            if self.benchmark_case_source_id == self.evaluator_ground_truth_source_id:
+                raise ValueError("benchmark case and ground truth must be separate sources")
+        elif len(unset) != len(_BENCHMARK_REF_FIELDS):
+            raise ValueError("BenchmarkRefs must be completely bound or completely unbound")
+
+    @property
+    def bound(self) -> bool:
+        return self.benchmark_version is not None
+
+    def record(self) -> dict[str, Any]:
+        return {name: to_jsonable(getattr(self, name)) for name in _BENCHMARK_REF_FIELDS}
+
+
+CASE_SETUP_ATTESTATION_VERSION = "tep-agent-lab.case-setup-attestation/v0"
+_ATTESTATION_IDENTITY = ("benchmark_version", "case_id", "case_version", "setup_policy_version")
+_ATTESTATION_CHECKSUMS = ("case_source_checksum", "ground_truth_source_checksum",
+                          "world_config_checksum", "hidden_setup_checksum",
+                          "final_agent_observation_checksum")
+
+
+@dataclass(frozen=True, kw_only=True)
+class CaseSetupAttestation:
+    """Typed EVALUATOR-only record of a trusted benchmark case setup.
+
+    Produced by trusted harness code after setup; P0 checks it before READY and
+    records it only in the internal manifest. It carries checksums, never the raw
+    hidden setup.
+    """
+
+    schema_version: str
+    benchmark_version: str
+    case_id: str
+    case_version: str
+    setup_policy_version: str
+    case_source_checksum: str
+    ground_truth_source_checksum: str
+    world_config_checksum: str
+    hidden_setup_checksum: str
+    operation_count: int
+    final_simulation_time_hours: float
+    final_agent_observation_checksum: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != CASE_SETUP_ATTESTATION_VERSION:
+            raise ValueError(f"schema_version must be {CASE_SETUP_ATTESTATION_VERSION}")
+        for name in _ATTESTATION_IDENTITY:
+            _text(getattr(self, name), name)
+        for name in _ATTESTATION_CHECKSUMS:
+            if not isinstance(getattr(self, name), str) or not _SHA256.fullmatch(
+                    getattr(self, name)):
+                raise ValueError(f"{name} must be a sha256 hex digest")
+        if type(self.operation_count) is not int or self.operation_count < 1:
+            raise ValueError("operation_count must be a positive integer")
+        time = self.final_simulation_time_hours
+        if type(time) not in (int, float) or not math.isfinite(time) or time < 0:
+            raise ValueError("final_simulation_time_hours must be finite and nonnegative")
+        object.__setattr__(self, "final_simulation_time_hours", float(time))
+
+    def record(self) -> dict[str, Any]:
+        return to_jsonable(self)
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "CaseSetupAttestation":
+        expected = set(cls.__dataclass_fields__)
+        if not isinstance(record, Mapping) or set(record) != expected:
+            raise ValueError("case setup attestation must have exactly the v0 fields")
+        return cls(**dict(record))
 
 
 def _manifest_sources(value: Sequence[Any]) -> tuple[ContextSourceRef, ...]:
@@ -610,13 +715,18 @@ class RunManager:
     # -- prepare ------------------------------------------------------------------------
     def prepare(self, run_id: str, *, provider: ModelProvider,
                 context_sources: Sequence[ContextSourceRef],
-                case_setup: Callable[[ReferenceWorld], None] | None = None,
+                case_setup: Callable[[ReferenceWorld], CaseSetupAttestation | None]
+                | None = None,
                 benchmark: BenchmarkRefs | None = None) -> RunManifest:
         """Resolve/attest every source, assemble the session, publish one manifest.
 
         All or nothing: on any failure the session is torn down, no manifest is
         published, and the run stays CREATED (a later prepare uses a fresh attempt).
+        A bound ``benchmark`` requires a ``case_setup`` returning a valid typed
+        ``CaseSetupAttestation``; developer/demo setups may return None.
         """
+        if benchmark is not None and not isinstance(benchmark, BenchmarkRefs):
+            raise TypeError("BenchmarkRefs required")
         with self._lock:
             run = self._record(run_id)
             if run.status != RunStatus.CREATED or run.preparing:
@@ -717,14 +827,13 @@ class RunManager:
                 graph_source.provenance.get("fixture_content_sha256")
                 or provenance.review_status != graph_source.governance.get("review_status")):
             raise PrepareError("ProcessGraph provenance differs from its context source")
-        hidden = {}
-        for name in ("benchmark_case_source_id", "evaluator_ground_truth_source_id"):
-            source_id = getattr(benchmark, name)
-            if source_id is not None:
-                if registry.ref(source_id, ProjectionScope.EVALUATOR).visibility != \
-                        Visibility.EVALUATOR:
+        if benchmark.bound:
+            if case_setup is None:
+                raise PrepareError("a bound benchmark requires a trusted case_setup")
+            for name in ("benchmark_case_source_id", "evaluator_ground_truth_source_id"):
+                if registry.ref(getattr(benchmark, name), ProjectionScope.EVALUATOR
+                                ).visibility != Visibility.EVALUATOR:
                     raise PrepareError(f"{name} must reference an EVALUATOR-only source")
-                hidden[name] = source_id
         environment = None
         world = None
         try:
@@ -736,8 +845,16 @@ class RunManager:
             environment.reset()
             # The world uses exactly the attested ProcessGraph source.
             world = ReferenceWorld(environment, graph)
+            applied = None
             if case_setup is not None:
-                case_setup(world)  # trusted harness setup; never an Agent tool
+                applied = case_setup(world)  # trusted harness setup; never an Agent tool
+            if benchmark.bound:
+                benchmark_record = {
+                    **benchmark.record(), "case_setup_applied": True,
+                    "case_setup_attestation": self._checked_attestation(
+                        applied, benchmark, registry, request, world).record()}
+            else:
+                benchmark_record = {"case_setup_applied": case_setup is not None}
             session = self._session(run, request, directory, world, provider, registry)
         except BaseException:
             if environment is not None:
@@ -745,14 +862,43 @@ class RunManager:
             raise
         try:
             return session, self._manifest(run, attempt, request, session, registry,
-                                           graph_source, hidden, case_setup is not None)
+                                           graph_source, benchmark_record)
         except BaseException:
             session.close()
             raise
 
+    @staticmethod
+    def _checked_attestation(applied: Any, benchmark: BenchmarkRefs,
+                             registry: CanonicalContextRegistry, request: RunRequest,
+                             world: ReferenceWorld) -> CaseSetupAttestation:
+        """Benchmark READY only with a typed attestation matching what P0 itself attested.
+
+        Source checksums are compared with the registered refs P0 already attested
+        against materialized bytes; the world config and the sanitized Agent-visible
+        observation are recomputed here. Only the hidden setup checksum is opaque to P0.
+        """
+        if type(applied) is not CaseSetupAttestation:
+            raise PrepareError("benchmark case_setup must return a typed CaseSetupAttestation")
+        for name in _ATTESTATION_IDENTITY:
+            if getattr(applied, name) != getattr(benchmark, name):
+                raise PrepareError(f"setup attestation {name} differs from the benchmark binding")
+        for name, source_id in (
+                ("case_source_checksum", benchmark.benchmark_case_source_id),
+                ("ground_truth_source_checksum", benchmark.evaluator_ground_truth_source_id)):
+            if getattr(applied, name) != registry.ref(
+                    source_id, ProjectionScope.EVALUATOR).content_checksum:
+                raise PrepareError(f"setup attestation {name} differs from the attested source")
+        if applied.world_config_checksum != checksum(request.world.record()):
+            raise PrepareError("setup attestation world_config_checksum differs from WorldSpec")
+        observation = world.observe()
+        if (applied.final_agent_observation_checksum != checksum(observation)
+                or applied.final_simulation_time_hours != observation["simulation_time_hours"]):
+            raise PrepareError("setup attestation differs from the prepared reference world")
+        return applied
+
     def _manifest(self, run: _Run, attempt: str, request: RunRequest, session: RunSession,
                   registry: CanonicalContextRegistry, graph_source: ContextSourceRef,
-                  hidden: Mapping[str, str], case_setup_applied: bool) -> RunManifest:
+                  benchmark: Mapping[str, Any]) -> RunManifest:
         provenance = session.world.graph.provenance
         created_at = run.lifecycle.events()[0]["payload"]["at"]
         specs = session.surface.tool_specs()
@@ -797,7 +943,7 @@ class RunManager:
                   "incident_ref": to_jsonable(session.task.context_refs[0]),
                   "budget": to_jsonable(request.budget),
                   "output_schema_checksum": checksum(request.output_schema)},
-            benchmark={**hidden, "case_setup_applied": case_setup_applied},
+            benchmark=benchmark,
             canonical_context_sources=inventory,
             context_inventory_checksum=inventory_checksum(inventory),
             storage={"session": attempt, "world": f"{attempt}/world",
