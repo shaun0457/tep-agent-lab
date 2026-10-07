@@ -195,7 +195,8 @@ benchmark and C0, not Agent capability; changing Agent capability is a later stu
 
 ### Shared framing (disclosed)
 
-`benchmark.task_goal` appends "Incident observed at simulation time 0.6 h." and P0 uses an
+`benchmark.task_goal` appends "Trigger signals: XMEAS(9). Incident observed at simulation
+time 0.6 h." and P0 uses an
 `incident-<case_id>` investigation id. This framing is the same for every class, so it is
 not a class proxy. It does frame every case, including healthy ones, as an incident, which
 can bias any Agent toward an abnormal answer. The pilot keeps it unchanged and discloses
@@ -291,6 +292,15 @@ hash of them, so it cannot be recomputed from the design. The permutation and it
 recorded EVALUATOR-side. The id-to-class mapping exists only in EVALUATOR fixtures and
 truth.
 
+A single random draw can still produce a visible pattern, so the drawn permutation is
+checked and redrawn if it fails. It is rejected when:
+
+- any class or any seed occupies three consecutive `NN` values;
+- the twelve ids sorted by `NN` are ordered by class, or by seed, in either direction.
+
+Every rejected draw and the accepted one are recorded. D0.2C1 tests the accepted
+permutation against these rules.
+
 Registry order and fixture file order carry no class meaning that reaches the Agent; both
 are EVALUATOR-only.
 
@@ -328,37 +338,56 @@ AUXILIARY       scored and reported, never part of primary correctness
 NOT_APPLICABLE  not scored (evaluator truth is null)
 ```
 
-Rules:
+Rules, applied in this order:
 
 ```text
 mechanism:
-  always PRIMARY
+  always PRIMARY (its vocabulary is the frozen public output vocabulary, see below)
 
-variable_or_actuator_id:
-  evaluator truth null      -> NOT_APPLICABLE (any submitted value is neither rewarded nor penalized)
-  otherwise                 -> scored normally (PRIMARY under the reachability rule below)
+any other field whose evaluator truth is null:
+  NOT_APPLICABLE (any submitted value is neither rewarded nor penalized)
 
-entity_id:
-  evaluator truth null      -> NOT_APPLICABLE
-  otherwise                 -> PRIMARY under the reachability rule, else AUXILIARY
+entity_id, variable_or_actuator_id (truth non-null):
+  PRIMARY if identifier-reachable (below), else AUXILIARY
 
-fault_family:
+fault_family (truth non-null):
   AUXILIARY, unless a public frozen Agent output vocabulary for it exists
 
-direction_or_mode:
+direction_or_mode (truth non-null):
   AUXILIARY, unless an explicit Agent-visible vocabulary is frozen
 ```
 
-**Reachability rule.** A field is PRIMARY only when its value vocabulary is reachable by
-the Agent under the case's frozen projection and tool policy: the exact truth value can
-appear on a model-facing surface (ContextProjection, tool spec, or tool result reachable
-with the allowed tools). D0.2C1 decides each role by a test on the pilot surfaces and
-freezes it in the scoring configuration. Auxiliary fields never make primary correctness
-unreachable.
+So on a healthy case every field except `mechanism` is NOT_APPLICABLE.
+
+Two kinds of reachability decide the roles. They are different and must not be mixed:
+
+- **Output-vocabulary reachability** (`mechanism`, and `fault_family` /
+  `direction_or_mode` only if a vocabulary is ever frozen for them). The value comes from
+  a closed, public, versioned output vocabulary that the Agent's structured result schema
+  offers as a whole. The `CausalMechanism` vocabulary in `rca-v0.md` and
+  `benchmark-case-v0.md` is that kind of vocabulary: all ten values are offered together,
+  so offering it reveals no case answer.
+- **Identifier reachability** (`entity_id`, `variable_or_actuator_id`). The exact truth id
+  can appear on a model-facing surface (ContextProjection, tool spec, or tool result
+  reachable with the case's allowed tools). D0.2C1 decides it by a test on the pilot
+  surfaces and freezes the role in the scoring configuration.
+
+Auxiliary fields never make primary correctness unreachable.
+
+**Known conflict, not blocking D0.2C.** The current structural leakage audit treats the
+truth mechanism value as a hidden label (`_truth_labels`), and its vocabulary screen
+matches `disturbance`. An Agent output schema that lists the full mechanism vocabulary
+would therefore fail leakage policy v0/v1 on every incident case. D0 has no structured
+RcaResult boundary and D0.2C runs no Agent, so the conflict does not block D0.2C1–C3.
+The first milestone that exposes the mechanism vocabulary to a model must resolve it
+first, under a new leakage policy version: the complete public vocabulary offered as an
+output schema is allowed, and any other occurrence of a truth label stays a finding.
+Until then, mechanism-level primary correctness is defined for scoring saved submissions
+only.
 
 The pilot tool policy is `get_capability_summary` + `get_history`. It has no topology
-tool. Unless D0.2C1 shows that `reactor_cooling_water_in` is reachable under that policy,
-`entity_id` is AUXILIARY for the pilot, and primary incident correctness reduces to the
+tool. Unless D0.2C1 shows that `reactor_cooling_water_in` is identifier-reachable under
+that policy, `entity_id` is AUXILIARY for the pilot, and primary incident correctness reduces to the
 mechanism.
 
 ### Primary correctness
@@ -481,6 +510,15 @@ those inputs are changed or removed.
 - the healthy candidate is the same-seed no-intervention rollout;
 - rollouts are deterministic: same inputs give byte-identical candidate trajectories.
 
+Cost accounting. Under the paired design, the four cases that share a seed need the same
+four (seed, candidate) rollouts, so the pilot has only twelve unique rollouts. D0.2C2 may
+cache them. Cost is reported both ways and is never mixed:
+
+- **per-case nominal cost**: what C0 costs on that case alone (four rollouts of the common
+  0.6 h horizon), whether or not a cached rollout was reused. This is the comparable
+  baseline cost for later Agent conditions;
+- **pilot total**: unique rollouts actually simulated, plus cache hits.
+
 ### Exact-replay property (disclosed)
 
 The simulator is deterministic and C0 reuses the observed seed. The true candidate's
@@ -489,8 +527,9 @@ upper-bound, exact-world-model baseline: its accuracy mostly measures whether ca
 trajectories differ at all within the window, not robustness to nuisance variation. D0.2C3
 must report how many decisions were exact (zero-distance) matches and must not present
 same-seed C0 accuracy as nuisance-robust identifiability. Cross-seed separability is
-measured by the identifiability outputs below. A seed-mismatched C0 variant, if wanted, is
-a separate versioned baseline and never replaces this one.
+measured by the required cross-seed identifiability outputs below, which never use
+same-seed pairs. A seed-mismatched C0 variant, if wanted, is a separate versioned baseline
+and never replaces this one.
 
 ### Feature contract (frozen by D0.2C2, not here)
 
@@ -526,9 +565,20 @@ that states:
 - how ties and near-ties between healthy and incident candidates are resolved;
 - every threshold or tolerance it uses, and the data each was derived from.
 
-Candidate designs may be compared during D0.2C2 on pilot DEVELOPMENT data. No threshold
-may be invented from, tuned on, or checked against HIDDEN_EVAL performance. The final rule
-is frozen and versioned before C0 accuracy is reported.
+The pilot has no HIDDEN_EVAL partition, so a "not tuned on HIDDEN_EVAL" guard alone would
+be empty. The frozen rule is:
+
+- any data-derived threshold, tolerance or design choice for C0 (healthy rule included)
+  comes from a **calibration seed set** that is disjoint from every benchmark seed
+  (`11..14` historical, `21..23` pilot). D0.2C2 declares the calibration seeds before it
+  generates calibration rollouts. Calibration rollouts are EVALUATOR-only and are not
+  benchmark cases;
+- C0 is never tuned on the twelve pilot cases. The rule and features are frozen and
+  versioned before C0 is run on any pilot case for reporting;
+- if a choice was nonetheless informed by pilot-case results, every affected number is
+  labeled **in-sample** in the report and is not presented as C0 accuracy;
+- no threshold may be invented from, tuned on, or checked against HIDDEN_EVAL performance
+  in any later benchmark version either.
 
 ## Identifiability pilot outputs
 
@@ -546,6 +596,18 @@ values.
 - per-case and total rollout cost;
 - ties and near-ties;
 - excluded or confounded cases, with the reason.
+
+**Cross-seed requirement.** Within-class variation, between-class distances, the nearest
+competing class and the separability matrix are computed from **cross-seed** pairs only
+(the two trajectories come from different seeds). Same-seed pairs are trivially separable
+under a deterministic simulator and may be shown only as a separate, labeled table.
+Nuisance-robust separability is claimed only from the cross-seed numbers.
+
+**Class-balance requirement.** At the healthy-vs-abnormal level the pilot has 3 healthy
+and 9 incident cases, so "always abnormal" already gets 9/12. Binary results
+(`abnormal_presence_correct`, C0's healthy decision) are reported per class and as
+balanced accuracy, never only as one pooled rate. Healthy false-positive behavior rests on
+three cases and is descriptive.
 
 Every number names the benchmark, scorer, C0 and feature versions it was computed with.
 
@@ -567,9 +629,19 @@ That is a valid scientific finding, not a failure to be engineered away.
 - a confounded or non-identifiable case is recorded and then excluded or relabeled
   explicitly, with the reason and the evidence that triggered it;
 - exclusion never deletes data: excluded cases stay in the run history and the report;
-- the only pre-freeze change allowed is the explicit viability revision above (for all
-  classes, recorded). After D0.2C1 freezes the bytes, any change to cases, candidates,
-  timing, features or scorer is a new benchmark version.
+- the only pre-freeze change to cases allowed is the explicit viability revision above
+  (for all classes, recorded).
+
+What freezes when:
+
+| Artifact | Frozen at | A later change requires |
+|---|---|---|
+| pilot cases, candidate set, timeline, truth, scorer-v1 | D0.2C1 fixture freeze | a new benchmark version |
+| C0 features, healthy rule, tolerances | D0.2C2, before any pilot-case C0 run is reported | a new C0 version (benchmark version unchanged) |
+
+D0.2C2 design iteration on calibration seeds happens before the C0 freeze and needs no
+version. After a C0 version has produced reported numbers, those numbers stay attached to
+it, and a revised C0 is reported next to it, never in place of it.
 
 ## Leakage
 
@@ -634,8 +706,8 @@ nuisance-proxy check; structural and cross-case leakage audits; historical fixtu
 their tests unchanged.
 
 **D0.2C2** — EVALUATOR-only C0: candidate compiler, isolated deterministic rollouts,
-frozen feature contract, healthy decision rule, cost accounting, input-exclusion tests,
-shared-function disclosure.
+declared calibration seeds, frozen feature contract, healthy decision rule, cost
+accounting (nominal and unique), input-exclusion tests, shared-function disclosure.
 
 **D0.2C3** — the identifiability report with every output listed above, including
 exclusions and the exact-replay disclosure. No difficulty labels.

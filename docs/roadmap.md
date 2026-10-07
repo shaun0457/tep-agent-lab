@@ -341,7 +341,8 @@ Exit: runtime can inspect/analyze/simulate TEP only through typed, versioned, le
 ## Phase 5 — Benchmark identifiability + C0
 
 Branch: `exp/rca-benchmark-pilot-v0`  
-Specs: `benchmark-design-v0.md`, `evaluation-v0.md`, `rca-v0.md`
+Specs: `benchmark-design-v0.md`, `evaluation-v0.md`, `rca-v0.md`,
+`benchmark-comparative-pilot-v0.md` (D0.2C pilot)
 
 Deliver:
 
