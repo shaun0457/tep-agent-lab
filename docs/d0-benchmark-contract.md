@@ -56,7 +56,7 @@ budget              model 4, tool 2, subagents 0/0, steps 16, simulation quotas 
 world               seed 11, python backend, closed_loop, record_interval 60 s
 ```
 
-Agent projection checksum: `5db21a1c22e9ea626ce5b993e460cefc557e33916759da0265c840b9cfa7b3b5`.
+Agent projection checksum: `a9565b8ba5e21b53e2c22176fa79da36d48536c6325a629656ff32168bea6d35`.
 
 The Agent-visible goal is the frozen fixture goal plus the trigger signals and
 incident time (`benchmark.task_goal`). The fixture goal says "Do not assume a cause

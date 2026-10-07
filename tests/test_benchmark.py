@@ -39,7 +39,7 @@ RUN_ID = "d0-rca-dev-001"
 # Frozen expectations: changing the fixture or projection semantics needs a new version.
 CASE_CHECKSUM = "94cfb522e7d1d17c8bf1a5f5e43913c1c3d80297d552c014ada20ffc9d8ed47c"
 TRUTH_CHECKSUM = "2feb22f1657624cbd739aeada44033758eceaa2555c540de1adaf381a91155f7"
-PROJECTION_CHECKSUM = "5db21a1c22e9ea626ce5b993e460cefc557e33916759da0265c840b9cfa7b3b5"
+PROJECTION_CHECKSUM = "a9565b8ba5e21b53e2c22176fa79da36d48536c6325a629656ff32168bea6d35"
 HIDDEN_ID = "IDV(4)"
 FAULT_FAMILY = "INLET_TEMPERATURE_STEP"
 
@@ -345,6 +345,33 @@ class ContractTests(unittest.TestCase):
         other = replace(one, resources=replace(one.resources, simulated_horizon_seconds=0.0))
         self.assertEqual(score_submission(one, h.truth, h.case.scoring).canonical_bytes(),
                          score_submission(other, h.truth, h.case.scoring).canonical_bytes())
+        record = case_record()
+        record["budget"]["extra_dimensions"]["simulation_rollouts"] = 0.0
+        self.assertEqual(PROJECTION_CHECKSUM,
+                         project_case(BenchmarkCase.from_record(record)).checksum())
+
+    def test_inactive_intervention_is_rejected(self):
+        record = case_record()
+        record["hidden_setup"]["intervention"]["value"] = 0  # would leave the world healthy
+        self.assert_case_rejected(record)
+
+    def test_harness_attests_only_the_frozen_fixture_content(self):
+        h = harness()
+        other = replace(h.case.hidden_setup, intervention=replace(
+            h.case.hidden_setup.intervention, disturbance_id="IDV(1)"))
+        with self.assertRaises(BenchmarkContractError):
+            BenchmarkHarness(replace(h.case, hidden_setup=other), h.truth,
+                             lab_revision=REVISIONS.tep_agent_lab)
+        claim = replace(h.truth.causal_claim, fault_family="OTHER")
+        with self.assertRaises(BenchmarkContractError):
+            BenchmarkHarness(h.case, replace(h.truth, causal_claim=claim),
+                             lab_revision=REVISIONS.tep_agent_lab)
+
+    def test_scripted_provider_reads_any_float_spelling_of_the_time(self):
+        for text, expected in (("simulation time 0.3 h", "0.3"),
+                               ("simulation time 1e-05 h", "1e-05"),
+                               ("simulation time 2.5e+03 h", "2.5e+03")):
+            self.assertEqual(expected, benchmark._GOAL_TIME.search(text).group(1))
 
     def test_d0_scope_excludes_c0_and_real_models(self):
         source = inspect.getsource(benchmark)
@@ -719,7 +746,12 @@ class BlindRunTests(unittest.TestCase):
                           self.audit.leakage_policy_version))
         self.assertLessEqual({"agent_case_projection", "agent_manifest",
                               "agent_context_inventory", "agent_process_graph", "agent_events",
-                              "model_inputs"}, set(self.surfaces))
+                              "model_inputs", "model_context_projections"}, set(self.surfaces))
+        # the persisted per-turn projections are audited, not only the live capture
+        self.assertEqual([turn["context_projection"]["checksum"]
+                          for turn in self.recorder.turns],
+                         [projection["checksum"]
+                          for projection in self.surfaces["model_context_projections"]])
 
     def test_saved_run_is_scored_without_inventing_a_claim(self):
         submission = submission_from_run(self.manager, RUN_ID,
@@ -927,6 +959,13 @@ class LeakageAuditTests(unittest.TestCase):
         for token in forbidden(self.harness):
             self.assertNotIn(token, text)
         self.assertIn("$.<key 0>", {finding.location for finding in audit.findings})
+        fixture = self.harness.fixture
+        for key in (self.harness.case.hidden_setup.checksum(), fixture.ground_truth_source_id,
+                    FAULT_FAMILY.lower()):
+            with self.subTest(key=key):
+                keyed = self.audit({"agent_events": {key: {"nested": "x"}}})
+                self.assertFalse(keyed.passed)
+                self.assertNotIn(key, canonical_json(keyed.record()))
         for finding in audit.findings:  # location + category only
             self.assertEqual({"surface", "location", "category"},
                              set(json.loads(canonical_json(finding))))

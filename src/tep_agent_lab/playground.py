@@ -41,7 +41,7 @@ from tep_sim import (CAPABILITY_VERSION, SAFETY_LIMITS_VERSION, SCENARIO_MAPPING
                      build_process_graph)
 from tep_sim.snapshot import ENVIRONMENT_VERSION
 
-from .canonical_context import (CANONICAL_JSON_SHA256, RESERVED_NAMES,
+from .canonical_context import (_SHA256, CANONICAL_JSON_SHA256, RESERVED_NAMES,
                                 CanonicalContextRegistry, ContextSourceRef,
                                 PackageSourceMaterializer, ProjectionScope,
                                 SourceMaterializer, content_checksum, inventory_checksum)
@@ -76,7 +76,6 @@ EVALUATOR_BINDINGS_CONTENT_CHECKSUM = (
     "d0cc9f81f043d8aea4b413efc1b5416ff79e540e79fbc976e425e09bfc4dc6ae")
 
 _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,63}")
-_SHA256 = re.compile(r"[0-9a-f]{64}")
 _SESSION_DIR = re.compile(r"prepare-[0-9]{4,}")
 _GIT_REVISION = re.compile(r"[0-9a-f]{40}")
 # Keys are compared after lowercasing and dropping separators, so authToken,

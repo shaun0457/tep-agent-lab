@@ -262,7 +262,8 @@ class DisturbanceSetup:
             raise BenchmarkContractError("hidden intervention kind must be DISTURBANCE")
         # tep-sim applies IDV values as integers; a float spelling fails at apply time,
         # so it is rejected here rather than normalized.
-        _integer(self.value, "hidden_setup.intervention.value")
+        if _integer(self.value, "hidden_setup.intervention.value") == 0:
+            raise BenchmarkContractError("a D0 hidden intervention must activate its disturbance")
         if (not isinstance(self.disturbance_id, str) or not self.disturbance_id.startswith("IDV(")
                 or self.disturbance_id not in REGISTRY):
             raise BenchmarkContractError("hidden intervention is not a pinned tep-sim disturbance")
@@ -443,13 +444,13 @@ def _budget(record: Any) -> Budget:
     if record.get("max_total_tokens") is not None:
         raise BenchmarkContractError("token-metered benchmark budgets are not supported in v0")
     extra = _object(record["extra_dimensions"], "budget.extra_dimensions", SIMULATION_DIMENSIONS)
-    for name, value in extra.items():
-        _number(value, f"budget.extra_dimensions.{name}")
     for name in ("max_model_calls", "max_tool_calls", "max_subagents", "max_subagent_depth",
                  "max_steps"):
         _integer(record[name], f"budget.{name}")
     try:
-        return Budget(**{**record, "extra_dimensions": dict(extra)})
+        return Budget(**{**record, "extra_dimensions": {
+            name: _number(value, f"budget.extra_dimensions.{name}")
+            for name, value in extra.items()}})
     except ValueError as exc:
         raise BenchmarkContractError(f"invalid budget: {exc}") from exc
 
@@ -783,7 +784,7 @@ class ModelInputRecorder:
 
 
 _GOAL_SIGNAL = re.compile(r"\b(?:XMEAS|XMV)\([1-9][0-9]*\)")
-_GOAL_TIME = re.compile(r"simulation time ([0-9]+(?:\.[0-9]+)?) h")
+_GOAL_TIME = re.compile(r"simulation time ([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?) h")
 SCRIPTED_HISTORY_MAX_HOURS = 4.0
 
 
@@ -807,7 +808,8 @@ def scripted_blind_provider() -> FakeProvider:
         goal = projection.content["task_state"]["goal"]
         signals = list(dict.fromkeys(_GOAL_SIGNAL.findall(goal)))
         time = _GOAL_TIME.search(goal)
-        window = min(float(time.group(1)), SCRIPTED_HISTORY_MAX_HOURS) if time else 1.0
+        elapsed = float(time.group(1)) if time else 0.0
+        window = min(elapsed, SCRIPTED_HISTORY_MAX_HOURS) if elapsed > 0 else 1.0
         return bind(projection, limits, Action.TOOL_REQUEST, tool_request=ToolCallRequest(
             "d0-2-history", "get_history", {"window_hours": window, "variables": signals}))
 
@@ -832,7 +834,8 @@ class BenchmarkHarness:
     """
 
     def __init__(self, case: BenchmarkCase, truth: EvaluatorGroundTruth, *,
-                 lab_revision: str, fixture: PackagedFixture = D0_FIXTURE) -> None:
+                 lab_revision: str, fixture: PackagedFixture = D0_FIXTURE,
+                 read: Callable[[str], bytes] | None = None) -> None:
         if type(case) is not BenchmarkCase or type(truth) is not EvaluatorGroundTruth:
             raise TypeError("typed BenchmarkCase and EvaluatorGroundTruth required")
         if case.identity() != truth.identity():
@@ -841,6 +844,11 @@ class BenchmarkHarness:
             raise BenchmarkContractError("case identity differs from its packaged fixture")
         if case.scoring.scorer_version != SCORER_VERSION:
             raise BenchmarkContractError("case scorer_version is not this scorer")
+        # The attestation reports the fixture's frozen checksums, so the objects this
+        # harness applies and scores must be exactly the frozen fixture content.
+        frozen_case, frozen_truth = _read_fixture(fixture, read)
+        if case != frozen_case or truth != frozen_truth:
+            raise BenchmarkContractError("case or ground truth differs from its frozen fixture")
         self.case, self.truth, self.fixture = case, truth, fixture
         self.lab_revision = lab_revision
         self.projection = project_case(case)
@@ -853,12 +861,8 @@ class BenchmarkHarness:
     @classmethod
     def load(cls, lab_revision: str, fixture: PackagedFixture = D0_FIXTURE, *,
              read: Callable[[str], bytes] | None = None) -> "BenchmarkHarness":
-        read = read or PackageSourceMaterializer("tep_agent_lab").read_bytes
-        case = BenchmarkCase.from_record(verified_fixture(read(fixture.case_path),
-                                                          fixture.case_checksum))
-        truth = EvaluatorGroundTruth.from_record(verified_fixture(
-            read(fixture.ground_truth_path), fixture.ground_truth_checksum))
-        return cls(case, truth, lab_revision=lab_revision, fixture=fixture)
+        case, truth = _read_fixture(fixture, read)
+        return cls(case, truth, lab_revision=lab_revision, fixture=fixture, read=read)
 
     def run_request(self, model: ModelSpec = D0_MODEL, *,
                     require_conclusion: bool = False) -> RunRequest:
@@ -893,16 +897,15 @@ class BenchmarkHarness:
 
     def create_and_prepare(self, manager: RunManager, run_id: str, provider: Any, *,
                            model: ModelSpec = D0_MODEL) -> RunManifest:
-        """The ordinary P0 path: ``create`` then ``prepare`` with trusted setup."""
+        """The ordinary P0 path: ``create`` then ``prepare`` with trusted setup.
+
+        ``binding_findings`` is the separate EVALUATOR acceptance check of the result.
+        """
         manager.create(run_id, self.run_request(model))
-        manifest = manager.prepare(
+        return manager.prepare(
             run_id, provider=provider,
             context_sources=self.context_sources(manager.revisions.tep_sim),
             case_setup=self.case_setup(), benchmark=self.benchmark_refs())
-        mismatched = self.binding_findings(manifest)
-        if mismatched:  # unreachable via run_request(); guards future edits
-            raise BenchmarkContractError(f"prepared run differs from the case: {mismatched}")
-        return manifest
 
     def binding_findings(self, manifest: RunManifest) -> list[str]:
         """EVALUATOR check that a prepared run hosts exactly this case's Agent projection.
@@ -930,6 +933,16 @@ class BenchmarkHarness:
         return audit_agent_surfaces(
             case=self.case, truth=self.truth, agent_projection_checksum=self.projection_checksum,
             hidden_sources=self.hidden_sources(tep_sim_revision), surfaces=surfaces)
+
+
+def _read_fixture(fixture: PackagedFixture, read: Callable[[str], bytes] | None
+                  ) -> tuple[BenchmarkCase, EvaluatorGroundTruth]:
+    read = read or PackageSourceMaterializer("tep_agent_lab").read_bytes
+    case = BenchmarkCase.from_record(verified_fixture(read(fixture.case_path),
+                                                      fixture.case_checksum))
+    truth = EvaluatorGroundTruth.from_record(verified_fixture(
+        read(fixture.ground_truth_path), fixture.ground_truth_checksum))
+    return case, truth
 
 
 def _truth_labels(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> tuple[str, ...]:
@@ -987,7 +1000,8 @@ class LeakageAudit:
         return to_jsonable(self)
 
 
-def _walk(value: Any, path: str) -> Iterator[tuple[str, Any]]:
+def _walk(value: Any, path: str, hidden: Callable[[str], bool]
+          ) -> Iterator[tuple[str, Any]]:
     """(location, item) for every node and every object key.
 
     A key is echoed into a location only when it is a plain identifier with no
@@ -998,11 +1012,11 @@ def _walk(value: Any, path: str) -> Iterator[tuple[str, Any]]:
         for index, key in enumerate(sorted(value)):
             label = f"{path}.<key {index}>"
             yield label, key
-            clean = _SAFE_KEY.fullmatch(key) and not hidden_vocabulary(key)
-            yield from _walk(value[key], f"{path}.{key}" if clean else label)
+            clean = _SAFE_KEY.fullmatch(key) and not hidden(key)
+            yield from _walk(value[key], f"{path}.{key}" if clean else label, hidden)
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            yield from _walk(item, f"{path}[{index}]")
+            yield from _walk(item, f"{path}[{index}]", hidden)
 
 
 def audit_agent_surfaces(*, case: BenchmarkCase, truth: EvaluatorGroundTruth,
@@ -1024,11 +1038,16 @@ def audit_agent_surfaces(*, case: BenchmarkCase, truth: EvaluatorGroundTruth,
                       PurePosixPath(source.path_or_ref).name, source.content_checksum):
             tokens.append((token.lower(), LeakageCategory.HIDDEN_SOURCE_REF))
     hidden_kinds = {source.kind for source in hidden_sources}
+
+    def hidden_key(key: str) -> bool:
+        lowered = key.lower()
+        return hidden_vocabulary(key) or any(token in lowered for token, _ in tokens)
+
     found: set[tuple[str, str, LeakageCategory]] = set()
     for surface in sorted(surfaces):
         if not isinstance(surface, str) or not _SURFACE.fullmatch(surface):
             raise BenchmarkContractError("surface names must be short identifiers")
-        for location, item in _walk(to_jsonable(surfaces[surface]), "$"):
+        for location, item in _walk(to_jsonable(surfaces[surface]), "$", hidden_key):
             if isinstance(item, dict):
                 kind = item.get("kind")
                 if item.get("visibility") == Visibility.EVALUATOR.value or (
@@ -1056,11 +1075,20 @@ def audit_agent_surfaces(*, case: BenchmarkCase, truth: EvaluatorGroundTruth,
 
 def collect_agent_surfaces(manager: RunManager, run_id: str, *,
                            projection: AgentCaseProjection,
-                           model_inputs: Sequence[Any]) -> dict[str, Any]:
-    """AGENT-scoped public reads of one in-process run, plus captured model inputs."""
+                           model_inputs: Sequence[Any] | None = None) -> dict[str, Any]:
+    """AGENT-scoped public reads of one in-process run plus the exact model inputs.
+
+    Model inputs are the ContextProjections the runtime persisted for every turn,
+    read through the trusted EVALUATOR artifact view; an optional live
+    ``ModelInputRecorder`` capture (tool specs, limits) is audited as well.
+    """
     queries = manager.queries(run_id, ProjectionScope.AGENT)
+    evaluator = manager.queries(run_id, ProjectionScope.EVALUATOR)
     artifacts = queries.artifacts()
-    return {
+    persisted = [evaluator.get_artifact(InformationRef(**ref))["content"]
+                 for ref in evaluator.artifacts()["artifacts"]
+                 if ref["kind"] == "ContextProjection"]
+    surfaces = {
         "agent_case_projection": projection.record(),
         "agent_manifest": queries.manifest_view(),
         "agent_context_inventory": queries.context_inventory(),
@@ -1074,8 +1102,11 @@ def collect_agent_surfaces(manager: RunManager, run_id: str, *,
                                     for ref in artifacts["artifacts"]],
         "agent_telemetry": queries.telemetry(),
         "agent_branch_tree": queries.branch_tree(),
-        "model_inputs": list(model_inputs),
+        "model_context_projections": persisted,
     }
+    if model_inputs is not None:
+        surfaces["model_inputs"] = list(model_inputs)
+    return surfaces
 
 
 # -- deterministic scoring --------------------------------------------------------------
