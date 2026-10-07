@@ -37,9 +37,11 @@ from test_tool_surface import NOW, assert_blind
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = "d0-rca-dev-001"
 # Frozen expectations: changing the fixture or projection semantics needs a new version.
-CASE_CHECKSUM = "94cfb522e7d1d17c8bf1a5f5e43913c1c3d80297d552c014ada20ffc9d8ed47c"
+CASE_CHECKSUM = "e3305b5cd4ba1e2c59c625e5e067ceb067c90a9b9db3631d4d38bc80c088e176"
 TRUTH_CHECKSUM = "2feb22f1657624cbd739aeada44033758eceaa2555c540de1adaf381a91155f7"
 PROJECTION_CHECKSUM = "a9565b8ba5e21b53e2c22176fa79da36d48536c6325a629656ff32168bea6d35"
+# evaluation-v0 O3: deterministic authority/state shell + local ReAct; no WorkBatch/subagents.
+D0_ORCHESTRATION_CONDITION = "O3"
 HIDDEN_ID = "IDV(4)"
 FAULT_FAMILY = "INLET_TEMPERATURE_STEP"
 
@@ -253,6 +255,17 @@ class ContractTests(unittest.TestCase):
         record["case_version"] = "2"
         self.assertNotEqual(PROJECTION_CHECKSUM,
                             project_case(BenchmarkCase.from_record(record)).checksum())
+
+    def test_orchestration_condition_is_not_agent_visible(self):
+        self.assertEqual(D0_ORCHESTRATION_CONDITION,
+                         harness().case.orchestration_policy.condition)
+        for condition in sorted(benchmark.ORCHESTRATION_CONDITIONS):
+            record = case_record()
+            record["orchestration_policy"]["condition"] = condition
+            projection = project_case(BenchmarkCase.from_record(record))
+            with self.subTest(condition=condition):
+                self.assertEqual(PROJECTION_CHECKSUM, projection.checksum())
+                self.assertNotIn("orchestration", canonical_json(projection.record()))
 
     def test_harness_builds_existing_p0_inputs(self):
         h = harness()
@@ -593,6 +606,31 @@ class BlindRunTests(unittest.TestCase):
                             and event["input_summary"]["request_id"] == request_id]
                 self.assertEqual((1, ["ACCEPTED"]), (len(dispatched), verified))
         self.assertEqual(3, len([event for event in trace if event["type"] == "MODEL_TURN"]))
+
+    def test_executed_architecture_matches_fixture_condition(self):
+        """The D0 scripted blind run is O3, and the fixture must say so."""
+        case = self.harness.case
+        self.assertEqual(D0_ORCHESTRATION_CONDITION, case.orchestration_policy.condition)
+        # no subagents: disabled by policy and by budget
+        self.assertEqual((False, 0, 0, 0, 0),
+                         (case.subagent_policy.enabled, case.subagent_policy.max_count,
+                          case.subagent_policy.max_depth, case.budget.max_subagents,
+                          case.budget.max_subagent_depth))
+        trace = [event["payload"] for event in self.evaluator.events()["events"]
+                 if event["source"] == "runtime_trace"]
+        kinds = {event["type"] for event in trace}
+        self.assertFalse({kind for kind in kinds if "BATCH" in kind or "SUBTASK" in kind})
+        # local ReAct inside the deterministic shell: one Coordinator run, each model
+        # turn yields at most one action (gating is checked by test 25)
+        self.assertEqual(1, self.coordinator_run.call_count)
+        turns = executes = 0
+        for event in trace:
+            if event["type"] == "MODEL_TURN":
+                turns, executes = turns + 1, 0
+            elif event["type"] == "EXECUTE":
+                executes += 1
+                self.assertLessEqual(executes, 1)
+        self.assertEqual(3, turns)
 
     def test_run_completes_with_valid_runtime_result(self):  # 26
         self.assertEqual(RunStatus.COMPLETED, self.outcome.terminal_status)

@@ -56,6 +56,15 @@ budget              model 4, tool 2, subagents 0/0, steps 16, simulation quotas 
 world               seed 11, python backend, closed_loop, record_interval 60 s
 ```
 
+Orchestration condition (`orchestration_policy.condition`, EVALUATOR metadata, not
+part of the Agent projection): `O3` — deterministic authority/state shell + local
+ReAct; no WorkBatch/subagents (`evaluation-v0.md`). This classifies what D0.1 actually
+executes: the Coordinator's deterministic TaskState, authority and gates around one
+model-chosen local action per turn, then deterministic execution and verification.
+D0.1 did not test an O1 condition. The harness has no runtime branch on the
+condition; a test checks the executed run against it, and another checks that the
+Agent projection checksum does not depend on it.
+
 Agent projection checksum: `a9565b8ba5e21b53e2c22176fa79da36d48536c6325a629656ff32168bea6d35`.
 
 The Agent-visible goal is the frozen fixture goal plus the trigger signals and
@@ -88,7 +97,7 @@ Canonical sources (both `visibility = EVALUATOR`, repository
 
 | Source id | Kind | Frozen canonical-JSON sha256 |
 |---|---|---|
-| `tep-agent-lab.benchmark-case.rca-dev-001.v1` | `BENCHMARK_CASE` | `94cfb522e7d1d17c8bf1a5f5e43913c1c3d80297d552c014ada20ffc9d8ed47c` |
+| `tep-agent-lab.benchmark-case.rca-dev-001.v1` | `BENCHMARK_CASE` | `e3305b5cd4ba1e2c59c625e5e067ceb067c90a9b9db3631d4d38bc80c088e176` |
 | `tep-agent-lab.benchmark-ground-truth.rca-dev-001.v1` | `EVALUATOR_GROUND_TRUTH` | `2feb22f1657624cbd739aeada44033758eceaa2555c540de1adaf381a91155f7` |
 
 The checksums are frozen in `benchmark.D0_FIXTURE` and tests. They are never

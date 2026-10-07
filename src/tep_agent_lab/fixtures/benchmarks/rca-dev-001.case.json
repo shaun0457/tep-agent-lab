@@ -24,7 +24,7 @@
     "allowed_tools": ["get_capability_summary", "get_history"]
   },
   "orchestration_policy": {
-    "condition": "O1",
+    "condition": "O3",
     "policy_version": "tep-agent-lab.benchmark-orchestration-policy/v0"
   },
   "subagent_policy": {

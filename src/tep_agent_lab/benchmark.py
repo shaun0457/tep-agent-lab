@@ -681,7 +681,7 @@ FIXTURE_DIRECTORY = "src/tep_agent_lab/fixtures/benchmarks"
 D0_FIXTURE = PackagedFixture(
     benchmark_version="tep-rca-benchmark/v0", case_id="rca-dev-001", case_version="1",
     case_path=f"{FIXTURE_DIRECTORY}/rca-dev-001.case.json",
-    case_checksum="94cfb522e7d1d17c8bf1a5f5e43913c1c3d80297d552c014ada20ffc9d8ed47c",
+    case_checksum="e3305b5cd4ba1e2c59c625e5e067ceb067c90a9b9db3631d4d38bc80c088e176",
     ground_truth_path=f"{FIXTURE_DIRECTORY}/rca-dev-001.ground-truth.json",
     ground_truth_checksum="2feb22f1657624cbd739aeada44033758eceaa2555c540de1adaf381a91155f7")
 
