@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
@@ -14,9 +15,26 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("sidecar_builder", ROOT / "desktop/sidecar/build_sidecar.py")
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
+spec = importlib.util.spec_from_file_location("bundle_verifier", ROOT / "desktop/sidecar/verify_bundle.py")
+verifier = importlib.util.module_from_spec(spec)
+with mock.patch.object(sys, "path", [str(ROOT / "desktop/sidecar"), *sys.path]):
+    spec.loader.exec_module(verifier)
 
 
 class SidecarResourcesTests(unittest.TestCase):
+    def test_installed_host_allows_only_tauris_single_nsis_marker_patch(self):
+        raw = b"host-prefix__TAURI_BUNDLE_TYPE_VAR_UNKhost-suffix__TAURI_BUNDLE_TYPE_VAR_UNK"
+        with TemporaryDirectory() as directory:
+            source, installed = Path(directory) / "source.exe", Path(directory) / "installed.exe"
+            source.write_bytes(raw)
+            patched = raw.replace(b"__TAURI_BUNDLE_TYPE_VAR_UNK", b"__TAURI_BUNDLE_TYPE_VAR_NSS", 1)
+            installed.write_bytes(patched)
+            verifier.verify_nsis_host(installed, source)
+            for invalid in (raw, patched + b"tampered", patched.replace(b"prefix", b"changed")):
+                installed.write_bytes(invalid)
+                with self.assertRaises(AssertionError):
+                    verifier.verify_nsis_host(installed, source)
+
     def test_source_mode_uses_canonical_file_and_no_manifest(self):
         with mock.patch.object(resources.sys, "frozen", False, create=True):
             self.assertEqual(ROOT / "dependency-pins.json", resources.dependency_pins_path())

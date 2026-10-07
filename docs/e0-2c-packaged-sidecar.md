@@ -131,7 +131,9 @@ An explicit packaged Rust/Tauri IPC test launches the frozen binary through
 ShellExt, retains one PID for the four reads, shuts down/reaps and proves shell
 execute/spawn/stdin_write/kill/open are denied to the frontend. Windows CI runs
 the existing development bridge suite, actually builds release externalBin + NSIS,
-installs the bundle, checks both installed executable hashes, smokes the installed
+installs the bundle, compares the host's entire bytes with exactly Tauri's NSIS
+bundle-type marker patch (the bundler restores the original build output), checks
+the installed sidecar's unchanged SHA-256, smokes the installed
 backend and uninstalls. The Python 3.11/3.13 matrix remains intact.
 
 Architecture gate: React reaches only `application_request`; Rust reaches only
