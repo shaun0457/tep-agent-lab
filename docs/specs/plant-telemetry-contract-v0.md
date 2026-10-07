@@ -8,6 +8,10 @@ Decision: [ADR-003](../decisions/ADR-003-industrial-environment-boundary.md).
 
 Reviewed base: `83a96c19675eed03831f7106834904b667959fbd`.
 
+Composition review: accepted telemetry head
+`290e483be6d02e601392e34cb96ceb085548ce66`. The telemetry contracts below are
+preserved; Engineering Context and investigation composition extend their use.
+
 ## Scope and ownership
 
 ```text
@@ -29,12 +33,18 @@ for subsequent implementation, not claims about today's code.
 | Concern | Owner |
 |---|---|
 | Plant semantics, topology, bindings, units, reviewed references | Domain canonical sources; TEP uses existing ProcessGraph/registries |
+| Structured engineering claims, limits, constraints and rule governance | Existing lab RuleRegistry; exact RuleRef and SourceVersion citations |
+| Engineering material content and revisions | Referenced source owners; P0 CanonicalContextRegistry attests/resolves inventory, not a new knowledge store |
 | Source normalization, acceptance, deduplication, timing validation | Application/domain TelemetryIngestor with source adapter |
 | Accepted immutable samples and commit revisions | Application/domain TimeSeriesStore |
 | Bounded snapshot reads, ordering, reduction metadata | Application/domain TimeSeriesReader |
 | Run lifecycle, source attestation, scoped projections/provenance | Existing P0 RunManager / CanonicalContextRegistry / RunQueries |
 | Application view assembly and transport | ApplicationViewService and replaceable application adapters |
 | Agent tools, lab visibility/request policy, observation ingestion | Existing lab Tool Surface/state contracts |
+| RcaState, ObservationRecord and revision-bound projection/state updates | Existing investigation subsystem / RcaStateStore / RunLog |
+| Hypothesis, HypothesisEvidenceLink and experiment contracts | Existing experiments subsystem, persisted through investigation contracts |
+| InvestigationReport and archival record references | Existing records subsystem / EngineeringArchive |
+| ContextSnapshot / InvestigationContextView | Derived application/domain reference assemblies; no new canonical owner |
 | Tasks, tools, budgets, state, gates, traces | Unchanged industrial-agent-runtime |
 | Simulated physics, environment and branch lifecycle | Existing tep-sim / ReferenceWorld / SimulationSandbox owners |
 
@@ -61,8 +71,8 @@ deferred. Optional display labels do not establish identity.
 | `PlantEntity` | `entity_id`, extensible namespaced `kind`, `provenance` |
 | `SignalDescriptor` | `signal_id`, `source_binding`, `entity_refs`, `quantity`, `unit`, `value_kind`, `capability`, `provenance` |
 | `Relationship` | `relationship_id`, `from_entity_id`, `to_entity_id`, extensible namespaced `kind`, `provenance` |
-| `DocumentRef` | `document_id`, immutable `content_ref`/checksum, `kind`, `provenance` |
-| `KnowledgeRef` | `knowledge_id`, immutable `content_ref`/checksum, `kind`, `provenance` |
+| `DocumentRef` | `document_id`, immutable `content_ref`/checksum, `version`, `source_location`, extensible `kind`, `scope_refs`, `validation_status`, `provenance` |
+| `KnowledgeRef` | `knowledge_id`, immutable `content_ref`/checksum, `version`, `source_location`, extensible `kind`, `scope_refs`, `validation_status`, `provenance` |
 
 `provenance` identifies the owning source and revision/content ref, extraction or
 mapping method when applicable, validation status (`CANDIDATE` or `VERIFIED`), and
@@ -106,6 +116,188 @@ Builder extraction, VLM, OCR, discovery and mapping implementation are out of P1
 Model extraction cannot directly become trusted truth. For TEP, normalized
 ProcessGraph and source registries remain canonical; these concepts are projections
 of existing semantics, not a second hand-maintained graph or signal map.
+P1 consumes validated structured context, including verified engineering graphs
+from upstream systems. Automatic drawing/document extraction is not the portfolio
+wedge; P1 does not prescribe how every upstream graph is generated.
+
+## Engineering Context and existing RuleRegistry
+
+Engineering material is scoped to plant semantics without copying document bodies
+into the canonical plant model. `scope_refs` bind exact plant revision plus entity,
+signal, relationship, or subsystem identifiers and an explicit association such as
+"applies to". Subsystem membership must come from a versioned domain-owned grouping
+or relationship, not an invented parallel graph. Plant-wide applicability must be
+explicit. Missing/ambiguous scope fails closed for operational assembly.
+
+Examples include SOPs, maintenance procedures, control-loop descriptions, operating
+limits, alarm-response guidance, equipment manuals, engineering notes, and validated
+engineering rules. These are extensible kinds, not a universal closed enum. For
+example, an exact SOP section may apply to an entity and its pressure signal, while
+a control-loop description applies to related sensor/actuator entities and signals.
+Associations describe applicability; they do not promote execution authority.
+
+DocumentRef identifies a document revision; KnowledgeRef may identify a versioned
+section or semi-structured engineering item, citing its exact document when derived.
+`source_location` identifies the section/page/tag or authoritative source locator
+within that immutable revision. Provenance preserves original source, method and
+validation refs. `validation_status` preserves candidate versus reviewed/verified
+material and source-native review status without inventing rule validation enums.
+Confidence alone cannot establish verification. Candidates may be visible under
+an explicit labeled review/reference policy but cannot silently become trusted
+operational knowledge. Ordinary assembly declares its validation/status policy.
+
+```text
+[unstructured / semi-structured engineering material]
+  -- exact scoped content refs --> [DocumentRef / KnowledgeRef]
+[structured engineering claim / limit / constraint]
+  -- exact rule version --> [existing RuleRegistry / RuleRef]
+[both reference paths] -- selected inventory --> [ContextSnapshot assembly]
+```
+
+`src/tep_agent_lab/rules.py` already owns structured engineering claims. RuleRef
+pins `(rule_id, version)`; RuleRegistry is an immutable host snapshot, resolves
+exact refs and matches scope exactly. Its `origin`, `validation`, `authority`,
+`behavior`, `source_refs`, `validation_refs`, and `scope` remain authoritative.
+SourceVersion preserves `source_ref`, `version`, and `source_location`; it is a
+citation, not a runtime InformationRef. Assembly maps declared plant scope refs
+to existing exact rule scopes and inputs using versioned binding provenance,
+without altering registry matching or writing new rules. Registry source refs
+are attested through the existing source inventory/content refs for reproduction.
+
+An operating-limit document remains material; a structured limit claim references
+its RuleRef, retaining the underlying source citation rather than duplicating the
+claim in a new rule store. No EngineeringRuleStore, KnowledgeRuleStore, second
+RuleRegistry or implicit rule promotion is introduced. Context assembly cannot
+change authority, install gates, resolve conflicts silently or edit rule metadata.
+
+## ContextSnapshot: exact available industrial context
+
+ContextSnapshot is a derived immutable assembly of references, not a canonical data
+store. It answers what engineering context and operational data were available at
+one investigation point and how the selection was made.
+
+```text
+ContextSnapshot
+  snapshot_ref / immutable identity and content checksum
+  plant_context_ref
+  telemetry_snapshot_ref -> exact TelemetryReadSnapshot (event horizon T, ingest K)
+  engineering_knowledge_refs[]
+  document_refs[]
+  rule_refs[] -> existing RuleRef versions and registry/source provenance
+  source_inventory_ref / availability_selection_ref
+  visibility / projection_policy_ref
+  assembly_policy_version
+  assembly_query_provenance_ref
+```
+
+The assembly MUST pin the canonical plant revision, exact telemetry snapshot, every
+selected knowledge/document/rule revision and content/source refs, and exact assembly
+and visibility policy versions. Telemetry's pinned context must agree with the
+plant revision used for its bindings; any intentional mapping between revisions
+must be explicit, immutable and validated, never inferred from latest metadata.
+Assembly/query provenance records consumer/run/investigation scope, requests and
+parameters, clock/horizon refs, inventory selection and scope/validation decisions.
+Selections are bounded by application/Agent projection policy; snapshots do not
+auto-inject all available material into prompts.
+
+P0 CanonicalContextRegistry remains the trusted source inventory/resolution owner
+and keeps its READY-frozen run inventory. Assembly only selects within the pinned
+authorized inventory; it cannot add/relabel sources. Where sources have publication
+or availability semantics, the pinned inventory/availability selection records the
+source-native publication domain and the inventory revision or acceptance point
+at which each exact revision became available. T alone does not imply knowledge
+availability and does not turn a document timestamp into a simulation timestamp.
+Any time comparison uses explicit clock mapping; unknown eligibility fails closed.
+
+For example, a manual revision added after a selected historical inventory cannot
+enter replay merely because its text says it was effective earlier. Later reviewed
+knowledge requires a new authorized inventory/run and a new ContextSnapshot under
+the owning P0 lifecycle; it cannot mutate a READY inventory or an earlier snapshot.
+
+ContextSnapshot MUST preserve visibility and MUST NOT contain evaluator truth,
+hidden benchmark bindings or hidden source identifiers/counts. Resolution enforces
+caller authorization as well as the pinned policy. It MUST be reproducible from
+exact refs or report explicitly unavailable. Missing old knowledge/document/rule
+revisions MUST NOT be replaced with today's latest content; partial resolution
+cannot be represented as the same complete snapshot. A new partial assembly, if
+policy permits, must have a new identity and disclosed missing permitted refs.
+
+Retaining the derived manifest/reference does not make it a new ProcessGraph,
+RuleRegistry, CanonicalContextRegistry, TimeSeriesStore or RcaState store. It owns
+neither source content nor investigation records. No mutable latest knowledge is
+included by implication. No ContextSnapshot implementation is added in P1.0.
+
+## Investigation Context composition and evidence provenance
+
+```text
+[ContextSnapshot] -- immutable context ref ----------------+
+[existing RcaState] -- current-at-assembly revision/ref ----+
+                                                         v
+                                         [InvestigationContextView]
+                                           |                |
+                                  application reads   bounded model context
+                                           v                v
+                                    [Application]   [Agent ContextProjection]
+```
+
+InvestigationContextView is a derived read/projection, not canonical investigation
+state. It pins ContextSnapshot ref plus investigation identity and the exact RcaState
+revision/ref captured at assembly. It may select ObservationRecord, hypothesis,
+HypothesisEvidenceLink, experiment, conclusion/report refs and open questions from
+that revision under existing visibility/projection bounds. Open questions currently
+live in RcaState; revision plus question_id identifies them without inventing a
+second record store. Historical replay uses that pinned state revision, not today's
+current state. Assembly must reject inconsistent investigation/run/source scope or
+ineligible state selections, not merge today's RCA evidence into an earlier view.
+
+`investigation.py` owns RcaState, ObservationRecord, RcaStateStore, deterministic
+ingestion and ContextProjection construction; `experiments.py` owns Hypothesis,
+HypothesisEvidenceLink and experiment contracts; `records.py` owns InvestigationReport
+and EngineeringArchive. [RCA v0](rca-v0.md), [investigation state](investigation-state-v0.md),
+[experiments](hypothesis-experiment-v0.md) and [engineering records](engineering-records-v0.md)
+remain the owning specs. P1 references these records; it does not redefine or persist
+duplicates in P1 storage. Diagnosis remains the existing causal claim/conclusion
+and InvestigationReport path, not a new context-owned diagnosis record.
+
+Agent ContextProjection keeps its exact `base_revision`, persistence and existing
+ModelStateUpdateProposal -> atomic TaskStateStore.apply_batch semantics. Composition
+must not authorize model writes, bypass gates or replace runtime contracts. Views
+need not contain every pinned document or record body; retrieval stays bounded.
+Archival reports do not become automatic context for later blind benchmark runs.
+
+### Evidence provenance bridge (hard invariant)
+
+> Any ObservationRecord used as evidence and derived from telemetry or engineering
+> knowledge must retain sufficient exact refs to reconstruct what source/context/
+> snapshot produced it.
+
+| Observation source | Exact traceability required |
+|---|---|
+| Telemetry | ContextSnapshot/plant context refs, TelemetryReadSnapshot with T/K, signal/binding and selected sample identities or immutable result artifact, exact tool/service request and selection/reduction policy |
+| Engineering material | ContextSnapshot/plant context refs, KnowledgeRef/DocumentRef/RuleRef, exact content revision/checksum and source location, selected inventory/availability and exact tool/service request |
+| Derived combination/feature | All contributing source/snapshot refs plus versioned derivation/request; no excluded data may affect the result |
+
+Use existing ObservationRecord `producer_request_ref`, `tool_or_service_ref`,
+`information_refs`, `artifact_refs` and immutable `provenance` to retain this chain.
+Conceptual source refs/RuleRef/SourceVersion remain their owning types; when entering
+runtime ref fields they need a validated source-visible InformationRef/artifact
+envelope, not an invented type substitution or a runtime schema change. The lab
+producer/ingestion path must preserve these refs in future integration. Today's
+tools are not claimed already to emit P1 snapshot provenance.
+
+Observation != Evidence. Successful tool results register immutable observations;
+only explicit HypothesisEvidenceLink/state-update semantics link them as evidence.
+Knowledge verification, source inclusion or snapshot selection does not automatically
+create evidence or establish a causal conclusion. A view must not relabel observations
+as evidence just because they were read. Evidence may originate at an earlier
+snapshot; preserve that originating snapshot rather than rebinding it to the current
+one. Its availability must still be eligible for the selected investigation point.
+
+The UI's "why did the Agent know this?" path follows explicit evidence link ->
+observation -> request/result -> telemetry window + T/K, or exact SOP/manual/rule
+source -> plant/topology and context revision. Missing source retention reports
+unavailable; never reconstruct an asserted fact from newer data. Agent-visible
+provenance must remain free of evaluator-only fields and hidden refs.
 
 ## Sources and immutable samples
 
@@ -376,13 +568,17 @@ Review at the stated base:
 | `src/tep_agent_lab/tep_world.py: ReferenceWorld.__init__/advance/history` | Initial sanitized observation plus sanitized rollout records, skipping the repeated initial rollout point; harness owns advancing reference physics |
 | `src/tep_agent_lab/playground_views.py: RunQueries.telemetry` | Current code reads live sanitized history, filters variables, and returns recent records (hard max 1000); dense data stays artifact-backed |
 | `src/tep_agent_lab/tool_surface.py: _history` | Existing Agent history is a bounded TEP window with artifacts under lab tool policy; successful results keep ObservationRecord ingestion |
+| `src/tep_agent_lab/rules.py: RuleRegistry / RuleRef / SourceVersion` | Structured rules retain exact scope matching, versioned source/validation refs and authority/behavior; assembly selects refs and does not create a second registry |
+| `src/tep_agent_lab/investigation.py: RcaState / ObservationRecord / RcaStateStore` | Derived view pins state revision; existing ingestion refs/provenance carry future snapshot traceability; observations and evidence remain distinct |
+| `src/tep_agent_lab/experiments.py: Hypothesis / HypothesisEvidenceLink / ExperimentProposal / ExperimentResult` | Existing typed contracts and state update path own hypotheses, evidence links and experiments; ContextSnapshot stores none of them |
+| `src/tep_agent_lab/records.py: InvestigationReport / EngineeringArchive`, [RCA v0](rca-v0.md) | Report stays tied to state revision and exact evidence/experiment/trace refs; no automatic archival retrieval or second report owner |
 
 Today's recent live views have no immutable K, no archived arbitrary interval,
 and no cross-view atomic snapshot. They do not already satisfy this new telemetry
 contract. P1.1 must explicitly introduce ingestion/reader snapshots alongside the
 existing owners, without claiming ReferenceWorld.revision() is an ingestion cutoff
 or reusing evaluator-hidden salted state hashes as visible store revisions.
-P1.2 must evolve the owning public P0/application query boundary to expose bounded
+P1.4 must evolve the owning public P0/application query boundary to expose bounded
 reader results; it must not route ApplicationViewService directly to private world
 state. No existing contract, fixture or benchmark behavior changes in P1.0. Any
 implementation contradiction with an owning spec must emit SPEC_CONFLICT and be
@@ -393,15 +589,24 @@ resolved explicitly rather than introducing a bypass.
 | Milestone | Authorized future scope |
 |---|---|
 | P1.1 | TEPSimulationSource -> canonical SignalSample -> deterministic InMemoryTimeSeriesStore -> bounded reader with explicit clocks, identity and snapshot cutoffs |
-| P1.2 | ApplicationView live current/history integration through public P0/application reads |
-| P1.3 | Dirty-stream replay/fault injection; late/duplicate/missing/quality and temporal-leakage tests |
-| P1.4 | First external connector: OPC UA or open historian source |
+| P1.2 | Engineering Context binding: TEP engineering knowledge fixture/reference set -> entity/signal-scoped KnowledgeRef and existing RuleRef |
+| P1.3 | ContextSnapshot: plant context + exact telemetry snapshot + engineering knowledge -> immutable investigation-time reference assembly |
+| P1.4 | Investigation Context integration: ContextSnapshot + existing RcaState -> Application / Agent read assembly, including live current/history through public P0/application reads |
+| P1.5 | Dirty-stream simulation/replay; late/duplicate/missing/quality and temporal-leakage tests |
+| P1.6 | First external connector: OPC UA or historian replay |
+
+Context composition is prioritized before external connector breadth. P1.1 remains
+the accepted live telemetry foundation; later engineering fixture/reference work
+is planned here, not introduced by this documentation PR. The two-domain rule remains.
 
 P1.0 freezes plant semantic ownership, ingestion/storage/reader ownership, immutable
 sample shape, four clocks, late/out-of-order identity, historical K/T reconstruction,
 temporal leakage isolation, deferred REST, TEP adapter direction, unchanged runtime,
-and P1.1 scope. It implements none of the sequence and touches no production code,
-fixture JSON, D0 benchmark specs, roadmap, runtime, simulator, desktop or CI.
+and P1.1 scope. It also freezes scoped Engineering Context, reuse of RuleRegistry,
+derived ContextSnapshot/InvestigationContextView and the evidence provenance bridge
+without adding a canonical owner. It implements none of the sequence and touches
+no production code, fixture JSON, D0 benchmark specs, roadmap, runtime, simulator,
+desktop or CI.
 
 Architecture review outcome: `SPEC_CONFLICT: none`. The migration gaps above are
 explicit future obligations, not silent changes to current production guarantees.
