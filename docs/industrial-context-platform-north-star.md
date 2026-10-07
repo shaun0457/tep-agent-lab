@@ -4,6 +4,8 @@ Status: product/architecture north star; non-normative until adopted by owning s
 Owner repo: `tep-agent-lab`  
 Purpose: prevent product/architecture drift across P1/P2 implementation prompts and reviews.
 
+MVP scope and product maturity gates are defined separately in [`product-maturity-and-mvp.md`](product-maturity-and-mvp.md). Use that document to decide whether a proposed feature advances the current maturity level or is premature platform breadth.
+
 ## North Star
 
 The long-term product is an **Industrial Context Platform**.
