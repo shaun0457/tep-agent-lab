@@ -86,7 +86,9 @@ def forbidden(h: BenchmarkHarness) -> tuple[str, ...]:
     """Evaluator-known strings of one case that must never reach an Agent surface."""
     fixture, claim = h.fixture, h.truth.causal_claim
     expected = CASES[h.case.case_id]
-    return (expected["hidden"], expected["semantic"], claim.fault_family,
+    # The leakage policy skips direction_or_mode (STEP is generic); these modes are not.
+    modes = () if claim.direction_or_mode == "STEP" else (claim.direction_or_mode,)
+    return (*modes, expected["hidden"], expected["semantic"], claim.fault_family,
             claim.mechanism.value, h.case.scenario_family_id, h.case.hidden_setup.checksum(),
             fixture.case_source_id, fixture.ground_truth_source_id, fixture.case_path,
             fixture.ground_truth_path, Path(fixture.case_path).name,
@@ -134,6 +136,8 @@ class FamilyFixtureTests(unittest.TestCase):
         self.assertIs(D0_FIXTURE, BENCHMARK_FIXTURES[("rca-dev-001", "1")])
         with self.assertRaises(TypeError):  # immutable
             BENCHMARK_FIXTURES[("rca-dev-004", "1")] = D0_FIXTURE
+        with self.assertRaises(BenchmarkContractError):  # no silent duplicate replacement
+            benchmark._registry(D0_FIXTURE, replace(D0_FIXTURE, case_checksum="0" * 64))
         self.assertEqual(list(CASES), [h.case.case_id for h in iter_development_fixtures(
             REVISIONS.tep_agent_lab)])
         for case_id, version in (("rca-dev-004", "1"), ("rca-dev-001", "2")):
@@ -148,7 +152,7 @@ class FamilyFixtureTests(unittest.TestCase):
         self.assertEqual(CASES["rca-dev-001"]["case"], CASE_CHECKSUM)
 
     def test_family_membership_and_identities(self):  # 3
-        sources = set()
+        sources, reference = set(), harness("rca-dev-001").case
         for case_id, expected in CASES.items():
             h = harness(case_id)
             with self.subTest(case_id=case_id):
@@ -169,8 +173,8 @@ class FamilyFixtureTests(unittest.TestCase):
                                  (setup.pre_incident_hours, setup.post_incident_hours,
                                   setup.intervention.kind, setup.intervention.disturbance_id,
                                   setup.intervention.value))
-                self.assertEqual(harness("rca-dev-001").case.tool_policy, h.case.tool_policy)
-                self.assertEqual(harness("rca-dev-001").case.budget, h.case.budget)
+                self.assertEqual(reference.tool_policy, h.case.tool_policy)
+                self.assertEqual(reference.budget, h.case.budget)
             sources |= {h.fixture.case_source_id, h.fixture.ground_truth_source_id}
         self.assertEqual(2 * len(CASES), len(sources))
 

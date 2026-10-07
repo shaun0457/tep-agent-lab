@@ -690,8 +690,14 @@ def _packaged(case_id: str, case_checksum: str, ground_truth_checksum: str) -> P
 
 # The explicit EVALUATOR-only canonical fixture registry. It is never scanned from a
 # directory and never reachable from an Agent tool or application view.
-BENCHMARK_FIXTURES: Mapping[tuple[str, str], PackagedFixture] = MappingProxyType({
-    (fixture.case_id, fixture.case_version): fixture for fixture in (
+def _registry(*fixtures: PackagedFixture) -> Mapping[tuple[str, str], PackagedFixture]:
+    registry = {(fixture.case_id, fixture.case_version): fixture for fixture in fixtures}
+    if len(registry) != len(fixtures):  # a duplicate identity never silently replaces one
+        raise BenchmarkContractError("duplicate benchmark fixture identity")
+    return MappingProxyType(registry)
+
+
+BENCHMARK_FIXTURES = _registry(
         _packaged("rca-dev-001",
                   "e3305b5cd4ba1e2c59c625e5e067ceb067c90a9b9db3631d4d38bc80c088e176",
                   "2feb22f1657624cbd739aeada44033758eceaa2555c540de1adaf381a91155f7"),
@@ -700,8 +706,7 @@ BENCHMARK_FIXTURES: Mapping[tuple[str, str], PackagedFixture] = MappingProxyType
                   "7f6d3bb9621a72f56252db028633a60da7e09c4fa5f641b0846ee73c91a28ec0"),
         _packaged("rca-dev-003",
                   "f2ed7acf8fdd568e0832535d47db74820a00bef6db4120cbe6c31b98ad502a7d",
-                  "09aa3063514ec22499494092d3fdc7eb35a87b46bf144daaf614ad6ebf8455a0"),
-    )})
+                  "09aa3063514ec22499494092d3fdc7eb35a87b46bf144daaf614ad6ebf8455a0"))
 D0_FIXTURE = BENCHMARK_FIXTURES[("rca-dev-001", "1")]  # the D0.1 fixture, unchanged
 
 
@@ -975,11 +980,17 @@ def load_fixture(case_id: str, case_version: str, *, lab_revision: str,
 
 def iter_development_fixtures(lab_revision: str, *, read: Callable[[str], bytes] | None = None
                               ) -> Iterator[BenchmarkHarness]:
-    """EVALUATOR: harnesses for every registered DEVELOPMENT fixture, in registry order."""
+    """EVALUATOR: harnesses for every registered DEVELOPMENT fixture, in registry order.
+
+    The partition is read from the verified case alone, so a non-DEVELOPMENT
+    fixture's ground truth is never loaded here.
+    """
+    reader = read or PackageSourceMaterializer("tep_agent_lab").read_bytes
     for fixture in BENCHMARK_FIXTURES.values():
-        harness = BenchmarkHarness.load(lab_revision, fixture, read=read)
-        if harness.case.partition == BenchmarkPartition.DEVELOPMENT:
-            yield harness
+        case = BenchmarkCase.from_record(verified_fixture(reader(fixture.case_path),
+                                                          fixture.case_checksum))
+        if case.partition == BenchmarkPartition.DEVELOPMENT:
+            yield BenchmarkHarness.load(lab_revision, fixture, read=read)
 
 
 def _truth_labels(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> tuple[str, ...]:

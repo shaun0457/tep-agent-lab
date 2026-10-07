@@ -172,6 +172,23 @@ accuracy or difficulty statement.
 - the D0.1 synthetic re-score bytes are pinned;
 - no Agent or application module can reach the registry.
 
+## Known limitations (for D0.2C, not fixed here)
+
+- **Incident time tracks the cause.** `rca-dev-001` is frozen at 0.3 h. The new cases
+  use the preferred 0.1 h / 0.5 h window and so sit at 0.6 h. With one case per cause,
+  the visible incident time alone separates `rca-dev-001` from the others. The
+  identifiability pilot must treat time as a nuisance variable, for example by varying
+  timing within each cause, before it makes any claim.
+- **Scorer semantics of absent fields.** Truth `variable_or_actuator_id = null` is
+  matched by exact equality. A submission that names an actuator therefore fails that
+  field, as it already did for D0.1. `fault_family` is an unpublished free string, so a
+  blind exact match is effectively unreachable. Both are scorer-vocabulary questions
+  that need a new scorer version, not a fixture change.
+- **The leakage policy skips `direction_or_mode`.** It does this because `STEP` is
+  generic. `RANDOM` and `STICKING` are not, so the family tests check that these words
+  are absent from every Agent surface. Adding them to the policy itself is a
+  `leakage_policy_version` change.
+
 ## Next
 
 - D0.2B — healthy negative contract and fixture. This needs a deliberate
