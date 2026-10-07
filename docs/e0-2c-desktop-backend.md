@@ -85,7 +85,8 @@ error recovery and EOF, the static CLI, and one real subprocess with four reads
 of the same run/session. The existing E0 and transport suites remain in the full
 check. No dependency was added.
 
-E0.2C2 owns Tauri/TypeScript/Rust shell implementation, process supervision and
-packaging Python as a Tauri sidecar. E0.2C as a whole is not complete.
+E0.2C2A adds the Tauri/TypeScript/Rust live development shell and process
+supervision (`e0-2c-tauri-shell.md`). E0.2C2B owns packaging Python as an external
+sidecar. E0.2C as a whole is not complete.
 
 SPEC_CONFLICT: none

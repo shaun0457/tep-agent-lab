@@ -65,9 +65,18 @@ Contract and error codes: `docs/e0-2b-application-transport.md`.
 
 Contract: `docs/e0-2c-desktop-backend.md`.
 
-#### E0.2C2 — Tauri/TypeScript/Rust shell — pending
+#### E0.2C2A — Tauri/TypeScript/Rust live shell — complete
 
-Process supervision and packaging Python as a Tauri sidecar remain deferred.
+- React/TypeScript/Vite development shell with four demonstration reads;
+- one narrow Tauri v2 command and Rust-owned persistent Python process;
+- serialized, correlated, bounded NDJSON and deterministic shutdown;
+- real Python bridge and headless Tauri command tests; desktop CI validation.
+
+Contract and development setup: `docs/e0-2c-tauri-shell.md`.
+
+#### E0.2C2B — Packaged Python sidecar — pending
+
+Packaging Python as a distributable external sidecar remains deferred.
 E0.2C as a whole remains incomplete.
 
 Target UI stack:
