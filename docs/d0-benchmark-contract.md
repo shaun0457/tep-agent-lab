@@ -210,7 +210,8 @@ python scripts/check.py --runtime ../industrial-agent-runtime --tep-sim ../tep-s
 These remain open:
 
 - healthy `NO_ABNORMAL_CAUSE` fixture;
-- additional variants;
+- additional variants (D0.2A added `rca-dev-002`/`rca-dev-003`: see
+  [`d0-2a-incident-family.md`](d0-2a-incident-family.md));
 - C0 enumerate/simulate/match;
 - the identifiability pilot and difficulty labels;
 - a structured RcaResult submission boundary;

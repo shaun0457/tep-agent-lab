@@ -167,6 +167,18 @@ typed fixture + truth
 After D0.1, add the healthy/variant/C0/identifiability pilot before making benchmark
 difficulty or Agent-capability claims.
 
+### D0.2A — Incident benchmark family expansion — complete
+
+Three deterministic DEVELOPMENT incident fixtures (`rca-dev-001..003`) in the
+`reactor-thermal-v0` family, with an explicit EVALUATOR-only fixture registry. These
+are candidate fixtures only. No C0, identifiability or difficulty claim has been made.
+
+Implementation note: `docs/d0-2a-incident-family.md`.
+
+### D0.2B — Healthy negative contract + fixture — next
+
+### D0.2C — C0 + identifiability pilot — pending
+
 ## Phase 0 — Reproducible lab / benchmark shell
 
 Specs: `evaluation-v0.md`, `benchmark-design-v0.md`
