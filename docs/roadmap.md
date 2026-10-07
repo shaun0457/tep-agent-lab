@@ -175,9 +175,16 @@ are candidate fixtures only. No C0, identifiability or difficulty claim has been
 
 Implementation note: `docs/d0-2a-incident-family.md`.
 
-### D0.2B — Healthy negative contract + fixture — next
+### D0.2B — Healthy negative contract + fixture — complete
 
-### D0.2C — C0 + identifiability pilot — pending
+`benchmark-setup/v1` adds an explicit `DISTURBANCE | NO_INTERVENTION` setup union while
+the frozen `benchmark-setup/v0` incident fixtures stay byte-identical. One healthy
+DEVELOPMENT fixture (`rca-dev-004`) has `NO_ABNORMAL_CAUSE` ground truth and an attested
+no-intervention setup. This does not make the benchmark balanced.
+
+Implementation note: `docs/d0-2b-healthy-negative.md`.
+
+### D0.2C — C0 + identifiability pilot — next
 
 ## Phase 0 — Reproducible lab / benchmark shell
 
