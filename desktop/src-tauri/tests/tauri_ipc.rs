@@ -16,7 +16,9 @@ fn registered_tauri_command_reads_one_real_python_session() {
     let pid = tauri::async_runtime::block_on(backend.process_id()).unwrap();
     let app = mock_builder()
         .manage(backend.clone())
-        .invoke_handler(tauri::generate_handler![tep_desktop::application_request])
+        .invoke_handler(tauri::generate_handler![
+            tep_desktop::commands::application_request
+        ])
         .build(tauri::generate_context!())
         .unwrap();
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())

@@ -61,6 +61,8 @@ jobs:
           cargo check --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo check --locked --features custom-protocol
           exit $LASTEXITCODE
 
   test:

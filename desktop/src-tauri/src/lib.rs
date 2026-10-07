@@ -5,13 +5,17 @@ use serde_json::Value;
 use std::sync::Arc;
 use tauri::Manager;
 
-#[tauri::command]
-pub async fn application_request(
-    backend: tauri::State<'_, Arc<BackendProcess>>,
-    method: String,
-    params: Value,
-) -> Result<ApplicationResponse, BridgeError> {
-    backend.request(&method, params).await
+pub mod commands {
+    use super::*;
+
+    #[tauri::command]
+    pub async fn application_request(
+        backend: tauri::State<'_, Arc<BackendProcess>>,
+        method: String,
+        params: Value,
+    ) -> Result<ApplicationResponse, BridgeError> {
+        backend.request(&method, params).await
+    }
 }
 
 pub fn run() {
@@ -26,7 +30,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![application_request])
+        .invoke_handler(tauri::generate_handler![commands::application_request])
         .build(tauri::generate_context!())
         .expect("desktop host setup failed");
     app.run(|app, event| {
