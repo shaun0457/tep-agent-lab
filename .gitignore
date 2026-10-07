@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 runs/
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

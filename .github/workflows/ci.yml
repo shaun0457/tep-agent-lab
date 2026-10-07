@@ -9,6 +9,60 @@ permissions:
   contents: read
 
 jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tep-agent-lab
+      - uses: actions/checkout@v4
+        with:
+          repository: shaun0457/industrial-agent-runtime
+          ref: 92651cf305ad735871f26006a790f561fff82654
+          path: industrial-agent-runtime
+      - uses: actions/checkout@v4
+        with:
+          repository: shaun0457/tep-sim
+          ref: ea0b7304090017b14ac13665595b6f5e9d195250
+          path: tep-sim
+          ssh-key: ${{ secrets.TEP_SIM_DEPLOY_KEY }}
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tep-agent-lab/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install numerical dependency
+        shell: pwsh
+        run: |
+          $pin = (Get-Content tep-agent-lab/dependency-pins.json | ConvertFrom-Json).numpy
+          python -m pip install "numpy==$pin"
+      - name: Validate frontend
+        working-directory: tep-agent-lab/desktop
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: Validate Rust and real Python process bridge (no window)
+        working-directory: tep-agent-lab/desktop/src-tauri
+        shell: pwsh
+        run: |
+          $env:TEP_AGENT_PYTHON = (Get-Command python).Source
+          $root = $env:GITHUB_WORKSPACE
+          $env:PYTHONPATH = "$root/industrial-agent-runtime/src;$root/tep-sim/src;$root/tep-sim/vendor/tep-sim-upstream/src"
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo check --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          exit $LASTEXITCODE
+
   test:
     runs-on: ubuntu-latest
     strategy:
