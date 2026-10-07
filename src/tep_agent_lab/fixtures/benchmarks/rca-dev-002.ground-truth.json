@@ -1,0 +1,13 @@
+{
+  "schema_version": "tep-agent-lab.benchmark-ground-truth/v0",
+  "benchmark_version": "tep-rca-benchmark/v0",
+  "case_id": "rca-dev-002",
+  "case_version": "1",
+  "causal_claim": {
+    "entity_id": "reactor_cooling_water_in",
+    "mechanism": "TEMPERATURE_DISTURBANCE",
+    "variable_or_actuator_id": null,
+    "fault_family": "INLET_TEMPERATURE_RANDOM_VARIATION",
+    "direction_or_mode": "RANDOM"
+  }
+}
