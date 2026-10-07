@@ -1,0 +1,13 @@
+{
+  "schema_version": "tep-agent-lab.benchmark-ground-truth/v0",
+  "benchmark_version": "tep-rca-benchmark/v0",
+  "case_id": "rca-dev-004",
+  "case_version": "1",
+  "causal_claim": {
+    "entity_id": null,
+    "mechanism": "NO_ABNORMAL_CAUSE",
+    "variable_or_actuator_id": null,
+    "fault_family": null,
+    "direction_or_mode": null
+  }
+}

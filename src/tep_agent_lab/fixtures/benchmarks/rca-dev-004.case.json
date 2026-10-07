@@ -1,0 +1,63 @@
+{
+  "schema_version": "tep-agent-lab.benchmark-case/v0",
+  "benchmark_version": "tep-rca-benchmark/v0",
+  "case_id": "rca-dev-004",
+  "case_version": "1",
+  "scenario_family_id": "reactor-thermal-v0",
+  "partition": "DEVELOPMENT",
+  "task_family": "RCA",
+  "world": {
+    "seed": 14,
+    "backend": "python",
+    "control_mode": "closed_loop",
+    "record_interval": 60
+  },
+  "agent_projection": {
+    "incident_id": "incident-rca-dev-004",
+    "goal": "Investigate the observed reactor thermal behavior and identify the most plausible supported causal mechanism using available evidence. Do not assume that an abnormal cause exists.",
+    "trigger_signal_ids": ["XMEAS(9)"],
+    "initial_time_hours": 0.6,
+    "projection_policy_version": "tep-agent-lab.benchmark-agent-projection-policy/v0"
+  },
+  "tool_policy": {
+    "policy_version": "tep-agent-lab.benchmark-tool-policy/v0",
+    "allowed_tools": ["get_capability_summary", "get_history"]
+  },
+  "orchestration_policy": {
+    "condition": "O3",
+    "policy_version": "tep-agent-lab.benchmark-orchestration-policy/v0"
+  },
+  "subagent_policy": {
+    "enabled": false,
+    "max_count": 0,
+    "max_depth": 0
+  },
+  "budget": {
+    "max_model_calls": 4,
+    "max_tool_calls": 2,
+    "max_subagents": 0,
+    "max_subagent_depth": 0,
+    "max_steps": 16,
+    "extra_dimensions": {
+      "simulation_snapshots": 0,
+      "simulation_branches": 0,
+      "simulation_rollouts": 0,
+      "simulated_horizon_seconds": 0
+    }
+  },
+  "hidden_setup": {
+    "schema_version": "tep-agent-lab.benchmark-setup/v1",
+    "kind": "NO_INTERVENTION",
+    "pre_observation_hours": 0.1,
+    "observation_hours": 0.5
+  },
+  "scoring": {
+    "schema_version": "tep-agent-lab.benchmark-scoring/v0",
+    "scorer_version": "tep-agent-lab.benchmark-scorer/v0",
+    "causal_claim_match_fields": ["entity_id", "mechanism", "variable_or_actuator_id",
+                                  "fault_family", "direction_or_mode"],
+    "healthy_outcome_enabled": true,
+    "evidence_ref_policy_version": "tep-agent-lab.benchmark-evidence-ref-policy/v0",
+    "authority_policy_version": "tep-agent-lab.benchmark-authority-policy/v0"
+  }
+}

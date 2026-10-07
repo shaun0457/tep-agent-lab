@@ -174,6 +174,50 @@ Multi-fault/interacting schedules require a later benchmark schema version.
 
 This restriction is for benchmark-freeze clarity, not a claim that the simulator cannot support more complex scenarios.
 
+`benchmark-setup/v0` stays frozen exactly as above. Fixtures that use it (`rca-dev-001..003`) are never rewritten into a later setup schema.
+
+### HiddenSetup v1 (D0.2B)
+
+`benchmark-setup/v1` adds the healthy negative case through an explicit tagged setup union. `BenchmarkCase.hidden_setup` is a versioned sub-record: the loader dispatches on its `schema_version` and accepts either v0 or v1.
+
+```text
+BenchmarkSetupV1
+  schema_version = "tep-agent-lab.benchmark-setup/v1"
+  kind
+
+  kind = DISTURBANCE
+    pre_incident_hours
+    intervention
+      kind = "DISTURBANCE"
+      disturbance_id
+      value
+    post_incident_hours
+
+  kind = NO_INTERVENTION
+    pre_observation_hours
+    observation_hours
+```
+
+Rules:
+
+- `kind` is required and must be exactly `DISTURBANCE` or `NO_INTERVENTION`; each kind has an exact field set and unknown fields are rejected;
+- `DISTURBANCE` keeps every v0 intervention rule (exactly one pinned, supported, active disturbance);
+- `NO_INTERVENTION` carries no intervention field at all; `observation_hours` is positive and `pre_observation_hours` is nonnegative;
+- `initial_time_hours` equals the setup timeline (`pre + post` or `pre_observation + observation`);
+- a healthy case is never encoded as a disabled disturbance: `value = 0`, `disturbance_id = null`, an empty or null `intervention`, or any other disturbance spelling is rejected;
+- `EvaluatorGroundTruth.causal_claim.mechanism = NO_ABNORMAL_CAUSE` exactly when the setup is `NO_INTERVENTION`, and such a case must set `scoring.healthy_outcome_enabled = true`.
+
+Trusted setup policy versions:
+
+```text
+benchmark-setup/v0 -> tep-agent-lab.benchmark-setup-policy/v0
+benchmark-setup/v1 -> tep-agent-lab.benchmark-setup-policy/v1
+```
+
+A `NO_INTERVENTION` setup may only advance the deterministic reference world, observe the sanitized Agent-visible state and attest. It applies nothing, calls no Agent tool and reads no hidden simulator state. It is still trusted setup and still produces a `CaseSetupAttestation`; benchmark READY without one remains forbidden.
+
+`NO_ABNORMAL_CAUSE` truth means "no evaluator-injected abnormal cause". It does not mean zero dynamics: the closed-loop process still shows normal process and control variation.
+
 ## EvaluatorGroundTruth
 
 Ground truth is a separate EVALUATOR-only canonical source.
@@ -473,7 +517,7 @@ Requirements:
 - fixed tool/budget policy;
 - leakage audit passes.
 
-A healthy negative case and multi-variant family belong immediately after contract implementation but are not required to prove the first D0 plumbing PR.
+A healthy negative case and multi-variant family belong immediately after contract implementation but are not required to prove the first D0 plumbing PR. They were added later: incident variants in D0.2A (`docs/d0-2a-incident-family.md`) and the healthy `NO_INTERVENTION` case in D0.2B (`docs/d0-2b-healthy-negative.md`).
 
 ## SPEC_CONFLICT rule
 

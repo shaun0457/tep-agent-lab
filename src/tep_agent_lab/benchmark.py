@@ -44,6 +44,7 @@ from .tool_surface import SIMULATION_DIMENSIONS
 
 BENCHMARK_CASE_SCHEMA = "tep-agent-lab.benchmark-case/v0"
 HIDDEN_SETUP_SCHEMA = "tep-agent-lab.benchmark-setup/v0"
+HIDDEN_SETUP_SCHEMA_V1 = "tep-agent-lab.benchmark-setup/v1"
 GROUND_TRUTH_SCHEMA = "tep-agent-lab.benchmark-ground-truth/v0"
 AGENT_PROJECTION_SCHEMA = "tep-agent-lab.benchmark-agent-projection/v0"
 SCORING_SCHEMA = "tep-agent-lab.benchmark-scoring/v0"
@@ -52,7 +53,8 @@ SUBMISSION_SCHEMA = "tep-agent-lab.benchmark-submission/v0"
 SCORE_SCHEMA = "tep-agent-lab.benchmark-score/v0"
 
 SCORER_VERSION = "tep-agent-lab.benchmark-scorer/v0"
-SETUP_POLICY_VERSION = "tep-agent-lab.benchmark-setup-policy/v0"
+SETUP_POLICY_VERSION = "tep-agent-lab.benchmark-setup-policy/v0"  # setup/v0 fixtures
+SETUP_POLICY_VERSION_V1 = "tep-agent-lab.benchmark-setup-policy/v1"  # setup/v1 fixtures
 LEAKAGE_POLICY_VERSION = "tep-agent-lab.benchmark-leakage-policy/v0"
 TASK_FAMILY = "RCA"
 ORCHESTRATION_CONDITIONS = frozenset({"O0", "O1", "O2", "O3", "O4", "O5"})
@@ -307,11 +309,117 @@ class HiddenSetup:
         return cls(**{**record, "intervention": DisturbanceSetup.from_record(
             record["intervention"])})
 
+    @property
+    def timeline_hours(self) -> float:
+        return self.pre_incident_hours + self.post_incident_hours
+
     def record(self) -> dict[str, Any]:
         return to_jsonable(self)
 
     def checksum(self) -> str:
         return checksum(self.record())
+
+
+# -- benchmark-setup/v1: an explicit tagged setup union ----------------------------------
+SETUP_KIND_DISTURBANCE = "DISTURBANCE"
+SETUP_KIND_NO_INTERVENTION = "NO_INTERVENTION"
+
+
+@dataclass(frozen=True, kw_only=True)
+class DisturbanceSetupV1:
+    """setup/v1 ``DISTURBANCE``: the v0 timeline, with the setup kind tagged explicitly."""
+
+    schema_version: str
+    kind: str
+    pre_incident_hours: float
+    intervention: DisturbanceSetup
+    post_incident_hours: float
+
+    def __post_init__(self) -> None:
+        if self.schema_version != HIDDEN_SETUP_SCHEMA_V1 or self.kind != SETUP_KIND_DISTURBANCE:
+            raise BenchmarkContractError("not a setup/v1 DISTURBANCE setup")
+        for name in ("pre_incident_hours", "post_incident_hours"):
+            object.__setattr__(self, name, _number(getattr(self, name), f"hidden_setup.{name}"))
+        if type(self.intervention) is not DisturbanceSetup:
+            raise BenchmarkContractError("hidden_setup.intervention must be typed")
+
+    @property
+    def timeline_hours(self) -> float:
+        return self.pre_incident_hours + self.post_incident_hours
+
+    def record(self) -> dict[str, Any]:
+        return to_jsonable(self)
+
+    def checksum(self) -> str:
+        return checksum(self.record())
+
+
+@dataclass(frozen=True, kw_only=True)
+class NoInterventionSetup:
+    """setup/v1 ``NO_INTERVENTION``: advance the reference world, apply nothing.
+
+    Structurally a separate setup kind, never a disabled or empty disturbance.
+    """
+
+    schema_version: str
+    kind: str
+    pre_observation_hours: float
+    observation_hours: float
+
+    def __post_init__(self) -> None:
+        if (self.schema_version != HIDDEN_SETUP_SCHEMA_V1
+                or self.kind != SETUP_KIND_NO_INTERVENTION):
+            raise BenchmarkContractError("not a setup/v1 NO_INTERVENTION setup")
+        for name in ("pre_observation_hours", "observation_hours"):
+            object.__setattr__(self, name, _number(getattr(self, name), f"hidden_setup.{name}"))
+        if self.observation_hours <= 0:
+            raise BenchmarkContractError("hidden_setup.observation_hours must be positive")
+
+    @property
+    def timeline_hours(self) -> float:
+        return self.pre_observation_hours + self.observation_hours
+
+    def record(self) -> dict[str, Any]:
+        return to_jsonable(self)
+
+    def checksum(self) -> str:
+        return checksum(self.record())
+
+
+BenchmarkSetup = HiddenSetup | DisturbanceSetupV1 | NoInterventionSetup
+_SETUP_POLICY = {HiddenSetup: SETUP_POLICY_VERSION, DisturbanceSetupV1: SETUP_POLICY_VERSION_V1,
+                 NoInterventionSetup: SETUP_POLICY_VERSION_V1}
+
+
+def hidden_setup_from_record(record: Any) -> BenchmarkSetup:
+    """Dispatch on the setup schema; v0 records are never rewritten into v1."""
+    version = record.get("schema_version") if isinstance(record, Mapping) else None
+    if version == HIDDEN_SETUP_SCHEMA:
+        return HiddenSetup.from_record(record)
+    if version != HIDDEN_SETUP_SCHEMA_V1:
+        raise BenchmarkContractError("hidden_setup schema_version is not a known setup schema")
+    kind = record.get("kind")
+    if kind == SETUP_KIND_DISTURBANCE:
+        record = _object(record, "hidden_setup", ("schema_version", "kind", "pre_incident_hours",
+                                                  "intervention", "post_incident_hours"))
+        return DisturbanceSetupV1(**{**record, "intervention": DisturbanceSetup.from_record(
+            record["intervention"])})
+    if kind == SETUP_KIND_NO_INTERVENTION:
+        return NoInterventionSetup(**_object(record, "hidden_setup", (
+            "schema_version", "kind", "pre_observation_hours", "observation_hours")))
+    raise BenchmarkContractError("hidden_setup kind must be DISTURBANCE or NO_INTERVENTION")
+
+
+def setup_policy_version(setup: BenchmarkSetup) -> str:
+    """The trusted setup policy that executes this setup schema."""
+    try:
+        return _SETUP_POLICY[type(setup)]
+    except KeyError:
+        raise BenchmarkContractError("hidden_setup must be a typed benchmark setup") from None
+
+
+def _setup_intervention(setup: BenchmarkSetup) -> DisturbanceSetup | None:
+    return None if type(setup) is NoInterventionSetup else setup.intervention
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -472,7 +580,7 @@ class BenchmarkCase:
     orchestration_policy: OrchestrationPolicy
     subagent_policy: SubagentPolicy
     budget: Budget
-    hidden_setup: HiddenSetup
+    hidden_setup: BenchmarkSetup
     scoring: ScoringConfig
 
     def __post_init__(self) -> None:
@@ -491,9 +599,10 @@ class BenchmarkCase:
                            ("tool_policy", ToolPolicy), ("orchestration_policy",
                                                          OrchestrationPolicy),
                            ("subagent_policy", SubagentPolicy), ("budget", Budget),
-                           ("hidden_setup", HiddenSetup), ("scoring", ScoringConfig)):
+                           ("scoring", ScoringConfig)):
             if type(getattr(self, name)) is not kind:
                 raise BenchmarkContractError(f"{name} must be a typed {kind.__name__}")
+        setup_policy_version(self.hidden_setup)  # one of the typed setup schemas
         family = self.scenario_family_id.lower()
         for name in ("case_id", "benchmark_version"):
             if family in getattr(self, name).lower():
@@ -501,9 +610,8 @@ class BenchmarkCase:
         if (self.budget.max_subagents != self.subagent_policy.max_count
                 or self.budget.max_subagent_depth != self.subagent_policy.max_depth):
             raise BenchmarkContractError("budget subagent limits differ from subagent_policy")
-        setup = self.hidden_setup
         if not _close(self.agent_projection.initial_time_hours,
-                      setup.pre_incident_hours + setup.post_incident_hours):
+                      self.hidden_setup.timeline_hours):
             raise BenchmarkContractError("initial_time_hours differs from the hidden timeline")
 
     @classmethod
@@ -521,7 +629,7 @@ class BenchmarkCase:
                 record["orchestration_policy"]),
             "subagent_policy": SubagentPolicy.from_record(record["subagent_policy"]),
             "budget": _budget(record["budget"]),
-            "hidden_setup": HiddenSetup.from_record(record["hidden_setup"]),
+            "hidden_setup": hidden_setup_from_record(record["hidden_setup"]),
             "scoring": ScoringConfig.from_record(record["scoring"])})
 
     def identity(self) -> tuple[str, str, str]:
@@ -706,7 +814,10 @@ BENCHMARK_FIXTURES = _registry(
                   "7f6d3bb9621a72f56252db028633a60da7e09c4fa5f641b0846ee73c91a28ec0"),
         _packaged("rca-dev-003",
                   "f2ed7acf8fdd568e0832535d47db74820a00bef6db4120cbe6c31b98ad502a7d",
-                  "09aa3063514ec22499494092d3fdc7eb35a87b46bf144daaf614ad6ebf8455a0"))
+                  "09aa3063514ec22499494092d3fdc7eb35a87b46bf144daaf614ad6ebf8455a0"),
+        _packaged("rca-dev-004",  # D0.2B: setup/v1 NO_INTERVENTION
+                  "2b30594c0e7f286b7dbb07b1dc25638c80b59d7af202e9c1f8ceba6d513427af",
+                  "f8c146ee10fea247a9e924ab51a06aacf3943632527de4d044b9c328122813cd"))
 D0_FIXTURE = BENCHMARK_FIXTURES[("rca-dev-001", "1")]  # the D0.1 fixture, unchanged
 
 
@@ -753,6 +864,8 @@ class BenchmarkCaseSetup:
     """Trusted ``case_setup``: exactly the frozen hidden setup, then a typed attestation.
 
     Runs inside ``RunManager.prepare`` on P0's own reference world; never an Agent tool.
+    A ``NO_INTERVENTION`` setup only advances, observes and attests: it applies nothing
+    and reads no hidden simulator state.
     """
 
     def __init__(self, harness: "BenchmarkHarness") -> None:
@@ -763,27 +876,33 @@ class BenchmarkCaseSetup:
         self._truth_checksum = harness.fixture.ground_truth_checksum
         self._world_checksum = checksum(case.world.record())
 
+    def _steps(self) -> tuple[float | DisturbanceSetup, ...]:
+        """The setup timeline: hours to advance, or the one intervention to apply."""
+        setup = self._setup
+        if type(setup) is NoInterventionSetup:
+            return (setup.pre_observation_hours, setup.observation_hours)
+        return (setup.pre_incident_hours, setup.intervention, setup.post_incident_hours)
+
     def __call__(self, world: ReferenceWorld) -> CaseSetupAttestation:
-        setup, operations = self._setup, 0
-        if setup.pre_incident_hours > 0:
-            world.advance(setup.pre_incident_hours)
-            operations += 1
-        world.environment.apply(DisturbanceIntervention(setup.intervention.disturbance_id,
-                                                        setup.intervention.value))
-        operations += 1
-        if setup.post_incident_hours > 0:
-            world.advance(setup.post_incident_hours)
+        operations = 0
+        for step in self._steps():
+            if type(step) is DisturbanceSetup:
+                world.environment.apply(DisturbanceIntervention(step.disturbance_id, step.value))
+            elif step > 0:
+                world.advance(step)
+            else:
+                continue
             operations += 1
         observation = world.observe()  # sanitized Agent-visible observation only
         benchmark_version, case_id, case_version = self._identity
         return CaseSetupAttestation(
             schema_version=CASE_SETUP_ATTESTATION_VERSION, benchmark_version=benchmark_version,
             case_id=case_id, case_version=case_version,
-            setup_policy_version=SETUP_POLICY_VERSION,
+            setup_policy_version=setup_policy_version(self._setup),
             case_source_checksum=self._case_checksum,
             ground_truth_source_checksum=self._truth_checksum,
             world_config_checksum=self._world_checksum,
-            hidden_setup_checksum=setup.checksum(), operation_count=operations,
+            hidden_setup_checksum=self._setup.checksum(), operation_count=operations,
             final_simulation_time_hours=observation["simulation_time_hours"],
             final_agent_observation_checksum=checksum(observation))
 
@@ -868,6 +987,7 @@ class BenchmarkHarness:
             raise BenchmarkContractError("case identity differs from its packaged fixture")
         if case.scoring.scorer_version != SCORER_VERSION:
             raise BenchmarkContractError("case scorer_version is not this scorer")
+        _check_outcome_kind(case, truth)
         # The attestation reports the fixture's frozen checksums, so the objects this
         # harness applies and scores must be exactly the frozen fixture content.
         frozen_case, frozen_truth = _read_fixture(fixture, read)
@@ -905,7 +1025,7 @@ class BenchmarkHarness:
             evaluator_ground_truth_source_id=self.fixture.ground_truth_source_id,
             agent_projection_checksum=self.projection_checksum,
             scorer_version=case.scoring.scorer_version,
-            setup_policy_version=SETUP_POLICY_VERSION,
+            setup_policy_version=setup_policy_version(case.hidden_setup),
             leakage_policy_version=LEAKAGE_POLICY_VERSION)
 
     def case_setup(self) -> BenchmarkCaseSetup:
@@ -993,14 +1113,29 @@ def iter_development_fixtures(lab_revision: str, *, read: Callable[[str], bytes]
             yield BenchmarkHarness.load(lab_revision, fixture, read=read)
 
 
+def _check_outcome_kind(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> None:
+    """Healthy truth exactly when the setup applies no intervention.
+
+    A healthy case is never encoded as a disabled disturbance, and a case that
+    injects nothing never claims an abnormal cause.
+    """
+    healthy_truth = truth.causal_claim.mechanism == CausalMechanism.NO_ABNORMAL_CAUSE
+    no_intervention = type(case.hidden_setup) is NoInterventionSetup
+    if healthy_truth != no_intervention:
+        raise BenchmarkContractError(
+            "NO_ABNORMAL_CAUSE truth requires exactly a NO_INTERVENTION setup")
+    if healthy_truth and not case.scoring.healthy_outcome_enabled:
+        raise BenchmarkContractError("a NO_ABNORMAL_CAUSE case must enable the healthy outcome")
+
+
 def _truth_labels(case: BenchmarkCase, truth: EvaluatorGroundTruth) -> tuple[str, ...]:
     """Evaluator labels whose appearance in Agent data is a leak.
 
     ``entity_id`` is excluded on purpose: it names a ProcessGraph entity that blind
     topology already shows. ``direction_or_mode`` is a generic word (STEP).
     """
-    claim = truth.causal_claim
-    labels = [case.hidden_setup.intervention.disturbance_id, case.scenario_family_id,
+    claim, intervention = truth.causal_claim, _setup_intervention(case.hidden_setup)
+    labels = [intervention.disturbance_id if intervention else None, case.scenario_family_id,
               claim.mechanism.value, claim.fault_family]
     return tuple(label.lower() for label in labels if label)
 

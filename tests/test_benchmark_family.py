@@ -130,17 +130,19 @@ def setup_world(directory: Path, h: BenchmarkHarness, *, incident: bool = True):
 
 # -- registry / fixtures --------------------------------------------------------------
 class FamilyFixtureTests(unittest.TestCase):
-    def test_registry_contains_exactly_the_three_incident_fixtures(self):  # 1
-        self.assertEqual([("rca-dev-001", "1"), ("rca-dev-002", "1"), ("rca-dev-003", "1")],
-                         list(BENCHMARK_FIXTURES))
+    def test_registry_contains_exactly_the_registered_fixtures(self):  # 1
+        # D0.2B appends the healthy rca-dev-004 (tests/test_benchmark_healthy.py).
+        self.assertEqual([("rca-dev-001", "1"), ("rca-dev-002", "1"), ("rca-dev-003", "1"),
+                          ("rca-dev-004", "1")], list(BENCHMARK_FIXTURES))
         self.assertIs(D0_FIXTURE, BENCHMARK_FIXTURES[("rca-dev-001", "1")])
         with self.assertRaises(TypeError):  # immutable
-            BENCHMARK_FIXTURES[("rca-dev-004", "1")] = D0_FIXTURE
+            BENCHMARK_FIXTURES[("rca-dev-005", "1")] = D0_FIXTURE
         with self.assertRaises(BenchmarkContractError):  # no silent duplicate replacement
             benchmark._registry(D0_FIXTURE, replace(D0_FIXTURE, case_checksum="0" * 64))
-        self.assertEqual(list(CASES), [h.case.case_id for h in iter_development_fixtures(
-            REVISIONS.tep_agent_lab)])
-        for case_id, version in (("rca-dev-004", "1"), ("rca-dev-001", "2")):
+        self.assertEqual([*CASES, "rca-dev-004"], [h.case.case_id for h in
+                                                   iter_development_fixtures(
+                                                       REVISIONS.tep_agent_lab)])
+        for case_id, version in (("rca-dev-005", "1"), ("rca-dev-001", "2")):
             with self.subTest(case_id=case_id), self.assertRaises(BenchmarkContractError):
                 load_fixture(case_id, version, lab_revision=REVISIONS.tep_agent_lab)
 
