@@ -14,6 +14,7 @@ Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Progra
 ## Industrial Context Platform
 
 - [`plant-telemetry-contract-v0.md`](plant-telemetry-contract-v0.md) — frozen P1.0 plant context, engineering context, telemetry (clocks, SignalSample, append store, T/K snapshots, bounded reads), ContextSnapshot and evidence-provenance semantics. Sequencing per ADR-004.
+- [`context-compiler-v0.md`](context-compiler-v0.md) — P1.2 Engineering Knowledge Context Compiler: exact source fragments, typed extraction, semantic grounding, Candidate Context, deterministic validation, application-only human review, and immutable EngineeringContextRevision publication that reuses the RuleRegistry through a rule-set source revision.
 
 ## Application / Playground
 

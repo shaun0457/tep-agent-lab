@@ -30,7 +30,7 @@ and the test constants. A NumPy bump edits only the JSON.
 |---|---|
 | Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B, E0.2 desktop shell). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
-| Current product milestone | P1.2 Context Compiler: spec in PR #24, FIX REQUIRED |
+| Current product milestone | P1.2A Context Compiler contracts: not started, unblocked (spec accepted in PR #24) |
 | Parallel product milestone | P1.1C canonical telemetry integration: not started, unblocked |
 | Current research milestone | D0.2C C0 + identifiability pilot: D0.2C0 design in PR #20 |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
@@ -49,7 +49,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.1B TEP simulation source | merged (PR #23) |
 | ADR-004 P1 re-baseline | merged (adds this file) |
 | P1.1C canonical telemetry integration | not started; write the implementation note first |
-| P1.2 Context Compiler | spec draft in PR #24; P1.2A blocked on the spec |
+| P1.2 Context Compiler | spec accepted (PR #24); P1.2A not started |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4 context serving + Operational State | no owning spec yet |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
@@ -78,12 +78,12 @@ claims need C0 and D1 evidence. B5 is shared by the MVP and D1.
 | PR | Head | Base | Track | Review state | Blocks |
 |---|---|---|---|---|---|
 | #20 D0.2C0 comparative pilot design | `4c824ba` | `243a5ba` (behind main) | research | Round-1 BLOCKER resolved at `4c824ba`; needs owner re-review and rebase | D0.2C1 |
-| #24 P1.2 Context Compiler design | `bf14ec2` | `dc033b9` (behind main) | product | FIX REQUIRED: 2 HIGH, 7 MEDIUM; must delete its draft ADR-004 file and drop its ADR-003 / plant-telemetry notes, then rebase | P1.2A |
 
 ## Next implementation gates
 
-- **P1.2A** starts when PR #24 resolves P24-1 (effective-review completeness) and P24-2
-  (RuleRegistry source/snapshot identity) and is merged as an accepted spec.
+- **P1.2A** can start now. It includes the compiler workspace and the rule-set source
+  revision (context-compiler-v0 §Recommended implementation split;
+  knowledge-rule-registry-v0 §Rule-set source revision).
 - **P1.1C** can start now. The owning contract is frozen; write a short implementation note
   with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
 - **B5** can start now in `industrial-agent-runtime`.

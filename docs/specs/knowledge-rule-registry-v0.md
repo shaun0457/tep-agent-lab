@@ -266,6 +266,30 @@ Simulator changes or contradictory evidence may:
 
 Past runs keep exact rule-version refs.
 
+## Rule-set source revision
+
+A rule set can be published as an immutable artifact so that a consumer pins the
+exact registry its RuleRefs resolve through. Delivered in P1.2A (ADR-004); first
+consumer: `context-compiler-v0.md`.
+
+- Source kind: `ENGINEERING_RULE_SET` ContextSourceRef (playground-backend-v0 source
+  kinds are extensible). One artifact holds one complete rule set.
+- Content: a deterministic canonical serialization of every Rule with all of its
+  fields, including origin, validation, authority, behavior, scope, source and
+  validation refs and extraction metadata.
+- Identity: repository revision plus content checksum. The loader verifies the
+  checksum and returns an immutable RuleRegistry. The same ref always loads the same
+  registry, so the ref is the snapshot identity.
+- Revisions are complete sets with an optional parent ref that records lineage only.
+  A new revision may add rules or rule versions; it never changes the content of an
+  existing `(rule_id, version)`. Removing or deprecating a rule follows Versioning /
+  demotion.
+- Serialization changes no axis. Rules added by the Context Compiler keep
+  `origin=LITERATURE`, `validation=NONE`, `authority=REFERENCE`; promotion follows the
+  Knowledge-promotion principle.
+- Visibility: a rule-set revision is AGENT-visible only when every rule in it was
+  derived from AGENT-visible inputs.
+
 ## Agent-facing access
 
 Suggested tools:

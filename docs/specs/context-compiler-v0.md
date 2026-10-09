@@ -1,16 +1,17 @@
 # Context Compiler v0 — Engineering Knowledge Contextualization
 
-Status: **DRAFT FOR P1.2 DESIGN REVIEW**  
-Owner repo: tep-agent-lab  
-Milestone: P1.2
+Status: accepted\r
+Owner repo: tep-agent-lab\r
+Milestone: P1.2 ([ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md))
 
-Depends on the Industrial Context Platform North Star, MVP maturity guardrail,
-Plant Context + Telemetry v0, Playground backend v0, Knowledge Rule Registry v0,
-ADR-003, and ADR-004.
+Depends on Plant Context + Telemetry v0, Playground backend v0, Knowledge Rule
+Registry v0, ADR-002, ADR-003 and ADR-004. The North Star and the MVP maturity
+guardrail are non-normative direction only.
 
-ADR-004 is authoritative for P1.2+ milestone numbering. ADR-003 and the telemetry
-contract remain authoritative for the ownership, visibility, telemetry and snapshot
-semantics they freeze.
+ADR-004 owns P1 sequencing. Its Decision 5 is the scope amendment that puts this
+compiler in scope, and its Decision 4 is the P1.2 / P1.3 boundary this spec follows.
+ADR-003 and the telemetry contract remain authoritative for the ownership,
+visibility, telemetry and snapshot semantics they freeze.
 
 ## Purpose
 
@@ -79,9 +80,13 @@ P1.2 composes existing owners and must not replace them.
 | evidence semantics | HypothesisEvidenceLink |
 | runtime authority | industrial-agent-runtime |
 | telemetry | P1.1 source/store/reader contracts |
+| serialized rule-set revision (`ENGINEERING_RULE_SET`) | Knowledge Rule Registry v0 §Rule-set source revision |
+| plant identities before P1.3 | the selected `PROCESS_GRAPH` ContextSourceRef (ADR-004 Decision 4) |
 
-The Context Compiler owns candidate generation, semantic grounding, review workflow
-metadata, and immutable publication of reviewed engineering-context selections.
+The Context Compiler owns candidate generation, semantic grounding, the compiler
+workspace, review workflow metadata, and immutable publication of reviewed
+engineering-context selections. Review and publication are Application operations
+(see Human review).
 
 It must not create a second ProcessGraph, RuleRegistry, RcaState store, or runtime
 authority path.
@@ -109,11 +114,17 @@ Rule-governance/promotion path separately publishes a new Rule version.
 
 Rule-shaped publication must pin both:
 - the exact RuleRef; and
-- an immutable owning rule-configuration/registry source revision from which that
-  RuleRef resolves.
+- the rule-set revision that RuleRef resolves through: an `ENGINEERING_RULE_SET`
+  ContextSourceRef as defined in Knowledge Rule Registry v0 §Rule-set source revision.
+
+Approved Rule-routed items are published as a new rule-set revision whose parent is
+the pinned rule-set revision. It contains every rule of the parent unchanged plus the
+approved inert candidate Rules, and it is committed in the same atomic publication as
+the EngineeringContextRevision, under the same review gate (see Publication). It never
+edits an existing `(rule_id, version)`, and `Rule.scope` matching is unchanged.
 
 The Context Compiler does not construct an alternative RuleRegistry truth store.
-Publication fails if a pinned RuleRef cannot resolve through the pinned owning rule
+Publication fails if a pinned RuleRef cannot resolve through the pinned rule-set
 revision.
 
 ## Exact source input
@@ -126,6 +137,25 @@ canonical engineering material.
 
 A source revision change is a new input. It cannot rewrite historical interpretation
 of an older source revision.
+
+## Compiler workspace
+
+Candidates and ReviewRecords live in a compiler workspace: an append-only,
+non-canonical store owned by the Context Compiler.
+
+- It is not a ContextSourceRef kind and is never registered in a run's
+  CanonicalContextRegistry. Consumers cannot resolve it.
+- Candidate versions and ReviewRecords are immutable; the review log is append-only.
+- Each compile session builds and freezes its own CanonicalContextRegistry instance
+  over the exact attested sources it reads (engineering sources, the `PROCESS_GRAPH`
+  source, the rule-set revision, any alias dictionary). It never reuses or mutates a
+  run's READY registry.
+- Only publication produces canonical material: the EngineeringContextRevision
+  artifact and, when Rule items are approved, a new rule-set revision, both committed
+  to this repository.
+
+The storage medium is a P1.2A implementation choice, provided it keeps these
+properties.
 
 ## SourceFragmentRef
 
@@ -210,8 +240,13 @@ validation_findings[]
 review_status (derived from ReviewRecords; never independently mutable)
 ~~~
 
-The proposed target must be resolved against an exact selected plant-context
-revision.
+The proposed target must be resolved against the exact selected plant-context
+revision. Until P1.3 delivers PlantContextRevision, that revision is the exact
+AGENT-visible `PROCESS_GRAPH` ContextSourceRef selected for the compilation
+(ADR-004 Decision 4). A target is `(that source ref, ProcessGraph id)`, using the
+ProcessGraph id of the matching kind; a SIGNAL target is the ProcessGraph semantic
+entity id that P1.1 uses as `signal_id`. P1.3 preserves these identities, so
+published bindings remain valid.
 
 A candidate must not silently invent a new plant entity when no target exists.
 Unresolved mentions stay unresolved until a later explicit entity-creation contract.
@@ -257,7 +292,11 @@ canonical content body.
 
 APPROVE of a non-rule item may publish a KnowledgeRef with
 `validation_status=VERIFIED` only when the effective ReviewRecord is retained as
-validation evidence. Non-rule reviewed knowledge may then be composed in P1.3.
+validation evidence. Here VERIFIED means only that the scope binding and extraction
+fidelity were verified against the cited fragment. It does not assert engineering
+truth, does not correspond to a Rule `validation` maturity level and grants no
+authority; the same APPROVE leaves a Rule-routed item at `validation=NONE` for the
+same reason. Non-rule reviewed knowledge may then be composed in P1.3.
 
 ## Candidate identity and immutability
 
@@ -318,6 +357,12 @@ bounded LLM-assisted candidate ranking
 LLM-assisted grounding proposes candidates only. The compiler preserves which
 evidence and method produced every proposed target.
 
+An approved binding resolves a mention inside its own fragment only. Approved
+bindings never accumulate into a global alias table. A reusable alias or tag
+dictionary is a separate, versioned, reviewed source, cited as a grounding input like
+any other source. Nothing in the compiler edits ProcessGraph `name` or `tag`;
+ProcessGraph owns plant naming.
+
 ## Multi-source resolution
 
 Multiple sources may support one canonical identity.
@@ -367,8 +412,14 @@ A validation failure cannot publish partial canonical context.
 Human verification is a first-class product capability.
 
 A ReviewRecord decision may be authored only by:
-- an authenticated human reviewer; or
+- a human reviewer; or
 - an explicit deterministic acceptance policy identified by `policy_id@version`.
+
+Review and publication are Application API operations (ADR-002). They are never
+registered as Agent tools, never appear in an Agent ToolSpec or ContextProjection,
+and no Agent run can invoke them. v0 is local and single-user: the human principal is
+the trusted application-session principal that the Application API records on each
+ReviewRecord.
 
 A model/Agent cannot be the review decision principal. A deterministic acceptance
 policy cannot use model confidence, free-form model judgment, or model-generated
@@ -424,21 +475,34 @@ reviewed_at
 review_policy_version
 source / plant-context refs
 compiler / validation policy refs
-supersedes_review_ref?
+supersedes_review_refs[]
+review_log_position
 ~~~
 
 A superseding decision creates a new record rather than mutating historical review
 evidence.
 
-The effective decision for one candidate version is the unique terminal ReviewRecord
-that is not superseded by another record in the publication's declared review set.
+ReviewRecords form one append-only review log in the compiler workspace. Each record
+receives the next log position when it is appended. `supersedes_review_refs[]` may
+name only records for the same candidate version at earlier log positions, so
+supersession cannot form a cycle.
 
-If more than one incompatible terminal record exists, the candidate is treated as
-unresolved (equivalent to KEEP_CANDIDATE for publication eligibility) until a later
-explicit superseding review resolves the conflict.
+The effective decision for one candidate version is computed over **every**
+ReviewRecord for that candidate version in the log prefix up to the
+`review_log_position` pinned by the publication. The publisher does not choose the
+set.
 
-Candidate `review_status` is a derived projection of this declared ReviewRecord set,
-not a second mutable source of truth.
+- A terminal record is one that no other record in that prefix supersedes.
+- Exactly one terminal record: it is the effective decision.
+- No record: the candidate is unreviewed.
+- More than one terminal record, even when they agree: the candidate is unresolved
+  (equivalent to KEEP_CANDIDATE for publication eligibility) until a superseding
+  record leaves exactly one terminal record.
+
+Records appended after the pinned position affect only later publications.
+
+Candidate `review_status` is a derived projection of this log prefix, not a second
+mutable source of truth.
 
 ## Review routing
 
@@ -473,8 +537,9 @@ Conceptually:
 
 ~~~text
 revision_id
+lineage_id
 parent_revision_ref?
-selected plant-context revision
+selected plant-context revision (the PROCESS_GRAPH ContextSourceRef until P1.3)
 source inventory refs[]
 compiler version
 parser/extraction versions
@@ -483,7 +548,10 @@ validation policy version
 review policy version
 approved binding refs[]
 approved knowledge refs[]
+pinned rule-set revision ref
 pinned RuleRefs[]
+rule scope bindings[]: (RuleRef, scope_refs[], effective ReviewRecord ref)
+review_log_position + checksum of the committed review-log prefix
 review refs[]
 conflict/exclusion summary
 publication provenance
@@ -491,6 +559,16 @@ publication provenance
 
 The revision references existing canonical owners rather than copying their full
 bodies.
+
+Publication commits, with the revision artifact, the review-log prefix up to the
+pinned position for every candidate version the revision considered, so every
+effective decision can be recomputed from repository content alone.
+
+`Rule.scope` stays an exact registry string and registry matching is unchanged. The
+plant scope a reviewer approved for a Rule-routed item is published as a rule scope
+binding in the revision: the versioned binding provenance that the telemetry contract
+requires for mapping plant scope refs to exact rule scopes. P1.3 scope resolution
+validates these bindings against the PlantContextRevision.
 
 Each revision represents the **complete approved set** for that revision. A parent ref
 records lineage only; publication does not implicitly inherit undeclared parent items.
@@ -504,17 +582,17 @@ selected plant-context revision
 compiler/extraction/grounding versions
 validation policy version
 review policy version
-effective ReviewRecord
+effective ReviewRecord at the pinned review_log_position
 effective remapped target where applicable
-owning Rule/Knowledge source revisions
+rule-set revision and knowledge source revisions
 ~~~
 
 A review performed against an incompatible source/plant/policy tuple is stale for the
 new publication and requires a new ReviewRecord or an explicit versioned carry-forward
 policy that itself creates a new ReviewRecord.
 
-P1.3 will compose this reviewed Engineering Context with broader canonical plant
-context.
+P1.3 composes this reviewed Engineering Context with canonical plant context
+(ADR-004 Decision 4).
 
 ### Publication artifact and run registration
 
@@ -537,7 +615,7 @@ Publication has two levels of validation:
 - revision-level dependency/ref-integrity failure: publish nothing.
 
 Before the revision becomes observable as published context, every exact source,
-fragment, effective review, RuleRef/owning rule revision, KnowledgeRef/content ref,
+fragment, effective review, RuleRef/rule-set revision, KnowledgeRef/content ref,
 binding target and policy ref in the approved set must resolve and validate.
 
 Pending publication dependencies are not consumer-visible as trusted context until
@@ -547,10 +625,15 @@ revision remains the usable revision and no partial new selection is exposed.
 Rejected, unresolved, stale-review, or invalid candidates never enter the approved
 set.
 
-Publishing against a parent revision uses compare-and-set semantics: if another
-publication has advanced the intended parent/current lineage, the attempted publish
-fails and must be rebuilt/reviewed against the intended new parent. P1.2 v0 does not
-silently create divergent canonical branches.
+Publishing against a parent revision uses compare-and-set semantics on a per-lineage
+head record committed in this repository. Publication is one repository commit that
+adds the revision artifact (and any new rule-set revision) and advances the head
+record of its `lineage_id`; it succeeds only if the head still names the intended
+parent. If another publication advanced the head, the attempted publish fails and
+must be rebuilt and reviewed against the new parent. The head record is publisher
+bookkeeping: it is not a ContextSourceRef, and consumers pin exact revisions and
+never resolve a head or "latest". P1.2 v0 does not silently create divergent
+canonical branches.
 
 ## Visibility and derivation taint
 
@@ -584,6 +667,19 @@ visibility-filtered, including counts and summary fields. Revision ids/checksums
 not be designed so that hidden-input membership becomes an observable side channel.
 
 Evaluator-only sources cannot create Agent-visible published knowledge.
+
+## Benchmark use
+
+Visibility taint excludes evaluator-only inputs. It does not detect answer-bearing
+content in Agent-visible sources: a troubleshooting SOP for a subsystem can map
+symptoms to the causes a benchmark case family scores as its answer. Therefore:
+
+- published Engineering Context enters a blind benchmark run only as evaluation-v0
+  capability C6, under a versioned leakage-audit extension (ADR-004 Decision 6);
+- the P1.2 fixture corpus records its authoring provenance (author, date, inputs
+  consulted) and is authored without access to evaluator truth, candidate sets or
+  scorer mappings;
+- P1.2 makes no benchmark or capability claim.
 
 ## Structured context versus exact document content
 
@@ -669,6 +765,12 @@ The deterministic application shell owns exact source selection/versioning, sche
 validation, candidate identity, review state, publication, visibility, target
 validation, and provenance retention.
 
+A compiler run is not an Agent run. Its model calls do not go through the runtime
+Coordinator, receive no tools and cannot author ReviewRecords. P1.2C defines the
+provider interface and records each call's exact inputs, outputs and
+provider/model/method version; those records feed candidate provenance and visibility
+taint.
+
 Do not implement a free-running autonomous multi-agent compiler in P1.2.
 
 Preferred v0 pattern:
@@ -717,14 +819,20 @@ P1.2 is complete when one reproducible test/demo proves:
 13. evaluator-only sources cannot enter Agent-visible publication;
 14. source/compiler/review-policy changes create a new revision;
 15. no telemetry, runtime, ProcessGraph, RuleRegistry or RcaState owner is duplicated;
-16. conflicting terminal reviews block publication until explicitly superseded;
+16. more than one terminal review for a candidate version blocks its publication
+    until superseded;
 17. REMAP targets are revalidated before publication;
 18. all influencing inputs participate in visibility/derivation taint;
-19. every pinned RuleRef resolves through its pinned owning rule revision;
+19. every pinned RuleRef resolves through its pinned rule-set revision;
 20. EngineeringContextRevision is an immutable repository-backed artifact and can
     enter a run only through a future prepare-time ContextSourceRef registration;
 21. publication validates the full dependency closure and exposes no partial new
-    revision on failure.
+    revision on failure;
+22. effective decisions are computed over the complete review-log prefix pinned by
+    the revision; a REJECT appended before that position blocks publication;
+23. approved Rule-routed items are published through a new rule-set revision and
+    rule scope bindings, with `Rule.scope` matching unchanged;
+24. no Agent tool or Agent run can review or publish.
 
 ## Non-goals
 
@@ -751,7 +859,8 @@ autonomous plant action
 
 ~~~text
 P1.2A
-source fragment + candidate + review/publication contracts
+source fragment + candidate + review/publication contracts, compiler workspace,
+and the rule-set source revision (Knowledge Rule Registry v0)
 
 P1.2B
 deterministic parser/fixture path for one small engineering corpus
@@ -774,6 +883,8 @@ Stop and report SPEC_CONFLICT if implementation would require:
 - changing existing Rule authority semantics;
 - using CanonicalContextRegistry as mutable compiler state;
 - hiding provenance to simplify schema;
-- treating a vector index as canonical storage.
+- treating a vector index as canonical storage;
+- registering review or publication as an Agent tool;
+- a global alias registry or any edit to ProcessGraph naming.
 
 Do not invent a local bypass.
