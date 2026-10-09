@@ -360,6 +360,14 @@ A validation failure cannot publish partial canonical context.
 
 Human verification is a first-class product capability.
 
+A ReviewRecord decision may be authored only by:
+- an authenticated human reviewer; or
+- an explicit deterministic acceptance policy identified by `policy_id@version`.
+
+A model/Agent cannot be the review decision principal. A deterministic acceptance
+policy cannot use model confidence, free-form model judgment, or model-generated
+explanation as the condition that establishes acceptance.
+
 The v0 decision vocabulary is:
 
 ~~~text
@@ -369,13 +377,24 @@ REMAP
 KEEP_CANDIDATE
 ~~~
 
-APPROVE accepts the candidate under exact source, plant-context, compiler and review
-policy versions. It does not grant runtime authority.
+Every item entering an EngineeringContextRevision must have one effective APPROVE or
+REMAP ReviewRecord produced by an allowed decision principal.
+
+APPROVE accepts the candidate under exact source, plant-context, compiler, candidate,
+validation and review-policy versions. It does not grant runtime authority and does
+not by itself change Rule validation/authority axes.
 
 REJECT preserves the auditable candidate but excludes it from trusted publication.
 
 REMAP selects a different already-existing canonical target while preserving the
-original proposal and reviewer rationale.
+original proposal and reviewer rationale. REMAP is a conditional approval of the
+resolved mapping only after deterministic validation is rerun against the remapped
+target, including kind/scope/unit/conflict checks. The effective published target is
+the ReviewRecord target, never the rejected candidate target.
+
+REMAP may change only binding target/scope refs. A correction to extracted content,
+numeric value, units, or claim text requires REJECT plus a new provenance-bearing
+candidate version; review never edits candidate content in place.
 
 KEEP_CANDIDATE leaves the item unresolved/unverified. It cannot enter trusted
 canonical context.
@@ -391,15 +410,29 @@ review_id
 candidate_ref
 decision
 selected_target_ref?
-reviewer_id
+decision_principal
+  HUMAN(reviewer_id)
+  | DETERMINISTIC_POLICY(policy_id@version)
 reason
 reviewed_at
 review_policy_version
 source / plant-context refs
+compiler / validation policy refs
+supersedes_review_ref?
 ~~~
 
 A superseding decision creates a new record rather than mutating historical review
 evidence.
+
+The effective decision for one candidate version is the unique terminal ReviewRecord
+that is not superseded by another record in the publication's declared review set.
+
+If more than one incompatible terminal record exists, the candidate is treated as
+unresolved (equivalent to KEEP_CANDIDATE for publication eligibility) until a later
+explicit superseding review resolves the conflict.
+
+Candidate `review_status` is a derived projection of this declared ReviewRecord set,
+not a second mutable source of truth.
 
 ## Review routing
 
@@ -417,10 +450,12 @@ rule/limit disagreement
 new causal/control relation
 ~~~
 
-v0 may require review for every candidate while the policy is being validated.
+For v0, every item that enters a published revision requires an effective ReviewRecord
+from an allowed decision principal.
 
-Any later automatic acceptance must be explicit, versioned, tested, auditable, and
-prefer deterministic conditions over model confidence.
+Automatic deterministic acceptance may be introduced only through an explicit,
+versioned, tested and auditable policy. Its acceptance predicate must be deterministic
+and must not depend on model confidence or free-form model judgment.
 
 ## Publication
 
@@ -451,21 +486,93 @@ publication provenance
 The revision references existing canonical owners rather than copying their full
 bodies.
 
+Each revision represents the **complete approved set** for that revision. A parent ref
+records lineage only; publication does not implicitly inherit undeclared parent items.
+
+Publication eligibility is checked against one exact compatibility tuple:
+
+~~~text
+candidate version
+source refs/revisions
+selected plant-context revision
+compiler/extraction/grounding versions
+validation policy version
+review policy version
+effective ReviewRecord
+effective remapped target where applicable
+owning Rule/Knowledge source revisions
+~~~
+
+A review performed against an incompatible source/plant/policy tuple is stale for the
+new publication and requires a new ReviewRecord or an explicit versioned carry-forward
+policy that itself creates a new ReviewRecord.
+
 P1.3 will compose this reviewed Engineering Context with broader canonical plant
 context.
 
-Publication is atomic: either a complete immutable revision is created, or nothing
-is published. Rejected, unresolved, or invalid candidates never enter the approved
+### Publication artifact and run registration
+
+EngineeringContextRevision is materialized as an immutable repository-backed artifact
+with exact content checksum and repository revision. It is not a mutable compiler DB.
+
+A later run may consume it only when that exact artifact is registered during
+`RunManager.prepare()` as a ContextSourceRef (for example kind
+`ENGINEERING_CONTEXT_REVISION`) before the run reaches READY.
+
+The compiler never mutates a READY CanonicalContextRegistry, and consumers never
+resolve an implicit "latest Engineering Context" revision.
+
+### Publication atomicity and failure semantics
+
+Publication has two levels of validation:
+
+- candidate-local failure: exclude that candidate and record the reason in the
+  revision's exclusion summary;
+- revision-level dependency/ref-integrity failure: publish nothing.
+
+Before the revision becomes observable as published context, every exact source,
+fragment, effective review, RuleRef/owning rule revision, KnowledgeRef/content ref,
+binding target and policy ref in the approved set must resolve and validate.
+
+Pending publication dependencies are not consumer-visible as trusted context until
+the EngineeringContextRevision commit succeeds. On failure, the previous published
+revision remains the usable revision and no partial new selection is exposed.
+
+Rejected, unresolved, stale-review, or invalid candidates never enter the approved
 set.
 
-## Visibility
+## Visibility and derivation taint
 
-A derived candidate or reviewed record cannot become more visible than its required
-supporting sources.
+Visibility is determined by **all inputs that influenced a derived output**, not only
+the refs chosen as supporting evidence.
+
+Influencing inputs include:
+
+~~~text
+source fragments
+conflicting fragments
+aliases / tag dictionaries
+known mappings
+grounding alternatives/evidence
+validation inputs
+model context
+review metadata / rationale
+generated summaries or conflict explanations
+~~~
+
+A derived candidate, review projection, summary, or published revision takes the most
+restrictive visibility of every influencing input.
+
+An Agent-visible compilation/publication must be produced only from Agent-visible
+inputs. A result derived using evaluator-only material cannot later be "downgraded"
+to Agent visibility by removing hidden refs; a separate allowed-input compilation is
+required.
+
+Agent projections of source/review/conflict/exclusion inventories must be
+visibility-filtered, including counts and summary fields. Revision ids/checksums must
+not be designed so that hidden-input membership becomes an observable side channel.
 
 Evaluator-only sources cannot create Agent-visible published knowledge.
-
-Agent-visible outputs must not leak hidden source ids/counts.
 
 ## Structured context versus exact document content
 
@@ -537,6 +644,10 @@ P1.2 selects no mandatory LLM provider.
 
 A bounded model call may assist with typed extraction, mention normalization,
 candidate ranking, claim normalization, or reviewer-facing conflict explanation.
+
+Any model-generated reviewer-facing explanation is explicitly labeled as derived
+model output with provider/model/method version. It is not source evidence and cannot
+serve as the review acceptance predicate.
 
 The deterministic application shell owns exact source selection/versioning, schema
 validation, candidate identity, review state, publication, visibility, target
