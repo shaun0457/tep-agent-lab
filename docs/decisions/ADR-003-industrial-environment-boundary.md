@@ -6,6 +6,12 @@
 - Normative contract: [Plant Context + Telemetry v0](../specs/plant-telemetry-contract-v0.md)
 - Base reviewed: `83a96c19675eed03831f7106834904b667959fbd`
 - Composition review: accepted telemetry head `290e483be6d02e601392e34cb96ceb085548ce66`
+- Sequencing update: [ADR-004](ADR-004-p1-milestone-rebaseline.md) supersedes the P1.2–P1.6
+  milestone numbering in §Implementation boundary and amends one scope statement (P1.2
+  engineering-knowledge compilation). Every ownership, telemetry, visibility, authority and
+  snapshot semantic in this ADR remains authoritative.
+- Implementation (informative): P1.1A and P1.1B implement the telemetry subset; see
+  `docs/p1-1a-telemetry-core.md` and `docs/p1-1b-tep-simulation-source.md`.
 
 ## Context
 
@@ -143,6 +149,11 @@ provenance and confidence -> human/deterministic validation -> canonical context
 Extraction never directly establishes trusted mappings or execution authority.
 Automatic drawing/document extraction is upstream/deferred, not the portfolio wedge.
 
+> **Scope amendment ([ADR-004](ADR-004-p1-milestone-rebaseline.md) Decision 5):** review-gated
+> compilation of a small engineering-knowledge text corpus for one subsystem is P1.2 scope.
+> Plant-graph generation and drawing/P&ID/OCR/VLM extraction stay upstream or deferred. The
+> trust rule in this paragraph is unchanged.
+
 ## Consequences and alternatives
 
 Accepted costs are explicit clock domains, scoped identities, immutable context
@@ -161,6 +172,13 @@ Rejected alternatives:
 - direct UI/world reads or a second ProcessGraph: violates P0 and ADR-002.
 
 ## Implementation boundary
+
+> **Superseded numbering:** [ADR-004](ADR-004-p1-milestone-rebaseline.md) owns P1 sequencing.
+> Its Decision 3 maps every row below: P1.2 -> P1.2 (widened); P1.3 ContextSnapshot -> P1.5;
+> P1.4 -> P1.1C for live telemetry current/history through public P0/application reads, and
+> P1.5 for ContextSnapshot + RcaState -> InvestigationContextView (Application and Agent);
+> P1.5 dirty-stream replay and P1.6 connector -> deferred to Level 2. The constraint "must not
+> bypass P0 with private world access" binds P1.1C, P1.4 and P1.5. The list is kept as history.
 
 - P1.1: TEPSimulationSource -> canonical samples -> deterministic
   InMemoryTimeSeriesStore -> bounded reader, including snapshot semantics.

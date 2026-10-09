@@ -646,6 +646,11 @@ Context Compiler and Context Server compose and reference these owners; they do 
 
 ## P1 product direction
 
+> Sequencing authority: [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) adopts this
+> progression, adds P1.1C (canonical telemetry integration), assigns the old dirty-stream and
+> connector milestones, and marks the Level-1 path. Where this list and ADR-004 differ,
+> ADR-004 governs.
+
 The preferred progression is:
 
 ```text

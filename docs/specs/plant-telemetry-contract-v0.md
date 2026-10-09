@@ -6,6 +6,11 @@ Owner: application/domain infrastructure, initially `tep-agent-lab`.
 
 Decision: [ADR-003](../decisions/ADR-003-industrial-environment-boundary.md).
 
+Sequencing: [ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md) supersedes the
+milestone numbering in §Frozen implementation sequence and amends the §Context Builder
+boundary scope for P1.2. The semantics in this contract are unchanged. Implementation
+(informative): P1.1A and P1.1B implement the telemetry subset.
+
 Reviewed base: `83a96c19675eed03831f7106834904b667959fbd`.
 
 Composition review: accepted telemetry head
@@ -119,6 +124,11 @@ of existing semantics, not a second hand-maintained graph or signal map.
 P1 consumes validated structured context, including verified engineering graphs
 from upstream systems. Automatic drawing/document extraction is not the portfolio
 wedge; P1 does not prescribe how every upstream graph is generated.
+
+> **Scope amendment ([ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md) Decision 5):**
+> review-gated compilation of a small engineering-knowledge text corpus for one subsystem is
+> P1.2 scope. Plant-graph generation and drawing/P&ID/OCR/VLM extraction stay upstream or
+> deferred. Model extraction still cannot directly become trusted truth.
 
 ## Engineering Context and existing RuleRegistry
 
@@ -584,7 +594,16 @@ state. No existing contract, fixture or benchmark behavior changes in P1.0. Any
 implementation contradiction with an owning spec must emit SPEC_CONFLICT and be
 resolved explicitly rather than introducing a bypass.
 
+> **Numbering update ([ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md) Decision 3):**
+> the "P1.4" obligation above is owned by P1.1C (application reads) and P1.5 (Agent
+> ContextProjection and tool reads). The obligation itself is unchanged.
+
 ## Frozen implementation sequence and acceptance
+
+> **Superseded numbering:** [ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md) owns P1
+> sequencing; its Decision 3 maps every row of this table and the sentence after it. This
+> section is kept as history. The P1.0 freeze statement below and every semantic section of
+> this contract remain authoritative.
 
 | Milestone | Authorized future scope |
 |---|---|
