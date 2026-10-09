@@ -200,6 +200,7 @@ mention text / normalized mention
 target_kind: ENTITY | SIGNAL | RELATIONSHIP
 proposed_target_id
 alternative_target_ids[]
+scope_refs[]
 extraction method/version
 grounding method/version
 confidence?
@@ -214,6 +215,11 @@ revision.
 
 A candidate must not silently invent a new plant entity when no target exists.
 Unresolved mentions stay unresolved until a later explicit entity-creation contract.
+
+Subsystem applicability is expressed through domain-owned grouping/scope refs rather
+than inventing a universal SUBSYSTEM entity kind. Plant-wide applicability must be
+explicitly represented by the selected plant-context scope policy; an empty scope is
+not silently interpreted as plant-wide.
 
 ## CandidateKnowledge
 
@@ -541,6 +547,11 @@ revision remains the usable revision and no partial new selection is exposed.
 Rejected, unresolved, stale-review, or invalid candidates never enter the approved
 set.
 
+Publishing against a parent revision uses compare-and-set semantics: if another
+publication has advanced the intended parent/current lineage, the attempted publish
+fails and must be rebuilt/reviewed against the intended new parent. P1.2 v0 does not
+silently create divergent canonical branches.
+
 ## Visibility and derivation taint
 
 Visibility is determined by **all inputs that influenced a derived output**, not only
@@ -594,6 +605,11 @@ exact source/content:
   procedures
   drawings/source regions
 ~~~
+
+DocumentRef identifies the immutable source document/material revision.
+SourceFragmentRef identifies the exact bounded location inside that source.
+KnowledgeRef for non-rule reviewed knowledge points back to that exact fragment/source
+content; it does not replace DocumentRef or store a model rewrite as canonical text.
 
 BM25, embeddings, vector indexes, or other search indexes are derived retrieval aids.
 They are not canonical truth.
@@ -700,7 +716,15 @@ P1.2 is complete when one reproducible test/demo proves:
 12. confidence grants neither truth nor authority;
 13. evaluator-only sources cannot enter Agent-visible publication;
 14. source/compiler/review-policy changes create a new revision;
-15. no telemetry, runtime, ProcessGraph, RuleRegistry or RcaState owner is duplicated.
+15. no telemetry, runtime, ProcessGraph, RuleRegistry or RcaState owner is duplicated;
+16. conflicting terminal reviews block publication until explicitly superseded;
+17. REMAP targets are revalidated before publication;
+18. all influencing inputs participate in visibility/derivation taint;
+19. every pinned RuleRef resolves through its pinned owning rule revision;
+20. EngineeringContextRevision is an immutable repository-backed artifact and can
+    enter a run only through a future prepare-time ContextSourceRef registration;
+21. publication validates the full dependency closure and exposes no partial new
+    revision on failure.
 
 ## Non-goals
 
