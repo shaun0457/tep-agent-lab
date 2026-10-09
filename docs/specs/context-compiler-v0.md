@@ -6,7 +6,11 @@ Milestone: P1.2
 
 Depends on the Industrial Context Platform North Star, MVP maturity guardrail,
 Plant Context + Telemetry v0, Playground backend v0, Knowledge Rule Registry v0,
-and ADR-003.
+ADR-003, and ADR-004.
+
+ADR-004 is authoritative for P1.2+ milestone numbering. ADR-003 and the telemetry
+contract remain authoritative for the ownership, visibility, telemetry and snapshot
+semantics they freeze.
 
 ## Purpose
 
@@ -97,6 +101,21 @@ canonical rule schema.
 A candidate Rule is inert. Review/publication never mutates an existing Rule version
 in place.
 
+Context-compiler APPROVE means extraction/grounding fidelity was accepted under the
+pinned source and plant-context revisions. It does **not** promote Rule validation or
+authority. A Rule routed through the compiler retains the literature-candidate axes
+(`origin=LITERATURE`, `validation=NONE`, `authority=REFERENCE`) unless the existing
+Rule-governance/promotion path separately publishes a new Rule version.
+
+Rule-shaped publication must pin both:
+- the exact RuleRef; and
+- an immutable owning rule-configuration/registry source revision from which that
+  RuleRef resolves.
+
+The Context Compiler does not construct an alternative RuleRegistry truth store.
+Publication fails if a pinned RuleRef cannot resolve through the pinned owning rule
+revision.
+
 ## Exact source input
 
 Compiler input starts from an exact trusted ContextSourceRef or a future equivalent
@@ -152,10 +171,21 @@ TROUBLESHOOTING_GUIDANCE
 MAINTENANCE_OBSERVATION
 ~~~
 
-This is a minimal MVP extraction vocabulary, not a complete industrial ontology.
+This is a minimal MVP extraction vocabulary, not a complete industrial ontology and
+not a permanently closed enum. Future namespaced kinds may be added under a versioned
+extraction policy.
 
 Unknown material may remain unsupported/unclassified. It must not be forced into an
 incorrect known type.
+
+The v0 routing policy is deterministic and versioned:
+- ENTITY_MENTION / SIGNAL_MENTION -> CandidateBinding;
+- OPERATING_LIMIT / CONTROL_RELATION -> existing inert literature-candidate Rule path;
+- PROCEDURE_GUIDANCE / TROUBLESHOOTING_GUIDANCE / MAINTENANCE_OBSERVATION ->
+  non-rule CandidateKnowledge / KnowledgeRef path unless a later versioned routing
+  policy explicitly proves a different canonical form.
+
+The routing decision itself is recorded in candidate provenance.
 
 ## CandidateBinding
 
@@ -176,7 +206,7 @@ confidence?
 supporting_fragment_refs[]
 conflicting_fragment_refs[]
 validation_findings[]
-review_status
+review_status (derived from ReviewRecords; never independently mutable)
 ~~~
 
 The proposed target must be resolved against an exact selected plant-context
@@ -207,19 +237,44 @@ validation_findings[]
 review_status
 ~~~
 
-If the knowledge is naturally representable by the existing Rule contract, the
-canonical structured form must be Rule/RuleRef, not a duplicate claim truth store.
+Rule routing is decided by the versioned extraction-routing policy above, not by a
+free-form "naturally representable" judgment.
 
-Non-rule reviewed knowledge may remain a reviewed KnowledgeRef for later P1.3
-composition.
+Rule-routed items use the existing `literature_candidate(...)` / `ExtractionMetadata`
+carrier rather than duplicating claim/conditions/units fields in a parallel truth
+schema.
 
-## Candidate immutability
+For non-rule CandidateKnowledge, the canonical KnowledgeRef content always points to
+the exact SourceFragmentRef/original source material. A model-normalized claim is
+derived annotation with generator/method/version provenance; it is never the
+canonical content body.
 
-Candidate versions are immutable.
+APPROVE of a non-rule item may publish a KnowledgeRef with
+`validation_status=VERIFIED` only when the effective ReviewRecord is retained as
+validation evidence. Non-rule reviewed knowledge may then be composed in P1.3.
 
-A source revision change, parser/extractor change, prompt/model retry that changes
-content, grounding policy change, or provenance change produces a new candidate
-version/ref. Historical candidates are not overwritten.
+## Candidate identity and immutability
+
+Candidate versions are immutable and have two explicit identity layers:
+
+~~~text
+content_key
+  = exact fragment refs + typed extracted content + proposed target/scope
+
+candidate_version
+  = content_key + extraction/grounding/model/policy provenance versions
+~~~
+
+The content key permits deterministic comparison across compiler versions without
+implicitly reusing trust decisions.
+
+A source revision change, parser/extractor change, prompt/model retry, grounding
+policy change, or provenance change creates a distinct candidate version whenever
+the versioned derivation context changes. Historical candidates are not overwritten.
+
+ReviewRecord always binds the exact candidate version, never only the content key.
+Any review carry-forward across candidate versions requires an explicit versioned
+policy and creates a new ReviewRecord; it is never implicit.
 
 ## Confidence semantics
 
