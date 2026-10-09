@@ -9,7 +9,8 @@ import re
 from tempfile import TemporaryDirectory
 import unittest
 
-from tep_sim import (ControlMode, DisturbanceIntervention, EnvironmentConfig, Observation,
+from tep_sim import (ControlMode, DisturbanceIntervention, EnvironmentConfig, MVIntervention,
+                     Observation,
                      ProcessGraph, TEPEnvironment, UPSTREAM_REVISION, load_process_graph)
 from tep_sim.bindings import BindingMethod, BindingProvenance, BindingRelation
 from tep_sim.process import PINNED_FIXTURES
@@ -135,8 +136,15 @@ class BindingTableTests(unittest.TestCase):
         first = GRAPH.bindings()[0]
         disturbs = replace(first, semantic_entity_id="zz.cause", relation=BindingRelation.DISTURBS,
                            runtime_variable_id="IDV(4)", runtime_variable_kind="IDV")
-        with self.assertRaisesRegex(TEPSourceError, "unsupported binding relation"):
+        with self.assertRaisesRegex(TEPSourceError, "unsupported binding relation") as caught:
             build_signal_bindings(fake_graph([*GRAPH.bindings(), disturbs]))
+        self.assertNotIn("zz.cause", str(caught.exception))
+
+    def test_invalid_semantic_id_fails_at_construction(self) -> None:
+        first = GRAPH.bindings()[0]
+        for bad in (" padded", "x" * 300, "a\tb"):
+            with self.assertRaises(TEPSourceError):
+                build_signal_bindings(fake_graph([replace(first, semantic_entity_id=bad)]))
 
     def test_duplicate_signal_or_runtime_binding_fails_closed(self) -> None:
         a, b = GRAPH.bindings()[:2]
@@ -310,6 +318,11 @@ class TranslationTests(unittest.TestCase):
         record = synthetic_record()
         record["shutdown_state"] = 0
         self.assert_rejected(record, "shutdown_state")
+        for margins in ({"reactor_pressure_kpa": float("nan")}, {"reactor_pressure_kpa": 1},
+                        {1: 1.0}):
+            record = synthetic_record()
+            record["safety_margins"] = margins
+            self.assert_rejected(record, "safety_margins")
         self.assert_rejected(["not", "a", "mapping"], "mapping required")
 
     def test_no_hidden_state_in_translated_batch(self) -> None:
@@ -493,6 +506,26 @@ class RealTEPIntegrationTests(unittest.TestCase):
         before = self.environment.observe()
         self.source.translate_sanitized(sanitize_observation(before))
         self.assertEqual(before, self.environment.observe())
+
+    def test_same_tick_intervention_conflicts_by_policy(self) -> None:
+        """Documented limitation: sequence == tick, so a same-tick MV change conflicts."""
+        with TemporaryDirectory() as directory:
+            environment = TEPEnvironment(EnvironmentConfig(
+                seed=11, backend="python", control_mode=ControlMode.MANUAL,
+                record_interval=60, upstream_revision=UPSTREAM_REVISION,
+                artifact_directory=Path(directory) / "world"))
+            try:
+                source = make_source("manual")
+                ingestor = TelemetryIngestor(make_store(source))
+                before = sanitize_observation(environment.reset())
+                ingestor.ingest(source.translate_sanitized(before), ingest_time=ingest_at(1))
+                value = before["manipulated_variables"]["XMV(10)"]
+                environment.apply(MVIntervention("XMV(10)", value + 1.0 if value < 99 else 1.0))
+                after = sanitize_observation(environment.observe())
+                with self.assertRaises(IdentityConflict):
+                    ingestor.ingest(source.translate_sanitized(after), ingest_time=ingest_at(2))
+            finally:
+                environment.close()
 
     def test_reference_world_history_unchanged_and_translatable(self) -> None:
         with TemporaryDirectory() as directory:

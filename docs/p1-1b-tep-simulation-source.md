@@ -106,12 +106,14 @@ Conversion of `simulation_time_hours`:
 require finite, non-negative int/float (bool rejected)
 seconds = hours * 3600
 ticks   = round(seconds)
-accept iff |seconds - ticks| <= 1e-3 s   (TICK_TOLERANCE_SECONDS)
+accept iff |seconds - ticks| <= 0.05 s   (TICK_TOLERANCE_SECONDS)
 ```
 
-tep-sim accumulates time as a float sum of 1/3600 h; measured drift is below 1e-4 s
-after 30 simulated days, so 1 ms keeps a 10x margin while staying 1000x tighter
-than a tick. Off-grid values are rejected, never floored or truncated.
+tep-sim accumulates time as a float sum of 1/3600 h. Measured drift is 1e-4 s at
+30 simulated days, 1.2e-3 s at 90 days and 1.1e-2 s at 365 days, so 50 ms covers a
+simulated year with margin while staying 20x tighter than a tick. Off-grid values
+(for example half a second) are rejected, never floored or truncated. The
+sanitized record has no integer step count to use instead.
 
 ## Sequence policy
 
@@ -166,6 +168,22 @@ and dependency direction. P1.1A boundary tests stay green.
 - Shutdown/safety-margin data are not canonical telemetry yet.
 - No dirty-stream simulation (gaps, BAD quality, late or reordered data).
 - Counterfactual branches are not wired to the canonical path.
+- Same-tick interventions: `apply()` changes the observation without advancing
+  time (an MV setpoint in MANUAL mode). Under `sequence = tick`, a post-apply
+  record at an already ingested tick, including the next rollout's origin record,
+  is an `IdentityConflict` and the whole batch is rejected (tested). This follows
+  the mandated sequence policy; supporting it needs a sub-tick sequence or a
+  rule for which same-tick record is canonical.
+- Exact coverage: a ProcessGraph that binds only part of the 41 XMEAS + 12 XMV
+  makes every sanitized record fail closed as unbound. That is intended for the
+  clean adapter; partial graphs need an explicit exclusion list.
+- Samples of a record with `shutdown_state = True` are still `GOOD`; shutdown is
+  not yet represented in canonical telemetry.
+- Inherited from P1.1A: the reader's `max_scan_records` bound counts a binding's
+  whole K-committed prefix (no event-time index). One record per signal per TEP
+  record means a long run eventually makes every read of that binding exceed the
+  bound, however narrow the interval. Size the reader for the run, and add an
+  event-time index in the core before long-running or live sources.
 
 ## Next milestone
 

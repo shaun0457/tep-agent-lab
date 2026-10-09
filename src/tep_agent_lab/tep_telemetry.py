@@ -35,10 +35,11 @@ TEP_SOURCE_VERSION = "tep-agent-lab.tep-simulation-source/v0"
 
 SECONDS_PER_HOUR = 3600
 # TEP advances in integral one-second steps, but tep-sim accumulates simulation
-# time as a float sum of 1/3600 h. Measured drift stays below 1e-4 s after 30
-# simulated days; one millisecond keeps a 10x margin while staying 1000x tighter
-# than one tick, so genuinely off-grid times are still rejected.
-TICK_TOLERANCE_SECONDS = 1e-3
+# time as a float sum of 1/3600 h. Measured drift: 1e-4 s at 30 simulated days,
+# 1.2e-3 s at 90 days, 1.1e-2 s at 365 days. 50 ms covers a simulated year with
+# margin while staying 20x tighter than one tick, so off-grid times (for example
+# half a second) are still rejected. The sanitized record carries no step count.
+TICK_TOLERANCE_SECONDS = 5e-2
 
 # Exact key set of ``tep_world.sanitize_observation`` output. Anything else (raw
 # Observation fields such as active disturbances, run internals) fails closed.
@@ -110,7 +111,9 @@ def build_signal_bindings(graph: ProcessGraph) -> tuple[TEPSignalBinding, ...]:
     runtime: set[str] = set()
     for binding in graph.bindings():
         if binding.relation not in _VALUE_MAPS:
-            raise TEPSourceError(f"unsupported binding relation for {binding.semantic_entity_id}")
+            # Never name the binding: a non-visible relation may identify a hidden cause.
+            raise TEPSourceError("unsupported binding relation in ProcessGraph")
+        _checked_text("semantic_entity_id", binding.semantic_entity_id)
         if binding.provenance.method is not BindingMethod.HUMAN_VERIFIED_MAPPING:
             raise TEPSourceError(f"binding {binding.semantic_entity_id} is not human-verified")
         if binding.semantic_entity_id in signals:
@@ -221,6 +224,9 @@ class TEPSimulationSource:
             raise TEPSourceError("shutdown_state must be a boolean")
         if not isinstance(record["safety_margins"], Mapping):
             raise TEPSourceError("safety_margins must be a mapping")
+        if not all(isinstance(key, str) and type(value) is float and math.isfinite(value)
+                   for key, value in record["safety_margins"].items()):
+            raise TEPSourceError("safety_margins must map names to finite floats")
         event_time = self.event_time(record["simulation_time_hours"])
         values: dict[str, float] = {}
         for field, expected in self._expected.items():
@@ -232,7 +238,7 @@ class TEPSimulationSource:
                 raise TEPSourceError(
                     f"{field} does not match visible bindings: {len(present - expected)} "
                     f"unbound, missing {sorted(expected - present)}")
-            for runtime_id in expected:
+            for runtime_id in sorted(expected):
                 value = mapping[runtime_id]
                 if type(value) is not float or not math.isfinite(value):
                     raise TEPSourceError(f"{runtime_id} value must be a finite float")
