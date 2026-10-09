@@ -1,7 +1,9 @@
 # Context Compiler v0 — Engineering Knowledge Contextualization
 
-Status: accepted\r
-Owner repo: tep-agent-lab\r
+Status: accepted
+
+Owner repo: tep-agent-lab
+
 Milestone: P1.2 ([ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md))
 
 Depends on Plant Context + Telemetry v0, Playground backend v0, Knowledge Rule
@@ -112,20 +114,24 @@ authority. A Rule routed through the compiler retains the literature-candidate a
 (`origin=LITERATURE`, `validation=NONE`, `authority=REFERENCE`) unless the existing
 Rule-governance/promotion path separately publishes a new Rule version.
 
-Rule-shaped publication must pin both:
-- the exact RuleRef; and
-- the rule-set revision that RuleRef resolves through: an `ENGINEERING_RULE_SET`
-  ContextSourceRef as defined in Knowledge Rule Registry v0 §Rule-set source revision.
+Rule-shaped publication pins two rule-set revisions, each an `ENGINEERING_RULE_SET`
+source as defined in Knowledge Rule Registry v0 §Rule-set source revision:
 
-Approved Rule-routed items are published as a new rule-set revision whose parent is
-the pinned rule-set revision. It contains every rule of the parent unchanged plus the
-approved inert candidate Rules, and it is committed in the same atomic publication as
-the EngineeringContextRevision, under the same review gate (see Publication). It never
-edits an existing `(rule_id, version)`, and `Rule.scope` matching is unchanged.
+- the **input rule-set revision** (R0): the exact ContextSourceRef the compile session
+  froze. Grounding, validation and review ran against R0, and the compatibility tuple
+  uses R0.
+- the **published rule-set revision**: the one every pinned RuleRef resolves through.
+  It is R0 when the publication adds no Rule. Otherwise it is a new revision R1 whose
+  parent is R0, containing every rule and conflict record of R0 unchanged plus the
+  approved inert candidate Rules.
+
+R1 is committed in the same atomic publication as the EngineeringContextRevision,
+under the same review gate (see Publication). It never edits an existing
+`(rule_id, version)`, and `Rule.scope` matching is unchanged.
 
 The Context Compiler does not construct an alternative RuleRegistry truth store.
-Publication fails if a pinned RuleRef cannot resolve through the pinned rule-set
-revision.
+Publication fails if a pinned RuleRef cannot resolve through the published rule-set
+revision, or if R1's parent is not R0.
 
 ## Exact source input
 
@@ -148,7 +154,7 @@ non-canonical store owned by the Context Compiler.
 - Candidate versions and ReviewRecords are immutable; the review log is append-only.
 - Each compile session builds and freezes its own CanonicalContextRegistry instance
   over the exact attested sources it reads (engineering sources, the `PROCESS_GRAPH`
-  source, the rule-set revision, any alias dictionary). It never reuses or mutates a
+  source, the input rule-set revision, any alias dictionary). It never reuses or mutates a
   run's READY registry.
 - Only publication produces canonical material: the EngineeringContextRevision
   artifact and, when Rule items are approved, a new rule-set revision, both committed
@@ -453,6 +459,12 @@ REMAP may change only binding target/scope refs. A correction to extracted conte
 numeric value, units, or claim text requires REJECT plus a new provenance-bearing
 candidate version; review never edits candidate content in place.
 
+A REMAP ReviewRecord stores the full selected binding: `selected_target_ref` and
+`selected_scope_refs[]`. An APPROVE accepts the reviewed candidate version's proposed
+target and scope refs. Publication takes the target and scope of every approved item
+from its effective ReviewRecord (or, for APPROVE, that candidate version), never from
+publisher input.
+
 KEEP_CANDIDATE leaves the item unresolved/unverified. It cannot enter trusted
 canonical context.
 
@@ -467,6 +479,7 @@ review_id
 candidate_ref
 decision
 selected_target_ref?
+selected_scope_refs[]?
 decision_principal
   HUMAN(reviewer_id)
   | DETERMINISTIC_POLICY(policy_id@version)
@@ -499,7 +512,12 @@ set.
   (equivalent to KEEP_CANDIDATE for publication eligibility) until a superseding
   record leaves exactly one terminal record.
 
-Records appended after the pinned position affect only later publications.
+The publication transaction pins `review_log_position` to the review-log tail and
+cannot choose an earlier position. In v0 one workspace lock serializes review appends
+and publication: it is held from reading the tail until the publication commit
+completes, so no review is appended in between. Records appended after a publication
+affect only later publications. Recomputing effective decisions at an older position
+is allowed for audit replay only and never produces a new revision.
 
 Candidate `review_status` is a derived projection of this log prefix, not a second
 mutable source of truth.
@@ -548,9 +566,11 @@ validation policy version
 review policy version
 approved binding refs[]
 approved knowledge refs[]
-pinned rule-set revision ref
+input rule-set revision ref (R0)
+published rule-set revision ref (R0, or R1 by path + checksum)
 pinned RuleRefs[]
-rule scope bindings[]: (RuleRef, scope_refs[], effective ReviewRecord ref)
+rule scope bindings[]: (RuleRef, scope_refs[] from the effective ReviewRecord,
+  effective ReviewRecord ref, validation result ref)
 review_log_position + checksum of the committed review-log prefix
 review refs[]
 conflict/exclusion summary
@@ -563,6 +583,12 @@ bodies.
 Publication commits, with the revision artifact, the review-log prefix up to the
 pinned position for every candidate version the revision considered, so every
 effective decision can be recomputed from repository content alone.
+
+Artifacts created by one publication commit (the revision, its review-log prefix and
+any R1) reference each other by repository path plus content checksum, never by the
+commit that creates them, `HEAD` or "latest". Once committed, each is addressed by a
+ContextSourceRef of commit revision, path and content checksum, and prepare-time
+registration verifies the checksum.
 
 `Rule.scope` stays an exact registry string and registry matching is unchanged. The
 plant scope a reviewer approved for a Rule-routed item is published as a rule scope
@@ -584,7 +610,7 @@ validation policy version
 review policy version
 effective ReviewRecord at the pinned review_log_position
 effective remapped target where applicable
-rule-set revision and knowledge source revisions
+input rule-set revision (R0) and knowledge source revisions
 ~~~
 
 A review performed against an incompatible source/plant/policy tuple is stale for the
@@ -823,16 +849,19 @@ P1.2 is complete when one reproducible test/demo proves:
     until superseded;
 17. REMAP targets are revalidated before publication;
 18. all influencing inputs participate in visibility/derivation taint;
-19. every pinned RuleRef resolves through its pinned rule-set revision;
+19. every pinned RuleRef resolves through the published rule-set revision, and a new
+    rule-set revision's parent is the input rule-set revision;
 20. EngineeringContextRevision is an immutable repository-backed artifact and can
     enter a run only through a future prepare-time ContextSourceRef registration;
 21. publication validates the full dependency closure and exposes no partial new
     revision on failure;
-22. effective decisions are computed over the complete review-log prefix pinned by
-    the revision; a REJECT appended before that position blocks publication;
+22. effective decisions are computed over the complete review log up to its tail at
+    publication time; an earlier REJECT or superseding record cannot be skipped;
 23. approved Rule-routed items are published through a new rule-set revision and
     rule scope bindings, with `Rule.scope` matching unchanged;
-24. no Agent tool or Agent run can review or publish.
+24. no Agent tool or Agent run can review or publish;
+25. published targets and scopes come from effective ReviewRecords or the reviewed
+    candidate version, never from publisher input.
 
 ## Non-goals
 

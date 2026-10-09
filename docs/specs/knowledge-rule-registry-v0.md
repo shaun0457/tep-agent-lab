@@ -276,10 +276,13 @@ consumer: `context-compiler-v0.md`.
   kinds are extensible). One artifact holds one complete rule set.
 - Content: a deterministic canonical serialization of every Rule with all of its
   fields, including origin, validation, authority, behavior, scope, source and
-  validation refs and extraction metadata.
+  validation refs and extraction metadata. It also serializes every RuleConflict
+  record; their RuleRefs must resolve within the set. Loading round-trips both:
+  `find_rule_conflicts` returns the same records as the registry that was serialized.
 - Identity: repository revision plus content checksum. The loader verifies the
   checksum and returns an immutable RuleRegistry. The same ref always loads the same
-  registry, so the ref is the snapshot identity.
+  registry, so the ref is the snapshot identity. Inside the commit that introduces
+  it, an artifact may be referenced by repository path plus content checksum.
 - Revisions are complete sets with an optional parent ref that records lineage only.
   A new revision may add rules or rule versions; it never changes the content of an
   existing `(rule_id, version)`. Removing or deprecating a rule follows Versioning /
