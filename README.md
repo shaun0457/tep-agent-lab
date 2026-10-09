@@ -200,3 +200,11 @@ The most important first-RCA specs are:
 - `rca-v0.md`
 
 Later task specs remain proposals until their implementation phase.
+
+## Program status and product direction
+
+Beyond the RCA research role above, this repository hosts the P0 Playground backend, the observatory/desktop clients and the P1 telemetry/context work (ADR-002, ADR-003).
+
+- Current state, open PRs and next gate: `docs/program-status.md`.
+- P1 sequencing authority: `docs/decisions/ADR-004-p1-milestone-rebaseline.md`.
+- Product direction (non-normative): `docs/industrial-context-platform-north-star.md`, `docs/product-maturity-and-mvp.md`.

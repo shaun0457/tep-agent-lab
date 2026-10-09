@@ -234,6 +234,8 @@ isolation and dependency direction. P1.1A boundary tests stay green.
 
 ## Next milestone
 
-Canonical context integration: generic `SignalDescriptor` derived from the
-binding table, then migrate consumers (P0 queries, Agent telemetry tools,
-application views) to snapshot-bound reads.
+P1.1C canonical telemetry integration
+([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md)): event-time-bounded scans, P0
+run ingestion through this adapter, and snapshot-bound reads through the public
+P0/application boundary. The generic `SignalDescriptor` projection belongs to P1.3
+(`PlantContextRevision`); Agent telemetry tool migration belongs to P1.5.

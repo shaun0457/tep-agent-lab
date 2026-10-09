@@ -99,7 +99,9 @@ The existing sanitized history path (`ReferenceWorld.history()`, `RunQueries.tel
 Agent `get_history`) is current production behavior used by the desktop, D0
 benchmarks and Agent tools. P1.1A builds the canonical path in parallel so that it
 can be proven in isolation; migrating consumers through public P0/application
-queries is planned for later milestones (P1.4) and would change observable behavior.
+queries is planned for later milestones (P1.1C for application reads, P1.5 for Agent
+tools; [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md)) and would change
+observable behavior.
 
 ## Next step
 

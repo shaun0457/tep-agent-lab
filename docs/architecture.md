@@ -416,3 +416,35 @@ E1     interactive Industrial Observatory
 ```
 
 Future Context Layer views may join the same application boundary; they must not be embedded as frontend-owned domain state.
+
+## Industrial context and telemetry plane (P1)
+
+Owning contracts: `docs/decisions/ADR-003-industrial-environment-boundary.md` and `docs/specs/plant-telemetry-contract-v0.md` (semantics); `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (sequencing and the P1.2/P1.3 boundary). This section summarizes; it defines nothing new.
+
+```text
+Plant Context Plane        ProcessGraph (tep-sim) -> Canonical Plant Context revision
+                           (PlantContextRevision, first implemented in P1.3)
+Engineering Knowledge      DocumentRef / KnowledgeRef scoped to plant semantics;
+                           structured claims stay in RuleRegistry / RuleRef;
+                           P1.2 Context Compiler output is defined by
+                           context-compiler-v0 (PR #24, not yet accepted)
+Telemetry Plane            TelemetrySource -> TelemetryIngestor -> TimeSeriesStore
+                           -> TimeSeriesReader, pinned by TelemetryReadSnapshot (T, K)
+        |
+        v
+ContextSnapshot (derived, pinned refs) + RcaState revision
+        -> InvestigationContextView -> Application reads / Agent ContextProjection
+```
+
+Implemented today:
+
+- `telemetry.py` (P1.1A): stdlib-only generic core; T and K apply before any ordering, reduction or count;
+- `tep_telemetry.py` (P1.1B): the only module that knows TEP identifiers on this path; canonical `signal_id` is the ProcessGraph semantic entity id;
+- neither is used by a production path yet. Application and Agent telemetry still read `ReferenceWorld.history()`; P1.1C and P1.5 migrate them.
+
+Invariants kept from the owning contracts:
+
+- generic contracts never import TEP; TEP adapter -> generic contract only;
+- `CanonicalContextRegistry` remains the run-scoped attested source inventory; published context revisions enter a run only through prepare-time registration;
+- no second ProcessGraph, RuleRegistry, RcaState store or "latest context" resolver;
+- `Observation != Evidence`; Application API != Agent Tool Surface.

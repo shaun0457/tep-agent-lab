@@ -1,8 +1,35 @@
 # Roadmap — TEP Agent Lab
 
-Phase 0 Design Freeze is complete. The lab may now implement the first RCA information/tool/evaluation slice in dependency order.
+Two tracks share this repository ([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) Decision 7):
+
+- **Product track** — Industrial Context Platform: P0/P1 milestones, E-series clients and MVP integration. P1 sequencing is owned by ADR-004.
+- **Research track** — benchmark and evaluation: D0, D1, D2.
+
+Current state, open PRs and the next gate: [`program-status.md`](program-status.md). This roadmap points to owning specs; it never defines semantics.
+
+Phase 0 Design Freeze (2026-09-15) is complete. The "Phase 0–12" sections at the end are the original research-phase plan and their labels are historical; current research milestones use the D-series and product milestones the P-series.
 
 Canonical specs live in `docs/specs/`.
+
+## Product track — Industrial Context Platform (P1)
+
+Sequencing authority: ADR-004. Scope rule: [`product-maturity-and-mvp.md`](product-maturity-and-mvp.md).
+Milestone state lives only in [`program-status.md`](program-status.md).
+
+| Milestone | Scope | Owning contract / note |
+|---|---|---|
+| P1.0 | ownership, telemetry and snapshot semantics | ADR-003, `plant-telemetry-contract-v0.md` |
+| P1.1A | generic telemetry core | `docs/p1-1a-telemetry-core.md` |
+| P1.1B | TEP simulation source | `docs/p1-1b-tep-simulation-source.md` |
+| P1.1C | canonical telemetry integration: event-time-bounded scans, P0 run ingestion, snapshot-bound public P0/application reads | plant-telemetry migration obligations; implementation note to be written |
+| P1.2 | Context Compiler | `context-compiler-v0.md` (PR #24) |
+| P1.3 | Canonical Context composition: PlantContextRevision, scope resolution, derived view | ADR-004 Decision 4; spec to be written |
+| P1.4 | context serving + deterministic Operational State | spec to be written |
+| P1.5 | ContextSnapshot + Investigation Context integration | plant-telemetry §ContextSnapshot; spec to be written |
+| — | runtime B5 first real provider; one real-model investigation; MVP integration (E1 + context panels) | Level 1; runtime repo for B5 |
+| P1.6 | validated write-back as Candidate Knowledge | post-Level 1 |
+| P1.7 | second non-TEP source/domain and abstraction review | Level 2 |
+| — | dirty-stream replay harness; first external connector | deferred to Level 2 |
 
 
 
@@ -108,6 +135,8 @@ Do not port P0, ProcessGraph, Agent runtime, simulator integration, or Context L
 
 ### E1 — Interactive Industrial Observatory
 
+E1 is the UI substrate of Level-1 MVP integration (ADR-004 Decision 2).
+
 Build richer interaction on top of the application boundary:
 
 - process/P&ID view;
@@ -131,7 +160,7 @@ D0 is benchmark infrastructure, not a new Agent capability.
 
 Owning spec: `docs/specs/benchmark-case-v0.md`.
 
-### D0.0 — Contract freeze — complete after this documentation PR
+### D0.0 — Contract freeze — complete
 
 Freeze:
 
