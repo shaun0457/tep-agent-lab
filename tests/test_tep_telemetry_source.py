@@ -1,13 +1,17 @@
 """P1.1B acceptance tests: TEPSimulationSource -> canonical telemetry core."""
 
 import ast
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from fractions import Fraction
 import json
 from pathlib import Path
 import re
+import sys
 from tempfile import TemporaryDirectory
+import threading
 import unittest
+from unittest import mock
 
 from tep_sim import (ControlMode, DisturbanceIntervention, EnvironmentConfig, MVIntervention,
                      Observation,
@@ -232,8 +236,7 @@ class TranslationTests(unittest.TestCase):
             self.assertIs(SourceObservation, type(item))
             self.assertEqual(self.source.source_id, item.source_id)
             self.assertEqual(TimePoint(self.source.event_clock.clock_id, 360), item.event_time)
-            self.assertEqual(360, item.sequence)
-            self.assertEqual(item.event_time.ticks, item.sequence)
+            self.assertEqual(0, item.sequence)
             self.assertEqual(Quality.GOOD, item.quality)
             self.assertIsNone(item.source_status_code)
             self.assertIsNone(item.source_metadata_ref)
@@ -249,14 +252,80 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(record["measurements"]["XMEAS(9)"], batch[TEMPERATURE])
         self.assertEqual(record["manipulated_variables"]["XMV(10)"], batch[COOLING])
 
-    def test_translation_is_deterministic(self) -> None:
-        record = synthetic_record(120)
-        self.assertEqual(self.source.translate_sanitized(record),
-                         self.source.translate_sanitized(record))
-        self.assertEqual(self.source.translate_sanitized(record),
-                         make_source().translate_sanitized(record))
-        self.assertNotEqual(self.source.translate_sanitized(record),
-                            make_source("run-2").translate_sanitized(record))
+    def test_one_record_shares_one_sequence(self) -> None:
+        for seconds in (0, 10, 10, 3600):
+            batch = self.source.translate_sanitized(synthetic_record(seconds))
+            self.assertEqual(len(GRAPH.bindings()), len(batch))
+            self.assertEqual(1, len({item.sequence for item in batch}))
+            self.assertEqual(1, len({item.event_time for item in batch}))
+
+    def test_sequence_is_monotonic_and_independent_of_event_time(self) -> None:
+        # Ticks go backwards, repeat and jump; sequences still count received records.
+        ticks = (3600, 10, 10, 0, 7200)
+        sequences = [self.source.translate_sanitized(synthetic_record(t))[0].sequence
+                     for t in ticks]
+        self.assertEqual([0, 1, 2, 3, 4], sequences)
+        self.assertEqual(5, self.source.next_sequence)
+
+    def test_identical_record_is_a_new_observation(self) -> None:
+        record = synthetic_record(10)
+        first = self.source.translate_sanitized(record)
+        second = self.source.translate_sanitized(record)
+        self.assertEqual([item.event_time for item in first],
+                         [item.event_time for item in second])
+        self.assertEqual([item.value for item in first], [item.value for item in second])
+        self.assertEqual(({0}, {1}), ({item.sequence for item in first},
+                                      {item.sequence for item in second}))
+
+    def test_validation_failure_does_not_consume_a_sequence(self) -> None:
+        self.assertEqual(0, self.source.translate_sanitized(synthetic_record(0))[0].sequence)
+        bad = synthetic_record(1)
+        bad["measurements"]["XMEAS(1)"] = float("nan")
+        for invalid in (bad, {**synthetic_record(), "simulation_time_hours": 0.5 / 3600},
+                        {**synthetic_record(), "active_disturbances": []}, ["x"]):
+            with self.assertRaises(TEPSourceError):
+                self.source.translate_sanitized(invalid)
+            self.assertEqual(1, self.source.next_sequence)
+        self.assertEqual(1, self.source.translate_sanitized(synthetic_record(2))[0].sequence)
+
+    def test_fresh_source_replays_the_same_sequence_stream(self) -> None:
+        stream = [synthetic_record(t, offset) for t, offset in
+                  ((0, 0.0), (10, 0.0), (10, 1.0), (10, 1.0), (20, 0.0))]
+        first, second = make_source(), make_source()
+        replay_a = [first.translate_sanitized(record) for record in stream]
+        replay_b = [second.translate_sanitized(record) for record in stream]
+        self.assertEqual(replay_a, replay_b)
+        self.assertEqual([0, 1, 2, 3, 4], [batch[0].sequence for batch in replay_a])
+        self.assertNotEqual(replay_a[0], make_source("run-2").translate_sanitized(stream[0]))
+
+    def test_concurrent_translation_never_duplicates_a_sequence(self) -> None:
+        record = synthetic_record(10)
+        workers, calls = 8, 50
+        barrier = threading.Barrier(workers)
+        previous = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)  # force frequent thread switches to provoke races
+        self.addCleanup(sys.setswitchinterval, previous)
+
+        def worker() -> list[set[int]]:
+            barrier.wait()
+            return [{item.sequence for item in self.source.translate_sanitized(record)}
+                    for _ in range(calls)]
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(worker) for _ in range(workers)]
+            batches = [sequences for future in futures for sequences in future.result()]
+        self.assertTrue(all(len(sequences) == 1 for sequences in batches))
+        self.assertEqual(list(range(workers * calls)),
+                         sorted(next(iter(sequences)) for sequences in batches))
+
+    def test_batch_construction_failure_does_not_consume_a_sequence(self) -> None:
+        self.source.translate_sanitized(synthetic_record(0))
+        with mock.patch.object(tep_telemetry, "SourceObservation",
+                               side_effect=TEPSourceError("boom")):
+            with self.assertRaises(TEPSourceError):
+                self.source.translate_sanitized(synthetic_record(1))
+        self.assertEqual(1, self.source.next_sequence)
+        self.assertEqual(1, self.source.translate_sanitized(synthetic_record(2))[0].sequence)
 
     def test_shutdown_and_safety_are_not_signals(self) -> None:
         record = synthetic_record()
@@ -352,37 +421,61 @@ class StoreSemanticsTests(unittest.TestCase):
         self.assertEqual({2}, {record.commit_revision for record in result.records})
         self.assertEqual({ingest_at(9)}, {record.sample.ingest_time for record in result.records})
 
-    def test_duplicate_record_is_a_no_op(self) -> None:
+    def test_same_tick_changed_observations_both_retained(self) -> None:
+        first = self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(10)),
+                                     ingest_time=ingest_at(5))
+        second = self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(10, 0.5)),
+                                      ingest_time=ingest_at(6))
+        self.assertEqual((1, 2, 53), (first.ingest_sequence, second.ingest_sequence,
+                                      second.new_count))
+        clock = self.source.event_clock.clock_id
+        snapshot = self.store.snapshot(TimePoint(clock, 10))
+        reader = TimeSeriesReader(self.store, max_interval_ticks=60, max_scan_records=10)
+        history = reader.history(source_id=self.source.source_id, signal_id=TEMPERATURE,
+                                 event_start=TimePoint(clock, 0), event_end=TimePoint(clock, 10),
+                                 max_points=10, snapshot=snapshot)
+        self.assertEqual([0, 1], [sample.sequence for sample in history.samples])
+        self.assertEqual([10, 10], [sample.event_time.ticks for sample in history.samples])
+        record = synthetic_record(10)
+        self.assertEqual([record["measurements"]["XMEAS(9)"],
+                          record["measurements"]["XMEAS(9)"] + 0.5],
+                         [sample.value for sample in history.samples])
+        current = reader.current(source_id=self.source.source_id, signal_id=TEMPERATURE,
+                                 snapshot=snapshot)
+        self.assertEqual(1, current.sample.sequence)
+
+    def test_identical_received_record_is_accepted_again(self) -> None:
+        record = synthetic_record(60)
+        first = self.ingestor.ingest(self.source.translate_sanitized(record),
+                                     ingest_time=ingest_at(5))
+        again = self.ingestor.ingest(self.source.translate_sanitized(record),
+                                     ingest_time=ingest_at(50))
+        self.assertEqual(53, again.new_count)
+        self.assertEqual(first.ingest_sequence + 1, again.ingest_sequence)
+
+    def test_store_identity_semantics_unchanged(self) -> None:
+        # P1.1A semantics still apply to redelivery of one translated batch.
         batch = self.source.translate_sanitized(synthetic_record(60))
         first = self.ingestor.ingest(batch, ingest_time=ingest_at(5))
-        again = self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(60)),
-                                     ingest_time=ingest_at(50))
-        self.assertEqual(0, again.new_count)
-        self.assertEqual(first.ingest_sequence, again.ingest_sequence)
-        self.assertEqual(first.records, again.records)
-
-    def test_changed_content_at_same_identity_conflicts(self) -> None:
-        self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(60)),
-                             ingest_time=ingest_at(5))
+        again = self.ingestor.ingest(batch, ingest_time=ingest_at(50))
+        self.assertEqual((0, first.records), (again.new_count, again.records))
+        changed = tuple(replace(item, value=item.value + 1.0) for item in batch)
         with self.assertRaises(IdentityConflict):
-            self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(60, 0.5)),
-                                 ingest_time=ingest_at(6))
+            self.ingestor.ingest(changed, ingest_time=ingest_at(6))
         self.assertEqual(1, self.store.current_ingest_sequence)
 
     def test_reset_requires_new_source_incarnation(self) -> None:
-        # Sequence == tick, so a reset that reused the identity would collide at tick 0.
         self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(0)),
                              ingest_time=ingest_at(1))
-        with self.assertRaises(IdentityConflict):
-            self.ingestor.ingest(self.source.translate_sanitized(synthetic_record(0, 1.0)),
-                                 ingest_time=ingest_at(2))
         rerun = make_source("run-2")
         self.assertNotEqual(self.source.source_id, rerun.source_id)
         self.assertNotEqual(self.source.event_clock, rerun.event_clock)
+        self.assertEqual(0, rerun.next_sequence)
         store = make_store(rerun)
         result = TelemetryIngestor(store).ingest(
             rerun.translate_sanitized(synthetic_record(0, 1.0)), ingest_time=ingest_at(2))
         self.assertEqual(53, result.new_count)
+        self.assertEqual({0}, {record.sample.sequence for record in result.records})
         # The first store never registered the new incarnation (nor its clock).
         with self.assertRaises(UnknownBinding):
             self.ingestor.ingest(rerun.translate_sanitized(synthetic_record(0)),
@@ -412,7 +505,8 @@ class RealTEPIntegrationTests(unittest.TestCase):
         cls.store = make_store(cls.source)
         cls.ingestor = TelemetryIngestor(cls.store)
         cls.reader = TimeSeriesReader(cls.store, max_interval_ticks=3600, max_scan_records=100)
-        cls.k_initial = cls.ingestor.ingest(cls.source.translate_sanitized(cls.initial),
+        cls.initial_batch = cls.source.translate_sanitized(cls.initial)
+        cls.k_initial = cls.ingestor.ingest(cls.initial_batch,
                                             ingest_time=ingest_at(1_000)).ingest_sequence
         # Harness-owned hidden incident: the source must never see it.
         cls.environment.apply(DisturbanceIntervention("IDV(4)", 1))
@@ -421,37 +515,45 @@ class RealTEPIntegrationTests(unittest.TestCase):
         cls.raw_records = read_telemetry(cls.rollout.telemetry)
         cls.records = [sanitize_observation(record) for record in cls.raw_records]
         cls.time_before = time_before
-        cls.k_after_origin = cls.ingestor.ingest(
-            cls.source.translate_sanitized(cls.records[0]),
-            ingest_time=ingest_at(2_000)).ingest_sequence
+        # The rollout origin record is a new received observation: new sequence, new K.
+        cls.origin = cls.ingestor.ingest(cls.source.translate_sanitized(cls.records[0]),
+                                         ingest_time=ingest_at(2_000))
         cls.progressive = []
         for index, record in enumerate(cls.records[1:], start=1):
             cls.progressive.append(cls.ingestor.ingest(
                 cls.source.translate_sanitized(record), ingest_time=ingest_at(2_000 + index)))
+        # Every record this class ingested, in delivery order.
+        cls.delivered = [cls.initial, *cls.records]
 
     def test_reset_observation_translates(self) -> None:
         self.assertEqual(SANITIZED_FIELDS, set(self.initial))
         self.assertEqual(1, self.k_initial)
-        batch = self.source.translate_sanitized(self.initial)
-        self.assertEqual(0, batch[0].event_time.ticks)
-        self.assertEqual(53, len(batch))
+        self.assertEqual({0}, {item.event_time.ticks for item in self.initial_batch})
+        self.assertEqual({0}, {item.sequence for item in self.initial_batch})
+        self.assertEqual(53, len(self.initial_batch))
 
     def test_rollout_records_on_second_grid(self) -> None:
         self.assertEqual(0.0, self.time_before)
         self.assertEqual([0, 60, 120, 180, 240, 300, 360],
                          [simulation_ticks(r["simulation_time_hours"]) for r in self.records])
 
-    def test_repeated_rollout_origin_is_idempotent(self) -> None:
-        self.assertEqual(self.k_initial, self.k_after_origin)
+    def test_rollout_origin_is_a_distinct_received_observation(self) -> None:
+        self.assertEqual(53, self.origin.new_count)
+        self.assertEqual(self.k_initial + 1, self.origin.ingest_sequence)
+        self.assertEqual({0}, {r.sample.event_time.ticks for r in self.origin.records})
+        self.assertEqual({1}, {r.sample.sequence for r in self.origin.records})
 
     def test_progressive_ingestion_one_commit_per_record(self) -> None:
-        self.assertEqual(list(range(2, 2 + len(self.progressive))),
+        self.assertEqual(list(range(3, 3 + len(self.progressive))),
                          [result.ingest_sequence for result in self.progressive])
+        self.assertEqual(list(range(2, 2 + len(self.progressive))),
+                         [result.records[0].sample.sequence for result in self.progressive])
         for result in self.progressive:
             self.assertEqual(53, result.new_count)
             self.assertEqual({result.ingest_sequence},
                              {record.commit_revision for record in result.records})
             self.assertEqual(1, len({record.sample.event_time for record in result.records}))
+            self.assertEqual(1, len({record.sample.sequence for record in result.records}))
 
     def test_canonical_values_equal_sanitized_values(self) -> None:
         horizon = TimePoint(self.source.event_clock.clock_id, 360)
@@ -463,10 +565,13 @@ class RealTEPIntegrationTests(unittest.TestCase):
             history = self.reader.history(source_id=self.source.source_id,
                                           signal_id=item.signal_id, event_start=start,
                                           event_end=horizon, max_points=100, snapshot=snapshot)
-            self.assertEqual([r[field][item.runtime_variable_id] for r in self.records],
+            self.assertEqual([r[field][item.runtime_variable_id] for r in self.delivered],
                              [sample.value for sample in history.samples], item.signal_id)
-            self.assertEqual([simulation_ticks(r["simulation_time_hours"]) for r in self.records],
+            self.assertEqual([simulation_ticks(r["simulation_time_hours"])
+                              for r in self.delivered],
                              [sample.event_time.ticks for sample in history.samples])
+            self.assertEqual(list(range(len(self.delivered))),
+                             [sample.sequence for sample in history.samples])
 
     def test_reactor_temperature_and_cooling_match_runtime_bindings(self) -> None:
         snapshot = self.store.snapshot(TimePoint(self.source.event_clock.clock_id, 360))
@@ -477,7 +582,8 @@ class RealTEPIntegrationTests(unittest.TestCase):
         self.assertEqual(self.records[-1]["measurements"]["XMEAS(9)"], temperature.sample.value)
         self.assertEqual(self.records[-1]["manipulated_variables"]["XMV(10)"],
                          cooling.sample.value)
-        self.assertEqual(360, temperature.sample.sequence)
+        self.assertEqual(360, temperature.sample.event_time.ticks)
+        self.assertEqual(len(self.delivered) - 1, temperature.sample.sequence)
 
     def test_earlier_snapshot_never_sees_later_record(self) -> None:
         clock = self.source.event_clock.clock_id
@@ -498,17 +604,16 @@ class RealTEPIntegrationTests(unittest.TestCase):
                 event_start=TimePoint(self.source.event_clock.clock_id, 0),
                 event_end=snapshot.event_horizon, max_points=100, snapshot=snapshot)
             dump += [sample.as_json() for sample in history.samples]
-        self.assertEqual(7 * 53, len(dump))
+        self.assertEqual(len(self.delivered) * 53, len(dump))
         self.assertEqual([], leakage_findings(dump))
         self.assertNotIn("IDV", json.dumps(dump).upper())
 
     def test_translation_does_not_advance_the_world(self) -> None:
         before = self.environment.observe()
-        self.source.translate_sanitized(sanitize_observation(before))
+        make_source("probe").translate_sanitized(sanitize_observation(before))
         self.assertEqual(before, self.environment.observe())
 
-    def test_same_tick_intervention_conflicts_by_policy(self) -> None:
-        """Documented limitation: sequence == tick, so a same-tick MV change conflicts."""
+    def test_same_tick_mv_intervention_is_two_observations(self) -> None:
         with TemporaryDirectory() as directory:
             environment = TEPEnvironment(EnvironmentConfig(
                 seed=11, backend="python", control_mode=ControlMode.MANUAL,
@@ -516,14 +621,35 @@ class RealTEPIntegrationTests(unittest.TestCase):
                 artifact_directory=Path(directory) / "world"))
             try:
                 source = make_source("manual")
-                ingestor = TelemetryIngestor(make_store(source))
+                store = make_store(source)
+                ingestor = TelemetryIngestor(store)
                 before = sanitize_observation(environment.reset())
-                ingestor.ingest(source.translate_sanitized(before), ingest_time=ingest_at(1))
+                first = ingestor.ingest(source.translate_sanitized(before),
+                                        ingest_time=ingest_at(1))
                 value = before["manipulated_variables"]["XMV(10)"]
-                environment.apply(MVIntervention("XMV(10)", value + 1.0 if value < 99 else 1.0))
+                target = value + 1.0 if value < 99 else 1.0
+                environment.apply(MVIntervention("XMV(10)", target))  # no time advance
                 after = sanitize_observation(environment.observe())
-                with self.assertRaises(IdentityConflict):
-                    ingestor.ingest(source.translate_sanitized(after), ingest_time=ingest_at(2))
+                self.assertEqual(before["simulation_time_hours"], after["simulation_time_hours"])
+                self.assertNotEqual(before["manipulated_variables"]["XMV(10)"],
+                                    after["manipulated_variables"]["XMV(10)"])
+                second = ingestor.ingest(source.translate_sanitized(after),
+                                         ingest_time=ingest_at(2))
+                self.assertEqual(53, second.new_count)
+                self.assertEqual(first.ingest_sequence + 1, second.ingest_sequence)
+                clock = source.event_clock.clock_id
+                snapshot = store.snapshot(TimePoint(clock, 0))
+                history = TimeSeriesReader(store, max_interval_ticks=60, max_scan_records=10
+                                           ).history(source_id=source.source_id,
+                                                     signal_id=COOLING,
+                                                     event_start=TimePoint(clock, 0),
+                                                     event_end=TimePoint(clock, 0),
+                                                     max_points=10, snapshot=snapshot)
+                self.assertEqual([(0, 0), (0, 1)],
+                                 [(s.event_time.ticks, s.sequence) for s in history.samples])
+                self.assertEqual([before["manipulated_variables"]["XMV(10)"],
+                                  after["manipulated_variables"]["XMV(10)"]],
+                                 [s.value for s in history.samples])
             finally:
                 environment.close()
 

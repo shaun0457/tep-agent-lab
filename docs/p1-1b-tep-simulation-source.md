@@ -27,8 +27,8 @@ TEPEnvironment / ReferenceWorld          owners; they advance physics
   sorted by signal id. No hand-written mapping.
 - `simulation_ticks(hours)`: exact simulation-second conversion.
 - `TEPSimulationSource(graph, source_id=, clock_id=, clock_origin=)`: `source_id`,
-  `event_clock`, `signal_ids`, `bindings()`, `binding(id)`, `store_bindings()`,
-  `event_time(hours)`, `translate_sanitized(record)`.
+  `event_clock`, `signal_ids`, `next_sequence`, `bindings()`, `binding(id)`,
+  `store_bindings()`, `event_time(hours)`, `translate_sanitized(record)`.
 
 ## Ownership
 
@@ -115,18 +115,64 @@ simulated year with margin while staying 20x tighter than a tick. Off-grid value
 (for example half a second) are rejected, never floored or truncated. The
 sanitized record has no integer step count to use instead.
 
-## Sequence policy
+## Event time, sequence and deduplication
 
-`sequence = event_time.ticks`. Identity is `(source_id, signal_id, sequence)`, so
-each signal has its own sequence namespace. Consequences:
+```text
+event_time:
+  normalized simulation tick
 
-- replaying a record is an exact duplicate and does not advance K;
+sequence:
+  independent monotonic source-observation sequence
+
+deduplication:
+  unavailable at the TEP adapter boundary because sanitized observations expose no
+  durable delivery identity; each received observation is distinct
+```
+
+Event time is not sample identity (P1.0 contract): tick collisions must never
+collapse samples. TEP can change state without advancing time (for example
+`observe`, then a MANUAL MV `apply`, then `observe` again at the same second), and
+both observations are valid.
+
+`TEPSimulationSource` owns the sequence allocator of its incarnation:
+
+- it starts at 0; each successful `translate_sanitized` allocates exactly one
+  sequence, shared by all 53 signals of that record; the next record gets the next
+  value;
+- the sequence is never derived from event time, values, hashes, runtime
+  variables or signal order;
+- allocation happens only after the whole record is validated, so a rejected
+  record consumes no sequence;
+- a `threading.Lock` guards allocation, so concurrent callers never receive
+  duplicate sequences;
+- deterministic replay comes from ordered delivery: a fresh source with the same
+  construction inputs, fed the same ordered records, assigns the same
+  `0, 1, 2, ...`.
+
+Reliable source-delivery deduplication is unavailable for the current TEP adapter
+because the sanitized TEP record exposes no durable native delivery identifier.
+The adapter does not infer duplicates from equal event time, values or hashes
+(the P1.0 contract forbids it), and it keeps no cache. Consequences:
+
+- the same sanitized record translated twice gets two sequences, and both batches
+  are accepted (K advances twice);
 - the rollout origin record (tep-sim telemetry repeats the pre-rollout
-  observation) is idempotent when the initial observation was already ingested;
-- changed content at the same tick is an `IdentityConflict`;
-- a simulator reset restarts at tick 0, so each reset/run must use a new
-  `source_id` and clock identity. P1.1A stores hold one event clock, so a new
-  incarnation is ingested into its own store.
+  observation) is a new received observation with a new sequence; callers that
+  already ingested that state can skip `records[0]`, as `ReferenceWorld.advance`
+  does for its history;
+- same-tick changed observations are retained side by side and read in sequence
+  order; `current` returns the highest sequence at the latest tick;
+- P1.1A store semantics are unchanged: redelivering one already translated batch
+  is still an exact duplicate, and changed content under an existing identity is
+  still an `IdentityConflict`.
+
+Future sources such as OPC UA or historian adapters may use native durable
+sequence/delivery identities where they exist.
+
+A simulator reset restarts event time at tick 0, so each reset/run uses a new
+source incarnation (new `source_id` and clock identity). Its sequence restarts at
+0. P1.1A stores hold one event clock, so a new incarnation is ingested into its
+own store.
 
 ## Atomic record batches
 
@@ -155,10 +201,13 @@ module imports `tep_telemetry` (tested). This is a parallel canonical path.
 
 `tests/test_tep_telemetry_source.py`: binding table and provenance, coverage,
 semantic ids, relation-driven value selection, fail-closed inputs, time conversion,
-sequence/duplicate/conflict/incarnation semantics, atomic commits, a real pinned
-`TEPEnvironment` reset + rollout with progressive ingestion and value equivalence
-for all 53 signals, `ReferenceWorld.history()` translation, hidden-state isolation
-and dependency direction. P1.1A boundary tests stay green.
+sequence allocation (one per record, monotonic and independent of ticks, not
+consumed by failures, fresh-source replay, concurrency), same-tick retention,
+identical records accepted as new observations, unchanged P1.1A store semantics,
+incarnations, atomic commits, a real pinned `TEPEnvironment` reset + rollout with
+progressive ingestion and value equivalence for all 53 signals, a real MANUAL
+same-tick MV intervention, `ReferenceWorld.history()` translation, hidden-state
+isolation and dependency direction. P1.1A boundary tests stay green.
 
 ## Known limitations
 
@@ -168,12 +217,10 @@ and dependency direction. P1.1A boundary tests stay green.
 - Shutdown/safety-margin data are not canonical telemetry yet.
 - No dirty-stream simulation (gaps, BAD quality, late or reordered data).
 - Counterfactual branches are not wired to the canonical path.
-- Same-tick interventions: `apply()` changes the observation without advancing
-  time (an MV setpoint in MANUAL mode). Under `sequence = tick`, a post-apply
-  record at an already ingested tick, including the next rollout's origin record,
-  is an `IdentityConflict` and the whole batch is rejected (tested). This follows
-  the mandated sequence policy; supporting it needs a sub-tick sequence or a
-  rule for which same-tick record is canonical.
+- No durable source-delivery deduplication: sanitized TEP records carry no native
+  delivery identity, so a redelivered record is stored again as a new observation.
+- Sequence state is in-memory and per source object; it is not persisted, and
+  restarting the process requires a new source incarnation.
 - Exact coverage: a ProcessGraph that binds only part of the 41 XMEAS + 12 XMV
   makes every sanitized record fail closed as unbound. That is intended for the
   clean adapter; partial graphs need an explicit exclusion list.

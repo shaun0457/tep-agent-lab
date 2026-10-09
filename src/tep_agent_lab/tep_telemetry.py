@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 import math
+import threading
 from typing import Any
 
 from tep_sim import BindingMethod, BindingRelation, ProcessGraph
@@ -165,10 +166,13 @@ class TEPSimulationSource:
     """Translator for one simulator source incarnation (one reset/run).
 
     Identity is fixed at construction and supplied by the caller: ``source_id`` and
-    a SIMULATION clock (1 s/tick, explicit origin). Source sequence is the event
-    tick, so one incarnation must never be reused across a simulator reset: a new
-    reset needs a new ``source_id``/clock. The source owns no store, context ref,
-    visibility policy or ingest time.
+    a SIMULATION clock (1 s/tick, explicit origin). The source owns its sequence
+    allocator: an independent monotonic observation sequence starting at 0, one
+    value per successfully translated record, never derived from event time or
+    values. A fresh source fed the same ordered records assigns the same
+    sequences. Event ticks restart at a simulator reset, so a new reset needs a new
+    ``source_id``/clock. The source owns no store, context ref, visibility policy
+    or ingest time.
     """
 
     def __init__(self, graph: ProcessGraph, *, source_id: str, clock_id: str,
@@ -183,6 +187,17 @@ class TEPSimulationSource:
         self._expected = {field: frozenset(item.runtime_variable_id for item in self._bindings
                                            if _VALUE_MAPS[item.relation] == field)
                           for field in _VALUE_MAPS.values()}
+        self._sequence_lock = threading.Lock()
+        self._next_sequence = 0
+
+    @property
+    def next_sequence(self) -> int:
+        """Snapshot of the sequence the next successfully translated record receives.
+
+        Another thread may advance it immediately after the read.
+        """
+        with self._sequence_lock:
+            return self._next_sequence
 
     @property
     def signal_ids(self) -> tuple[str, ...]:
@@ -207,8 +222,11 @@ class TEPSimulationSource:
     def translate_sanitized(self, record: Mapping[str, Any]) -> tuple[SourceObservation, ...]:
         """One sanitized TEP record -> one batch of every visible bound signal.
 
-        All items share source_id, event_time and sequence (= event tick) and carry
-        quality GOOD. Fails closed on unexpected fields, missing or unbound runtime
+        All items share source_id, event_time (the simulation tick) and one newly
+        allocated source sequence, and carry quality GOOD. Every received record is a
+        distinct source observation: the same mapping translated twice gets two
+        sequences, because sanitized records carry no durable delivery identity to
+        deduplicate on. Fails closed on unexpected fields, missing or unbound runtime
         values, nonfinite values or an invalid simulation time; nothing is dropped.
         ``shutdown_state`` and ``safety_margins`` are validated but not emitted.
         """
@@ -243,8 +261,14 @@ class TEPSimulationSource:
                 if type(value) is not float or not math.isfinite(value):
                     raise TEPSourceError(f"{runtime_id} value must be a finite float")
                 values[runtime_id] = value
-        return tuple(SourceObservation(signal_id=item.signal_id, source_id=self.source_id,
-                                       event_time=event_time, sequence=event_time.ticks,
-                                       value=values[item.runtime_variable_id],
-                                       quality=Quality.GOOD)
-                     for item in self._bindings)
+        # Validation is complete; allocate exactly one sequence for the whole record.
+        # The counter advances only after the batch is built, so a failure consumes none.
+        with self._sequence_lock:
+            sequence = self._next_sequence
+            batch = tuple(SourceObservation(signal_id=item.signal_id, source_id=self.source_id,
+                                            event_time=event_time, sequence=sequence,
+                                            value=values[item.runtime_variable_id],
+                                            quality=Quality.GOOD)
+                          for item in self._bindings)
+            self._next_sequence = sequence + 1
+        return batch
