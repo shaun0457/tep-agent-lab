@@ -34,6 +34,7 @@ Also canonical:
 - `docs/specs/benchmark-case-v0.md` (frozen D0 case contract)
 - `docs/specs/plant-telemetry-contract-v0.md` (frozen P1.0 telemetry/context semantics)
 - `docs/specs/context-compiler-v0.md` (P1.2 Context Compiler)
+- `docs/specs/application-api-v1.md` (application reads and local transport v1)
 - `docs/decisions/ADR-002-ui-application-boundary.md`
 - `docs/decisions/ADR-003-industrial-environment-boundary.md`
 - `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (P1 sequencing; milestone numbers never own semantics)

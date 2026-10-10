@@ -6,6 +6,8 @@ decisions are recorded in §Decisions. Note and code ship in one PR on
 `feat/p1-1c-canonical-telemetry`. Normative contracts:
 [Plant Context + Telemetry v0](specs/plant-telemetry-contract-v0.md) (owner),
 [Playground backend v0](specs/playground-backend-v0.md),
+[Application API v1](specs/application-api-v1.md) (owning spec for the application
+reads and transport v1, added by this PR),
 [ADR-002](decisions/ADR-002-ui-application-boundary.md). Builds on
 [P1.1A](p1-1a-telemetry-core.md) and [P1.1B](p1-1b-tep-simulation-source.md).
 
@@ -87,7 +89,7 @@ setup/error isolation). Registration:
 |---|---|
 | source | `TEPSimulationSource(graph, source_id=f"tep-reference:{run_id}:{token}", clock_id=f"tep-sim:{run_id}:{token}", clock_origin=f"tep-reset:{run_id}:{token}")` |
 | store | `store_id="p0-reference-telemetry"`, `namespace=f"p0-run:{run_id}:{token}"`, `incarnation=f"inc-{token}"`, bindings `source.store_bindings()` (53) |
-| `context_ref` | see §7 |
+| `context_ref` | see §6 |
 | `visibility_policy_ref` | `f"{VISIBILITY_POLICY_VERSION}#AGENT"` (store holds only sanitized AGENT-visible data) |
 | ingest clock | `UTC`, 1 ms/tick, origin `1970-01-01T00:00:00Z/utc`; `ingest_time` = trusted `RunManager.clock()`; diagnostic only, K orders knowledge |
 | reader | `TelemetryReadPolicy(max_points_limit=1000, max_interval_ticks=2_592_000 (30 d), max_scan_records=50_000)`: service policy, not contract; a trusted `RunManager(telemetry_policy=...)` argument may lower it (tests) |
@@ -149,99 +151,37 @@ telemetry_last_event(*, snapshot: Mapping) -> CanonicalLastEventView
 - `TelemetryView` v0 is unchanged. It stays a P0 projection for D0 surfaces and the
   static E0 observatory. No application read uses it after this PR.
 
-### 4. Application reads v1 (`application_views.py`, `application_models.py`)
+### 4. Application reads, transport v1 and desktop (summary)
 
-`ApplicationViewService` (AGENT only) keeps one method per read. Telemetry-bearing
-reads take a `TelemetrySnapshot` model, obtained first through the new
-`open_telemetry_snapshot`:
+The contract is owned by [Application API v1](specs/application-api-v1.md): methods,
+models, parameters, the snapshot object, defaults, error codes, bounds, versioning, v0
+retirement and the adapter rules. This note only records how the PR realises it:
 
-```python
-open_telemetry_snapshot(run_id, *, event_horizon_ticks=None, ingest_sequence=None)
-    -> TelemetrySnapshot
-get_run(run_id, *, snapshot: TelemetrySnapshot) -> Run
-get_entity(run_id, entity_id) -> Entity                      # signature unchanged
-get_signal(run_id, signal_id, *, snapshot) -> Signal          # canonical current
-get_signal_history(run_id, signal_id, *, snapshot, event_start_ticks=None,
-                   event_end_ticks=None, max_points=500) -> SignalHistory
-```
+- `application_views.py` / `application_models.py`: `open_telemetry_snapshot` plus
+  `get_run` (optional snapshot; without one no telemetry field is resolved),
+  `get_entity`, `get_signal` and `get_signal_history` over the §3 P0 views. Graph data
+  still comes only from `ProcessGraphView`, matched on binding `semantic_entity_id`.
+  `Signal` and `SignalHistory` carry `source_id` and each `CanonicalPoint` carries
+  `sequence`, so the sample identity `(source_id, signal_id, sequence)` is disclosed.
+  The v0 recent window (last <= 1000 `TelemetryView` records) is replaced by any interval
+  at or before T from the run store, within reader policy.
+- `application_transport.py`: `tep-agent-lab.application-transport/v1`, five methods,
+  `snapshot` JSON object, `SNAPSHOT_UNAVAILABLE` and `RESOURCE_LIMIT_EXCEEDED`; v0 is
+  retired (`UNSUPPORTED_PROTOCOL_VERSION`).
+- Desktop: `protocol.ts` (v1, message table), `applicationClient.ts`
+  (`openTelemetrySnapshot`, snapshot passed through verbatim), new `probes.ts` (canonical
+  ids `reactor.temperature_measurement` and `reactor.pressure_measurement`, labelled
+  XMEAS(9)/XMEAS(7) via `source_locator`) and `main.tsx` (one pinned snapshot shown with
+  K, T as hours and `snapshot_ref`; a "New snapshot" button re-pins explicitly).
+- Rust `bridge.rs`: v1, five-method and per-method parameter allowlists, opaque
+  `snapshot`, host-owned `run_id`, two new codes.
+- `smoke_sidecar.py`: interactive (one frame, one reply) because reads need the snapshot
+  from the first reply; `verify_bundle.py` reuses it. `desktop_backend.py` keeps its framing.
+- CI (`.github/workflows/ci.yml`): the "Validate frontend" step runs `npm ci`,
+  `npm run build` and `npm test` in one PowerShell step without exit-code checks, so a
+  build failure can be masked. It gets a `$LASTEXITCODE` guard after each command.
 
-Models (frozen, domain-generic, ticks plus an explicit clock instead of hours):
-
-| Model | Fields |
-|---|---|
-| `TelemetrySnapshot` (new) | `run_id`, `snapshot_ref`, `contract`, `store_id`, `incarnation`, `namespace`, `ingest_sequence`, `event_horizon_ticks`, `event_clock_id`, `event_clock_kind`, `event_resolution` (`"1/1"` s/tick), `event_clock_origin`, `context_ref`, `visibility_policy_ref` |
-| `CanonicalPoint` (new) | `event_ticks`, `sequence`, `value`, `quality` |
-| `Run` | run/task status, view and manifest fields as before; `simulation_time_hours` is replaced by `snapshot_ref` and `telemetry_event_ticks` (`telemetry_last_event`: last eligible event at or before T under K, or `None`) |
-| `Binding` | `signal_id` is now the canonical id; new `source_locator` carries the adapter-native runtime id (`"XMEAS(9)"`) as an opaque display/provenance label; `quantity`, `relation`, `unit` |
-| `Signal` | `signal_id` (canonical), `source_locator`, `bound_entity_ids`, `quantity`, `relation`, `unit`, `snapshot_ref`, `status` (`DATA`/`NO_DATA`), `eligible_count`, `current: CanonicalPoint | None` |
-| `SignalHistory` | `signal_id`, `quantity`, `unit`, `snapshot_ref`, `event_start_ticks`, `event_end_ticks`, `max_points`, `eligible_count`, `returned_count`, `reduced`, `reduction_policy`, `coverage`, `points: tuple[CanonicalPoint, ...]` |
-
-Replacing the recent window: v0 read the last <= 1000 `TelemetryView` records and failed
-for older windows. v1 reads any interval at or before the pinned T from the run-scoped
-store, within reader policy. Omitted `event_end_ticks` defaults to T. Omitted
-`event_start_ticks` defaults to `max(0, end - max_interval_ticks)`. Both defaults are
-resolved against the pinned snapshot and returned in the result. `event_end > T`,
-inverted bounds and policy breaches fail closed. Coverage is
-`COMPLETE_FOR_STORE_INCARNATION`, so `earlier_records_omitted` and the v0 hours
-tolerance are removed. Reduction is the same frozen endpoint-index policy, applied by
-the core reader after both cutoffs.
-
-Graph data (entities, bindings, quantity, unit) still comes only from
-`ProcessGraphView`; the service matches canonical ids against binding
-`semantic_entity_id` and never copies a signal registry.
-
-### 5. Application transport v1 (`application_transport.py`)
-
-Changing the parameters and results of the v0 reads in place would break the frozen
-E0.2B v0 contract. ADR-002 requires careful versioning. The PR therefore introduces
-`PROTOCOL_VERSION = "tep-agent-lab.application-transport/v1"` and retires v0.
-The host speaks v1 only, and a v0 request gets `UNSUPPORTED_PROTOCOL_VERSION`. The
-desktop, Rust bridge and frozen sidecar ship from this repository together, so no v0
-client remains.
-
-| Method | Required params | Optional params |
-|---|---|---|
-| `open_telemetry_snapshot` | `run_id` | `event_horizon_ticks`, `ingest_sequence` (integers >= 0) |
-| `get_run` | `run_id`, `snapshot` | none |
-| `get_entity` | `run_id`, `entity_id` | none |
-| `get_signal` | `run_id`, `signal_id`, `snapshot` | none |
-| `get_signal_history` | `run_id`, `signal_id`, `snapshot` | `event_start_ticks`, `event_end_ticks` (integer or null), `max_points` (integer) |
-
-- `snapshot` is a JSON object with exactly the `TelemetrySnapshot` keys. The transport
-  rebuilds the model; the service verifies `snapshot_ref` and P0 resolves it. Booleans
-  are not integers. The envelope, the 64 KiB request bound, the codec and the
-  validation order are unchanged.
-- New stable error codes: `SNAPSHOT_UNAVAILABLE` / "snapshot unavailable"
-  (`SnapshotUnavailable`, `ClockMismatch`, `snapshot_ref` mismatch) and
-  `RESOURCE_LIMIT_EXCEEDED` / "resource limit exceeded". `TelemetryError` maps to
-  `INVALID_REQUEST`; core `UnknownBinding` maps to `UNKNOWN_SIGNAL`.
-
-### 6. Desktop, Rust bridge and sidecar
-
-- `desktop/src/lib/protocol.ts`: `PROTOCOL` becomes v1; the fixed message table adds the
-  two new codes.
-- `desktop/src/lib/applicationClient.ts`: `Method` adds `open_telemetry_snapshot`;
-  the API becomes `openTelemetrySnapshot(options?)`, `getRun(snapshot)`,
-  `getEntity(id)`, `getSignal(id, snapshot)` and
-  `getSignalHistory(id, snapshot, options?)`. The client passes the snapshot object
-  through unchanged and never interprets T/K (ADR-002: the frontend does not own
-  telemetry semantics).
-- `desktop/src/main.tsx`: on load, open one snapshot, show its K, T (formatted as hours
-  from ticks x resolution, presentation only) and `snapshot_ref`, then run every probe
-  against that pinned snapshot. A "New snapshot" button re-pins explicitly. Probe ids
-  are canonical and live in `desktop/src/lib/probes.ts`: `reactor.temperature_measurement`
-  (shown with `source_locator` XMEAS(9)) and the canonical id bound to XMEAS(7) in the
-  pinned ProcessGraph.
-- `desktop/src-tauri/src/bridge.rs`: `PROTOCOL` v1; method allowlist plus
-  `open_telemetry_snapshot`; per-method parameter allowlists with `snapshot` as an
-  opaque JSON object (Rust does not inspect it); `run_id` is still host-owned and
-  rejected from the frontend; the error-message table adds the two codes.
-- `desktop/sidecar/smoke_sidecar.py`: v1 needs the snapshot from the first reply, so the
-  smoke runs interactively (one frame, one reply). It opens a snapshot, then sends
-  `get_run`, `get_entity`, `get_signal` and `get_signal_history` with it.
-  `verify_bundle.py` reuses `smoke()` unchanged. `desktop_backend.py` keeps its framing.
-
-### 7. Runtime ids and the E0 observatory
+### 5. Runtime ids and the E0 observatory
 
 The static E0/E0.1 report (`examples/e0_environment_observatory.py`, `e0_demo.py`)
 reads P0 `TelemetryView` v0 and Agent-tool artifacts, not the application reads, so it
@@ -250,7 +190,7 @@ is unchanged and keeps showing XMEAS ids. In the desktop, XMEAS/XMV appear only 
 ProcessGraph binding -> `runtime_variable_id` and is never accepted in reverse as a read
 key.
 
-### 8. `context_ref` in P1.1C (finding I9)
+### 6. `context_ref` in P1.1C (finding I9)
 
 `context_ref = f"context-source:{graph_source.source_id}:sha256:{checksum(to_jsonable(graph_source))}"`,
 where `graph_source` is the exact AGENT-visible `PROCESS_GRAPH` `ContextSourceRef` that
@@ -269,13 +209,14 @@ metadata. The manifest is unchanged; the ref is recomputable from
 | `src/tep_agent_lab/run_telemetry.py` (new) | `RunTelemetry`, `TelemetryReadPolicy`, opaque token, `sync_reference_history`, `translate`, `deliver`, `snapshot`, `resolve_snapshot(mapping)`, `context_ref_for(graph_source)` |
 | `src/tep_agent_lab/playground.py` | `RunSession.telemetry`; optional trusted `telemetry_policy`; build and sync in `_session`; prepare fails closed on ingest failure |
 | `src/tep_agent_lab/playground_views.py` | four canonical telemetry views; `TelemetryView` v0 untouched |
-| `src/tep_agent_lab/application_views.py`, `application_models.py` | v1 reads and models (§4) |
+| `src/tep_agent_lab/application_views.py`, `application_models.py` | v1 reads and models (Application API v1) |
 | `src/tep_agent_lab/application_transport.py` | protocol v1, five methods, `snapshot` param, two error codes |
-| `desktop/src/lib/protocol.ts`, `applicationClient.ts`, `probes.ts` (new), `desktop/src/main.tsx` | v1 client and snapshot-pinned UI (§6) |
+| `desktop/src/lib/protocol.ts`, `applicationClient.ts`, `probes.ts` (new), `desktop/src/main.tsx` | v1 client and snapshot-pinned UI (§4) |
 | `desktop/src-tauri/src/bridge.rs` | v1 allowlists and error table |
 | `desktop/sidecar/smoke_sidecar.py` | interactive v1 smoke |
+| `.github/workflows/ci.yml` | `$LASTEXITCODE` guard after `npm ci`, `npm run build` and `npm test` |
 | Tests | `tests/test_telemetry_core.py`, `test_tep_telemetry_source.py`, `test_canonical_telemetry_integration.py` (new), `test_application_views.py`, `test_application_transport.py`, `test_desktop_backend.py`, `desktop/tests/client.test.ts`, `desktop/src-tauri/tests/{bridge,tauri_ipc,packaged}.rs` |
-| Docs | `docs/specs/playground-backend-v0.md` (O1), `docs/e0-2-application-views.md`, `docs/e0-2b-application-transport.md`, `docs/e0-2c-desktop-backend.md`, `docs/e0-2c-tauri-shell.md`, `docs/e0-2c-packaged-sidecar.md` (v1 amendments, §SPEC_CONFLICT), `docs/p1-1a-telemetry-core.md`, `docs/p1-1b-tep-simulation-source.md`, `docs/architecture.md`, `docs/program-status.md` |
+| Docs | `docs/specs/application-api-v1.md` (new owning spec; registered in `docs/specs/README.md` and `AGENTS.md`), `docs/specs/playground-backend-v0.md` (O1), `docs/e0-2-application-views.md`, `docs/e0-2b-application-transport.md`, `docs/e0-2c-desktop-backend.md`, `docs/e0-2c-tauri-shell.md`, `docs/e0-2c-packaged-sidecar.md` ("Superseded by" summaries linking the owning spec), `docs/p1-1a-telemetry-core.md`, `docs/p1-1b-tep-simulation-source.md`, `docs/architecture.md`, `docs/program-status.md` |
 
 Not changed: `tep_world.py`, `tool_surface.py`, `tool_bridge.py`, `benchmark.py`,
 `e0_demo.py`, `examples/e0_environment_observatory.py`, `desktop_backend.py` framing,
@@ -319,21 +260,22 @@ Migrated application reads, transport and desktop:
 
 | Test (file) | Proves |
 |---|---|
-| `test_v1_reads_are_snapshot_bound` (`test_application_views.py`) | `get_run`, `get_signal` and `get_signal_history` require a `TelemetrySnapshot` and return values equal to the canonical P0 views at that snapshot; `get_entity` bindings carry canonical `signal_id` plus `source_locator`; plant §Application boundaries ("same underlying read semantics") |
+| `test_v1_reads_are_snapshot_bound` (`test_application_views.py`) | `get_signal` and `get_signal_history` require a `TelemetrySnapshot`; `get_run` resolves telemetry only with one. Results equal the canonical P0 views at that snapshot, including full sample identities `(source_id, signal_id, sequence)`. `get_entity` bindings carry canonical `signal_id` plus `source_locator`. Plant §Identity, §Bounded reads, §Application boundaries |
 | `test_v1_history_replaces_recent_window` (`test_application_views.py`) | windows older than the former 1000-record projection are served from the store; default start/end are resolved against T and disclosed; `event_end > T`, inverted bounds and policy breaches fail closed |
 | `test_application_reads_no_longer_use_telemetry_view` (`test_application_views.py`) | AST/mock check: `ApplicationViewService` never calls `RunQueries.telemetry` |
 | `test_v1_protocol_and_methods` (`test_application_transport.py`) | exact v1 schemas, `snapshot` key set, integer-not-bool checks, v0 request -> `UNSUPPORTED_PROTOCOL_VERSION`, two new fixed error codes, redaction, the 64 KiB bound unchanged, and real E0/P0 equivalence of all five methods |
 | `test_desktop_backend_v1_session` (`test_desktop_backend.py`) | NDJSON host serves the v1 snapshot-then-read sequence in one process |
 | `desktop/tests/client.test.ts` | five reads use only `application_request` with a host-owned run id; the snapshot passes through verbatim; v1 envelope and message table, including the two new codes; unsafe errors fail closed |
 | `desktop/src-tauri/tests/bridge.rs` (`real_python_v1_reads_same_process_session` + unit tests) | real Python process: snapshot then four reads, same PID, `desktop-1..5`, hidden-term screen; v1 allowlists reject client `run_id` and unknown params; error table |
-| `desktop/src-tauri/tests/tauri_ipc.rs`, `packaged.rs` (ignored; CI frozen sidecar) | the same v1 sequence through Tauri IPC and through the frozen sidecar |
+| `desktop/src-tauri/tests/tauri_ipc.rs` (not ignored; development Python under plain `cargo test --locked`) | the same v1 sequence through Tauri IPC |
+| `desktop/src-tauri/tests/packaged.rs` (`#[ignore]`; CI only, with `TEP_FROZEN_SIDECAR`) | the same v1 sequence through the frozen sidecar |
 | `smoke_sidecar.py` / `verify_bundle.py` | interactive v1 smoke against the frozen EXE and the installed NSIS bundle |
 | `test_desktop_probe_ids_match_process_graph` (`test_application_views.py`) | the canonical ids in `desktop/src/lib/probes.ts` equal the pinned ProcessGraph bindings for XMEAS(9) and XMEAS(7) |
 
 How they run: the Python suites run in `scripts/check.py` (CI `test` job, Python 3.11
-and 3.13). The desktop job (`windows-latest`) runs `npm ci && npm run build && npm test`
-(typecheck plus `node --test`), `cargo fmt --check`, `cargo check --locked`,
-`cargo test --locked`, the `custom-protocol` check, `build_sidecar.py` plus
+and 3.13). The desktop job (`windows-latest`) runs `npm ci`, `npm run build` and `npm test`
+(typecheck plus `node --test`; each guarded by `$LASTEXITCODE` after this PR), `cargo fmt --check`, `cargo check --locked`,
+`cargo test --locked` (includes `bridge.rs` and `tauri_ipc.rs` against development Python), the `custom-protocol` check, `build_sidecar.py` plus
 `smoke_sidecar.py`, `cargo test --locked --test packaged -- --ignored`, and the NSIS
 build plus `verify_bundle.py`. The PR merges only with both jobs green; the packaged
 and bundle steps are CI-authoritative.
@@ -361,7 +303,7 @@ tools cannot see them.
   plant-telemetry obligation. `TelemetryView` text is unchanged.
 - **O2 — v0 application reads.** The owner did not take the compatibility recommendation.
   `get_run`, `get_signal` and `get_signal_history` move to the snapshot-bound canonical
-  reads in this PR (§4). Transport (v1, §5) and desktop (§6) are in scope. After this PR
+  reads in this PR. Transport v1 and desktop are in scope (§4; owning spec Application API v1). After this PR
   the application boundary has one telemetry read semantics, and P1.4 builds on it.
 - **O3 — injection seam.** Accepted: the run-scoped `translate` + `deliver` seam, with a
   real prepared session, source translation, ingestor and the public reads.
@@ -383,9 +325,10 @@ tools cannot see them.
 
    Changing them in place would silently break v0. The PR instead publishes transport v1
    and amends each note with a "Superseded by application transport v1 (P1.1C)"
-   section. The v0 text stays as history; the v1 methods, models, defaults and error
-   codes are stated there, and the semantics are owned by this note and
-   plant-telemetry-contract-v0. ADR-002 needs no amendment: the boundary is preserved,
+   section that summarises v1 and links the owning spec
+   [Application API v1](specs/application-api-v1.md). The v0 text stays as history;
+   telemetry meaning remains owned by plant-telemetry-contract-v0. The owner accepts the
+   new spec by merging the PR. ADR-002 needs no amendment: the boundary is preserved,
    and its "versioned carefully" rule is met by the version bump. playground-backend-v0
    gets only the additive O1 amendment, because `TelemetryView` v0 is unchanged.
 
@@ -394,6 +337,5 @@ plant-telemetry clause, it stops with `SPEC_CONFLICT` instead of adding a local 
 
 ## Next step
 
-Step 2, after coordinator review: implement against this note, tests first, in the
-same PR. After merge, P1.4 reads live telemetry through these snapshot-bound reads;
+Implement against this note and Application API v1, tests first, in the same PR. After merge, P1.4 reads live telemetry through these snapshot-bound reads;
 Agent read migration remains P1.5.
