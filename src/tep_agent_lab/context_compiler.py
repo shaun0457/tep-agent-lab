@@ -5,16 +5,18 @@ Candidate Context and canonical context are different trust domains::
     exact ContextSourceRef (CompileSession: its own frozen CanonicalContextRegistry)
       -> SourceFragmentRef (exact location + content checksum)
       -> CandidateBinding / CandidateKnowledge (immutable, versioned candidates)
-      -> CompilerWorkspace: append-only, non-canonical; deterministic validation
+      -> CompilerWorkspace: append-only, non-canonical, one visibility; validation
       -> ReviewRecord log (HUMAN or a registered DETERMINISTIC_POLICY principal only)
-      -> CompilerWorkspace.publish: EngineeringContextRevision (+ rule-set revision R1)
-         with its review-log prefix, committed by a per-lineage head compare-and-set
+      -> CompilerWorkspace.stage_publication: a validated StagedPublication bundle
+         (EngineeringContextRevision, review-log prefix, candidate records, R1, head)
 
-Review and publication are Application API operations (ADR-002): nothing here is an
-Agent tool, a ToolSpec or part of a ContextProjection. Confidence is review-routing
-metadata only and never establishes acceptance. Until P1.3, plant identities are the
-exact AGENT-visible ``PROCESS_GRAPH`` source selected for the session (ADR-004
-Decision 4). Rule-routed items reuse ``Rule``/``RuleRegistry`` through
+P1.2A stops at staging. A ``StagedPublication`` is NOT canonical and advances no head:
+the repository transaction (one git commit, serialized writers, ref/head
+compare-and-set, crash safety) is P1.2D. Review and publication are Application API
+operations (ADR-002): nothing here is an Agent tool, a ToolSpec or part of a
+ContextProjection. Confidence is review-routing metadata only. Until P1.3, plant
+identities are the exact AGENT-visible ``PROCESS_GRAPH`` source selected for the
+session (ADR-004 Decision 4). Rule-routed items reuse ``Rule``/``RuleRegistry`` through
 ``literature_candidate`` carriers and keep LITERATURE/NONE/REFERENCE. The module is
 generic: it never imports tep_sim; callers supply the ProcessGraph loader.
 """
@@ -23,29 +25,28 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 import hashlib
-import json
 import math
-import os
-from pathlib import Path
 import re
 import threading
-from typing import Any, Protocol
+from typing import Any, NoReturn
+import unicodedata
 
 from industrial_agent_runtime import Visibility
 from industrial_agent_runtime.serialization import freeze_json
 
 from .canonical_context import (
-    CANONICAL_JSON_SHA256, CanonicalContextRegistry, ContextSourceError, ContextSourceRef,
-    ProjectionScope, SourceMaterializer, UnknownContextSource, checked_relative_path,
-    content_checksum, most_restrictive,
+    BYTES_SHA256, CANONICAL_JSON_SHA256, CanonicalContextRegistry, ContextSourceError,
+    ContextSourceRef, ProjectionScope, SourceMaterializer, UnknownContextSource,
+    checked_relative_path, content_checksum, most_restrictive,
 )
-from .persistence import canonical_json
+from .persistence import canonical_json, strict_json_loads
 from .persistence import content_checksum as json_digest
 from .rule_sets import (
-    RULE_SET_KIND, RuleSetError, RuleSetRevision, load_rule_set, load_rule_set_source,
-    rule_record,
+    RULE_SET_KIND, RuleSetError, RuleSetRevision, check_extends, load_rule_set,
+    load_rule_set_source, rule_record,
 )
 from .rules import Authority, Origin, Rule, RuleRef, SourceVersion, Validation
 
@@ -56,15 +57,20 @@ PROCESS_GRAPH_KIND = "PROCESS_GRAPH"
 ENGINEERING_CONTEXT_REVISION_KIND = "ENGINEERING_CONTEXT_REVISION"
 REVISION_SCHEMA_VERSION = "tep-agent-lab.engineering-context-revision/v0"
 REVIEW_LOG_SCHEMA_VERSION = "tep-agent-lab.compiler-review-log/v0"
+CANDIDATES_SCHEMA_VERSION = "tep-agent-lab.compiler-candidates/v0"
 HEAD_SCHEMA_VERSION = "tep-agent-lab.engineering-context-head/v0"
 ENGINEERING_CONTEXT_ROOT = "context/engineering-context"
 RULE_SET_ROOT = "context/rule-sets"
 KNOWLEDGE_VALIDATION_STATUS = "VERIFIED"  # scope/extraction fidelity only; no truth/authority
 
 _ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
+_LINEAGE = re.compile(r"(?=.{1,64}\Z)[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _VERSIONED = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*@[A-Za-z0-9][A-Za-z0-9._+-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _KIND = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z")
+_MAX_EXACT_INT = 2 ** 53
+_JSON_ERRORS = (TypeError, ValueError, RecursionError)
 
 
 class CompilerError(ValueError):
@@ -72,15 +78,11 @@ class CompilerError(ValueError):
 
 
 class WorkspaceAppendError(CompilerError):
-    """An append-only or immutability rule of the compiler workspace was violated."""
+    """An append-only, immutability or visibility rule of the workspace was violated."""
 
 
 class PublicationError(CompilerError):
-    """Revision-level failure: nothing is committed and the previous head stays usable."""
-
-
-class StaleHead(PublicationError):
-    """The lineage head no longer names the intended parent revision (CAS lost)."""
+    """Revision-level failure: nothing is staged and no partial revision exists."""
 
 
 def _text(value: Any, name: str) -> str:
@@ -100,6 +102,35 @@ def _pattern(value: Any, pattern: re.Pattern[str], name: str) -> str:
     return value
 
 
+def _enum(kind: type[StrEnum], value: Any, name: str) -> Any:
+    try:
+        return kind(value)
+    except (TypeError, ValueError):
+        raise CompilerError(f"invalid {name}") from None
+
+
+def _visibility(value: Any) -> Visibility:
+    return _enum(Visibility, value, "visibility")
+
+
+def _utc(value: Any, name: str) -> str:
+    _pattern(value, _UTC, f"{name} (UTC ISO-8601 ending in Z)")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise CompilerError(f"invalid {name}") from None
+    return value
+
+
+def _lineage(value: Any) -> str:
+    _pattern(value, _LINEAGE, "lineage_id")
+    try:
+        checked_relative_path(value)
+    except ValueError:
+        raise CompilerError("invalid lineage_id") from None
+    return value
+
+
 def _typed_tuple(value: Any, kind: type | tuple[type, ...], name: str) -> None:
     if not isinstance(value, tuple) or any(not isinstance(item, kind) for item in value):
         raise CompilerError(f"{name} must be an immutable typed tuple")
@@ -115,9 +146,43 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _nfc(value: Any) -> Any:
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, Mapping):
+        return {_nfc(key): _nfc(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_nfc(item) for item in value]
+    return value
+
+
+def _digest(value: Any) -> str:
+    """Identity hash: NFC-normalized canonical JSON, so equivalent text hashes alike."""
+    return json_digest(_nfc(value))
+
+
+def _number(value: Any, name: str) -> float:
+    """One numeric rule: finite numbers become floats; ints beyond 2**53 are rejected."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CompilerError(f"{name} must be a number")
+    if isinstance(value, int) and abs(value) > _MAX_EXACT_INT:
+        raise CompilerError(f"{name} exceeds the exactly representable range")
+    number = float(value)
+    if not math.isfinite(number):
+        raise CompilerError(f"{name} must be finite")
+    return number
+
+
+def _json(data: bytes, what: str) -> Any:
+    try:
+        return strict_json_loads(data)
+    except _JSON_ERRORS as exc:
+        raise CompilerError(f"{what} is not strict JSON") from exc
+
+
 # -- source fragments -----------------------------------------------------------------
 class LocationKind(StrEnum):
-    BYTE_RANGE = "BYTE_RANGE"      # exact bytes [start, end) of the source revision
+    BYTE_RANGE = "BYTE_RANGE"      # exact bytes [start, end); BYTES_SHA256 sources only
     JSON_POINTER = "JSON_POINTER"  # RFC 6901 subtree of a JSON source, canonical JSON
 
 
@@ -129,7 +194,7 @@ class FragmentLocation:
     pointer: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", LocationKind(self.kind))
+        object.__setattr__(self, "kind", _enum(LocationKind, self.kind, "location kind"))
         if self.kind is LocationKind.BYTE_RANGE:
             if (type(self.start) is not int or type(self.end) is not int or self.start < 0
                     or self.end <= self.start or self.pointer is not None):
@@ -148,25 +213,37 @@ class FragmentLocation:
         return cls(LocationKind.JSON_POINTER, pointer=pointer)
 
     def extract(self, content: bytes) -> bytes:
+        if not isinstance(content, bytes):
+            raise CompilerError("fragment content must be bytes")
         if self.kind is LocationKind.BYTE_RANGE:
-            if self.end > len(content):
+            start, end = self.start, self.end
+            if start is None or end is None or end > len(content):
                 raise CompilerError("fragment range exceeds the source")
-            return content[self.start:self.end]
-        node = json.loads(content)
-        for token in self.pointer.split("/")[1:]:
+            return content[start:end]
+        node = _json(content, "JSON_POINTER source")
+        for token in (self.pointer or "").split("/")[1:]:
             token = token.replace("~1", "/").replace("~0", "~")
             if isinstance(node, dict) and token in node:
                 node = node[token]
-            elif (isinstance(node, list) and re.fullmatch(r"0|[1-9][0-9]*", token)
+            elif (isinstance(node, list) and re.fullmatch(r"0|[1-9][0-9]{0,9}", token)
                   and int(token) < len(node)):
                 node = node[int(token)]
             else:
                 raise CompilerError("fragment pointer does not resolve")
-        return canonical_json(node)
+        try:
+            return canonical_json(node)
+        except _JSON_ERRORS as exc:
+            raise CompilerError("fragment subtree is not canonical JSON") from exc
 
     def record(self) -> dict[str, Any]:
         return {"kind": self.kind.value, "start": self.start, "end": self.end,
                 "pointer": self.pointer}
+
+
+def _location_fits(location: FragmentLocation, source: ContextSourceRef) -> bool:
+    """Byte offsets are exact only over exact bytes; a canonical-JSON checksum is line-
+    ending independent, so a CRLF checkout would silently shift BYTE_RANGE offsets."""
+    return location.kind is not LocationKind.BYTE_RANGE or source.checksum_method == BYTES_SHA256
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -185,11 +262,16 @@ class SourceFragmentRef:
         _source_ref(self.source_ref, "source_ref")
         if not isinstance(self.location, FragmentLocation):
             raise CompilerError("location must be a FragmentLocation")
+        if not _location_fits(self.location, self.source_ref):
+            raise CompilerError("BYTE_RANGE fragments need a BYTES_SHA256 source")
         _pattern(self.content_checksum, _SHA256, "fragment content_checksum")
         _pattern(self.fragment_kind, _KIND, "fragment_kind")
         _pattern(self.fragmentation_policy, _VERSIONED, "fragmentation_policy")
         _optional_text(self.label, "label")
-        object.__setattr__(self, "fragment_id", "frag-" + json_digest(self._identity()))
+        object.__setattr__(self, "fragment_id", "frag-" + _digest(self._identity()))
+
+    def __hash__(self) -> int:  # ContextSourceRef holds unhashable frozen mappings
+        return hash(self.fragment_id)
 
     def _identity(self) -> dict[str, Any]:
         return {"source_ref": self.source_ref.record(), "location": self.location.record(),
@@ -202,22 +284,23 @@ class SourceFragmentRef:
                      location: FragmentLocation, *, fragment_kind: str,
                      fragmentation_policy: str, label: str | None = None
                      ) -> "SourceFragmentRef":
+        if not isinstance(location, FragmentLocation):
+            raise CompilerError("location must be a FragmentLocation")
         return cls(source_ref=source_ref, location=location,
                    content_checksum=_sha256(location.extract(content)),
                    fragment_kind=fragment_kind, fragmentation_policy=fragmentation_policy,
                    label=label)
-
-    def __hash__(self) -> int:  # ContextSourceRef holds unhashable frozen mappings
-        return hash(self.fragment_id)
 
     @property
     def visibility(self) -> Visibility:
         return self.source_ref.visibility
 
     def verify(self, content: bytes) -> bool:
+        if not _location_fits(self.location, self.source_ref):
+            return False
         try:
             return _sha256(self.location.extract(content)) == self.content_checksum
-        except ValueError:
+        except CompilerError:
             return False
 
     def citation(self) -> SourceVersion:
@@ -237,6 +320,13 @@ class TargetKind(StrEnum):
     RELATIONSHIP = "RELATIONSHIP"  # ProcessGraph edge id
 
 
+def _context_source(record: Any) -> ContextSourceRef:
+    try:
+        return ContextSourceRef(**dict(record))
+    except (TypeError, ValueError) as exc:
+        raise CompilerError(f"invalid ContextSourceRef record: {exc}") from exc
+
+
 @dataclass(frozen=True)
 class PlantTargetRef:
     """``(selected PROCESS_GRAPH source ref, ProcessGraph id)``; P1.3 preserves the ids."""
@@ -248,7 +338,7 @@ class PlantTargetRef:
     def __post_init__(self) -> None:
         if _source_ref(self.plant_context, "plant_context").kind != PROCESS_GRAPH_KIND:
             raise CompilerError("plant targets resolve against a PROCESS_GRAPH source")
-        object.__setattr__(self, "kind", TargetKind(self.kind))
+        object.__setattr__(self, "kind", _enum(TargetKind, self.kind, "target kind"))
         _text(self.target_id, "target_id")
 
     def __hash__(self) -> int:  # consistent with field equality
@@ -260,11 +350,11 @@ class PlantTargetRef:
                 "target_id": self.target_id}
 
     @classmethod
-    def from_record(cls, record: Mapping[str, Any]) -> "PlantTargetRef":
+    def from_record(cls, record: Any) -> "PlantTargetRef":
         if not isinstance(record, Mapping) or set(record) != {"plant_context", "kind",
                                                                "target_id"}:
             raise CompilerError("PlantTargetRef record must have exactly the v0 fields")
-        return cls(ContextSourceRef(**dict(record["plant_context"])), record["kind"],
+        return cls(_context_source(record["plant_context"]), record["kind"],
                    record["target_id"])
 
 
@@ -287,6 +377,10 @@ class PlantContextIndex:
                     not isinstance(item, str) or not item for item in values):
                 raise CompilerError(f"{name} must be a frozenset of ids")
 
+    def __hash__(self) -> int:
+        return hash((self.source_ref.content_checksum, self.entities, self.signals,
+                     self.relationships))
+
     @classmethod
     def from_process_graph(cls, source_ref: ContextSourceRef, graph: Any
                            ) -> "PlantContextIndex":
@@ -296,7 +390,7 @@ class PlantContextIndex:
 
     def _ids(self, kind: TargetKind) -> frozenset[str]:
         return {TargetKind.ENTITY: self.entities, TargetKind.SIGNAL: self.signals,
-                TargetKind.RELATIONSHIP: self.relationships}[TargetKind(kind)]
+                TargetKind.RELATIONSHIP: self.relationships}[kind]
 
     def contains(self, target: PlantTargetRef) -> bool:
         return (target.plant_context == self.source_ref
@@ -347,7 +441,7 @@ def route(kind: Any) -> Route:
     """The deterministic, versioned (``ROUTING_POLICY``) v0 routing decision."""
     try:
         return _ROUTES[ExtractionKind(kind)]
-    except ValueError:
+    except (TypeError, ValueError):
         raise CompilerError("unsupported extraction kind stays unclassified") from None
 
 
@@ -360,9 +454,10 @@ class Confidence:
     method: str
 
     def __post_init__(self) -> None:
-        if (type(self.score) not in (int, float) or not math.isfinite(self.score)
-                or not 0 <= self.score <= 1):
-            raise CompilerError("confidence score must be a finite number in [0, 1]")
+        score = _number(self.score, "confidence score")
+        if not 0 <= score <= 1:
+            raise CompilerError("confidence score must be in [0, 1]")
+        object.__setattr__(self, "score", score)
         _pattern(self.method, _VERSIONED, "confidence method")
 
     def record(self) -> dict[str, Any]:
@@ -371,19 +466,26 @@ class Confidence:
 
 @dataclass(frozen=True)
 class DerivedInput:
-    """A non-source influencing input (e.g. a recorded model call) and its visibility."""
+    """A non-source influencing input (e.g. a recorded model call, P1.2C) by exact ref.
+
+    ``content_checksum`` is the SHA-256 of the exact recorded artifact; staging must
+    resolve it, and an input that no resolver can produce blocks publication.
+    """
 
     ref: str
     role: str
     visibility: Visibility
+    content_checksum: str
 
     def __post_init__(self) -> None:
         _text(self.ref, "derived input ref")
         _text(self.role, "derived input role")
-        object.__setattr__(self, "visibility", Visibility(self.visibility))
+        object.__setattr__(self, "visibility", _visibility(self.visibility))
+        _pattern(self.content_checksum, _SHA256, "derived input content_checksum")
 
     def record(self) -> dict[str, Any]:
-        return {"ref": self.ref, "role": self.role, "visibility": self.visibility.value}
+        return {"ref": self.ref, "role": self.role, "visibility": self.visibility.value,
+                "content_checksum": self.content_checksum}
 
 
 @dataclass(frozen=True)
@@ -403,16 +505,16 @@ class DerivedAnnotation:
 
 @dataclass(frozen=True)
 class TypedValue:
+    """Numbers are normalized to float (see ``_number``); text values stay text."""
+
     name: str
-    value: int | float | str
+    value: float | str
     unit: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.name, "value name")
-        if isinstance(self.value, bool) or not isinstance(self.value, (int, float, str)):
-            raise CompilerError("typed value must be a number or text")
-        if isinstance(self.value, float) and not math.isfinite(self.value):
-            raise CompilerError("typed value must be finite")
+        if not isinstance(self.value, str):
+            object.__setattr__(self, "value", _number(self.value, "typed value"))
         _optional_text(self.unit, "unit")
 
     def record(self) -> dict[str, Any]:
@@ -441,6 +543,10 @@ class DerivationProvenance:
         _typed_tuple(self.derived_inputs, DerivedInput, "derived_inputs")
         if self.confidence is not None and not isinstance(self.confidence, Confidence):
             raise CompilerError("confidence must be a Confidence")
+
+    def __hash__(self) -> int:  # equal provenances share these fields
+        return hash((self.extraction_method, self.grounding_method, self.model,
+                     self.derived_inputs, self.confidence))
 
     def visibilities(self) -> tuple[Visibility, ...]:
         return (*(ref.visibility for ref in self.influencing_sources),
@@ -472,11 +578,22 @@ class CandidateRef:
                 "candidate_version": self.candidate_version}
 
     @classmethod
-    def from_record(cls, record: Mapping[str, Any]) -> "CandidateRef":
+    def from_record(cls, record: Any) -> "CandidateRef":
         if not isinstance(record, Mapping) or set(record) != {"candidate_id",
                                                                "candidate_version"}:
             raise CompilerError("CandidateRef record must have exactly the v0 fields")
         return cls(record["candidate_id"], record["candidate_version"])
+
+
+_CANDIDATE_RECORD_KEYS = frozenset({"candidate_type", "candidate_id", "session_id",
+                                    "content", "content_key", "version_extra", "provenance",
+                                    "candidate_version", "fragments", "visibility"})
+
+
+def _version_of(candidate_id: str, session_id: str, content_key: str,
+                provenance: Any, version_extra: Mapping[str, Any]) -> str:
+    return _digest({"content_key": content_key, "candidate_id": candidate_id,
+                    "session_id": session_id, "provenance": provenance, **version_extra})
 
 
 class _Candidate:
@@ -485,30 +602,39 @@ class _Candidate:
     extraction_kind: ExtractionKind
     provenance: DerivationProvenance
     scope_refs: tuple[PlantTargetRef, ...]
+    content_key: str
+    candidate_version: str
+    _TYPE = ""
 
     def _common(self, routes: frozenset[Route]) -> None:
         _pattern(self.candidate_id, _ID, "candidate_id")
         _text(self.session_id, "session_id")
-        try:
-            object.__setattr__(self, "extraction_kind", ExtractionKind(self.extraction_kind))
-        except ValueError:
-            raise CompilerError("unsupported extraction kind stays unclassified") from None
+        object.__setattr__(self, "extraction_kind", _enum(
+            ExtractionKind, self.extraction_kind, "extraction kind (unclassified)"))
         if route(self.extraction_kind) not in routes:
             raise CompilerError("extraction kind is routed to a different candidate type")
         if not isinstance(self.provenance, DerivationProvenance):
             raise CompilerError("provenance must be a DerivationProvenance")
         _typed_tuple(self.scope_refs, PlantTargetRef, "scope_refs")
 
-    def _identify(self, content: Mapping[str, Any], version_extra: Mapping[str, Any]) -> None:
+    def _identify(self) -> None:
         contexts = [target.plant_context for target in self.targets()]
         if any(context != contexts[0] for context in contexts):
             raise CompilerError("a candidate resolves against exactly one plant context")
-        key = json_digest(dict(content))
+        key = _digest(self._content())
         object.__setattr__(self, "content_key", key)
-        object.__setattr__(self, "candidate_version", json_digest({
-            "content_key": key, "candidate_id": self.candidate_id,
-            "session_id": self.session_id, "provenance": self.provenance.record(),
-            **version_extra}))
+        object.__setattr__(self, "candidate_version", _version_of(
+            self.candidate_id, self.session_id, key, self.provenance.record(),
+            self._version_extra()))
+
+    def __hash__(self) -> int:
+        return hash(self.candidate_version)
+
+    def _content(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _version_extra(self) -> dict[str, Any]:
+        return {}
 
     def fragments(self) -> tuple[SourceFragmentRef, ...]:
         raise NotImplementedError
@@ -518,7 +644,7 @@ class _Candidate:
 
     @property
     def ref(self) -> CandidateRef:
-        return CandidateRef(self.candidate_id, self.candidate_version)  # type: ignore[attr-defined]
+        return CandidateRef(self.candidate_id, self.candidate_version)
 
     @property
     def route(self) -> Route:
@@ -532,12 +658,22 @@ class _Candidate:
                                 *(item.plant_context.visibility for item in self.targets()),
                                 *self.provenance.visibilities())
 
+    def record(self) -> dict[str, Any]:
+        """The complete immutable candidate and derivation record (hash-recomputable)."""
+        return {"candidate_type": self._TYPE, "candidate_id": self.candidate_id,
+                "session_id": self.session_id, "content": self._content(),
+                "content_key": self.content_key, "version_extra": self._version_extra(),
+                "provenance": self.provenance.record(),
+                "candidate_version": self.candidate_version,
+                "fragments": [item.record() for item in self.fragments()],
+                "visibility": self.visibility.value}
+
 
 def _fragment_ids(fragments: Iterable[SourceFragmentRef]) -> list[str]:
     return [item.fragment_id for item in fragments]
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, eq=True)
 class CandidateBinding(_Candidate):
     """A proposed mapping from a source mention to an existing plant identity."""
 
@@ -556,6 +692,8 @@ class CandidateBinding(_Candidate):
     conflicting_fragments: tuple[SourceFragmentRef, ...] = ()
     content_key: str = field(init=False)
     candidate_version: str = field(init=False)
+    _TYPE = "BINDING"
+    __hash__ = _Candidate.__hash__
 
     def __post_init__(self) -> None:
         self._common(frozenset({Route.BINDING}))
@@ -563,7 +701,8 @@ class CandidateBinding(_Candidate):
             raise CompilerError("mention_fragment must be a SourceFragmentRef")
         _text(self.mention_text, "mention_text")
         _optional_text(self.normalized_mention, "normalized_mention")
-        object.__setattr__(self, "target_kind", TargetKind(self.target_kind))
+        object.__setattr__(self, "target_kind", _enum(TargetKind, self.target_kind,
+                                                      "target kind"))
         _typed_tuple(self.alternative_targets, PlantTargetRef, "alternative_targets")
         _typed_tuple(self.supporting_fragments, SourceFragmentRef, "supporting_fragments")
         _typed_tuple(self.conflicting_fragments, SourceFragmentRef, "conflicting_fragments")
@@ -574,17 +713,22 @@ class CandidateBinding(_Candidate):
         if len(set((*proposed, *self.alternative_targets))) != len(
                 proposed) + len(self.alternative_targets):
             raise CompilerError("alternative targets must be distinct from the proposal")
-        self._identify(
-            {"route": Route.BINDING.value, "extraction_kind": self.extraction_kind.value,
-             "mention_fragment": self.mention_fragment.fragment_id,
-             "supporting_fragments": _fragment_ids(self.supporting_fragments),
-             "conflicting_fragments": _fragment_ids(self.conflicting_fragments),
-             "mention_text": self.mention_text, "normalized_mention": self.normalized_mention,
-             "target_kind": self.target_kind.value,
-             "proposed_target": None if self.proposed_target is None
-             else self.proposed_target.record(),
-             "scope_refs": [item.record() for item in self.scope_refs]},
-            {"alternative_targets": [item.record() for item in self.alternative_targets]})
+        self._identify()
+
+    def _content(self) -> dict[str, Any]:
+        return {"route": Route.BINDING.value, "extraction_kind": self.extraction_kind.value,
+                "mention_fragment": self.mention_fragment.fragment_id,
+                "supporting_fragments": _fragment_ids(self.supporting_fragments),
+                "conflicting_fragments": _fragment_ids(self.conflicting_fragments),
+                "mention_text": self.mention_text,
+                "normalized_mention": self.normalized_mention,
+                "target_kind": self.target_kind.value,
+                "proposed_target": None if self.proposed_target is None
+                else self.proposed_target.record(),
+                "scope_refs": [item.record() for item in self.scope_refs]}
+
+    def _version_extra(self) -> dict[str, Any]:
+        return {"alternative_targets": [item.record() for item in self.alternative_targets]}
 
     def fragments(self) -> tuple[SourceFragmentRef, ...]:
         return (self.mention_fragment, *self.supporting_fragments, *self.conflicting_fragments)
@@ -594,7 +738,7 @@ class CandidateBinding(_Candidate):
         return (*proposed, *self.alternative_targets, *self.scope_refs)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, eq=True)
 class CandidateKnowledge(_Candidate):
     """A proposed engineering statement; RULE-routed items carry an inert candidate Rule."""
 
@@ -612,6 +756,8 @@ class CandidateKnowledge(_Candidate):
     conflicting_candidate_ids: tuple[str, ...] = ()
     content_key: str = field(init=False)
     candidate_version: str = field(init=False)
+    _TYPE = "KNOWLEDGE"
+    __hash__ = _Candidate.__hash__
 
     def __post_init__(self) -> None:
         self._common(frozenset({Route.RULE, Route.KNOWLEDGE}))
@@ -639,17 +785,19 @@ class CandidateKnowledge(_Candidate):
                 raise CompilerError("RULE-routed claims live in the Rule carrier only")
         elif self.rule is not None:
             raise CompilerError("only RULE-routed items carry a Rule")
-        self._identify(
-            {"route": self.route.value, "extraction_kind": self.extraction_kind.value,
-             "source_fragments": _fragment_ids(self.source_fragments),
-             "conflicting_fragments": _fragment_ids(self.conflicting_fragments),
-             "conflicting_candidate_ids": list(self.conflicting_candidate_ids),
-             "scope_refs": [item.record() for item in self.scope_refs],
-             "rule": None if self.rule is None else rule_record(self.rule),
-             "normalized_claim": None if self.normalized_claim is None
-             else self.normalized_claim.record(),
-             "conditions": self.conditions,
-             "values": [item.record() for item in self.values]}, {})
+        self._identify()
+
+    def _content(self) -> dict[str, Any]:
+        return {"route": self.route.value, "extraction_kind": self.extraction_kind.value,
+                "source_fragments": _fragment_ids(self.source_fragments),
+                "conflicting_fragments": _fragment_ids(self.conflicting_fragments),
+                "conflicting_candidate_ids": list(self.conflicting_candidate_ids),
+                "scope_refs": [item.record() for item in self.scope_refs],
+                "rule": None if self.rule is None else rule_record(self.rule),
+                "normalized_claim": None if self.normalized_claim is None
+                else self.normalized_claim.record(),
+                "conditions": self.conditions,
+                "values": [item.record() for item in self.values]}
 
     def fragments(self) -> tuple[SourceFragmentRef, ...]:
         return (*self.source_fragments, *self.conflicting_fragments)
@@ -659,6 +807,11 @@ class CandidateKnowledge(_Candidate):
 
 
 Candidate = CandidateBinding | CandidateKnowledge
+
+
+def _conflicting_ids(candidate: Candidate) -> tuple[str, ...]:
+    return candidate.conflicting_candidate_ids if isinstance(candidate,
+                                                             CandidateKnowledge) else ()
 
 
 # -- compile session --------------------------------------------------------------------
@@ -688,29 +841,62 @@ class CompilerPolicies:
 
 @dataclass(frozen=True, eq=False)
 class CompileSession:
-    """Frozen inputs of one compilation; build it with ``CompileSession.prepare``.
+    """Frozen inputs of one compilation; ``prepare`` registers the sources first.
 
-    The session owns its CanonicalContextRegistry instance over exactly the attested
-    sources it reads; it never reuses or mutates a run's READY registry.
+    Every invariant is checked here, so direct construction cannot skip them. The
+    session reads its own frozen CanonicalContextRegistry over exactly the attested
+    inputs; it never reuses or mutates a run's READY registry.
     """
 
     registry: CanonicalContextRegistry
-    inventory: tuple[ContextSourceRef, ...]
-    plant: PlantContextIndex
-    input_rule_set_ref: ContextSourceRef
-    input_rule_set: RuleSetRevision
+    process_graph_source_id: str
+    input_rule_set_source_id: str
+    plant_graph_loader: Callable[[Any], Any]
     policies: CompilerPolicies
-    visibility: Visibility
+    visibility: Visibility = Visibility.AGENT
+    inventory: tuple[ContextSourceRef, ...] = field(init=False)
+    plant: PlantContextIndex = field(init=False)
+    input_rule_set_ref: ContextSourceRef = field(init=False)
+    input_rule_set: RuleSetRevision = field(init=False)
     session_id: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if not self.registry.frozen:
+        if not isinstance(self.registry, CanonicalContextRegistry) or not self.registry.frozen:
             raise CompilerError("a compile session reads a frozen source inventory")
-        object.__setattr__(self, "session_id", "cs-" + json_digest({
-            "inventory": [ref.record() for ref in self.inventory],
-            "plant_context": self.plant.source_ref.record(),
-            "input_rule_set": self.input_rule_set_ref.record(),
-            "policies": self.policies.record(), "visibility": self.visibility.value}))
+        if not isinstance(self.policies, CompilerPolicies):
+            raise CompilerError("policies must be CompilerPolicies")
+        if not callable(self.plant_graph_loader):
+            raise CompilerError("a ProcessGraph loader is required")
+        visibility = _visibility(self.visibility)
+        object.__setattr__(self, "visibility", visibility)
+        inventory = self.registry.inventory(ProjectionScope.EVALUATOR)
+        if any(most_restrictive(ref.visibility, visibility) != visibility for ref in inventory):
+            raise CompilerError("a compilation uses only inputs visible at its visibility")
+        graphs = [ref for ref in inventory if ref.kind == PROCESS_GRAPH_KIND]
+        if (len(graphs) != 1 or graphs[0].source_id != self.process_graph_source_id
+                or graphs[0].visibility != Visibility.AGENT):
+            raise CompilerError("select exactly one AGENT-visible PROCESS_GRAPH source")
+        rule_sets = [ref for ref in inventory if ref.kind == RULE_SET_KIND]
+        if len(rule_sets) != 1 or rule_sets[0].source_id != self.input_rule_set_source_id:
+            raise CompilerError("select exactly one input ENGINEERING_RULE_SET source")
+        try:
+            input_rule_set = load_rule_set_source(self.registry, rule_sets[0].source_id,
+                                                  ProjectionScope.EVALUATOR)
+            graph_json = _json(self.registry.resolve(graphs[0].source_id,
+                                                     ProjectionScope.EVALUATOR).content,
+                               "PROCESS_GRAPH source")
+        except (RuleSetError, ContextSourceError) as exc:
+            raise CompilerError(f"compile input failed to load: {exc}") from exc
+        plant = PlantContextIndex.from_process_graph(graphs[0],
+                                                     self.plant_graph_loader(graph_json))
+        object.__setattr__(self, "inventory", inventory)
+        object.__setattr__(self, "plant", plant)
+        object.__setattr__(self, "input_rule_set_ref", rule_sets[0])
+        object.__setattr__(self, "input_rule_set", input_rule_set)
+        object.__setattr__(self, "session_id", "cs-" + _digest({
+            "inventory": [ref.record() for ref in inventory],
+            "plant_context": graphs[0].record(), "input_rule_set": rule_sets[0].record(),
+            "policies": self.policies.record(), "visibility": visibility.value}))
 
     @classmethod
     def prepare(cls, revisions: Mapping[str, str],
@@ -719,34 +905,15 @@ class CompileSession:
                 input_rule_set_source_id: str, plant_graph_loader: Callable[[Any], Any],
                 policies: CompilerPolicies,
                 visibility: Visibility = Visibility.AGENT) -> "CompileSession":
-        visibility = Visibility(visibility)
-        if not isinstance(policies, CompilerPolicies):
-            raise CompilerError("policies must be CompilerPolicies")
         registry = CanonicalContextRegistry(revisions, materializers)
         try:
             for source in sources:
                 registry.register(source)
         except ContextSourceError as exc:
             raise CompilerError(f"compile input is not an exact attested source: {exc}") from exc
-        inventory = registry.freeze()
-        if any(most_restrictive(ref.visibility, visibility) != visibility for ref in inventory):
-            raise CompilerError("a compilation uses only inputs visible at its visibility")
-        graphs = [ref for ref in inventory if ref.kind == PROCESS_GRAPH_KIND]
-        if (len(graphs) != 1 or graphs[0].source_id != process_graph_source_id
-                or graphs[0].visibility != Visibility.AGENT):
-            raise CompilerError("select exactly one AGENT-visible PROCESS_GRAPH source")
-        rule_sets = [ref for ref in inventory if ref.kind == RULE_SET_KIND]
-        if len(rule_sets) != 1 or rule_sets[0].source_id != input_rule_set_source_id:
-            raise CompilerError("select exactly one input ENGINEERING_RULE_SET source")
-        try:
-            input_rule_set = load_rule_set_source(registry, input_rule_set_source_id,
-                                                  ProjectionScope.EVALUATOR)
-        except RuleSetError as exc:
-            raise CompilerError(f"input rule set is invalid: {exc}") from exc
-        graph = plant_graph_loader(registry.resolve(process_graph_source_id,
-                                                    ProjectionScope.EVALUATOR).json())
-        return cls(registry, inventory, PlantContextIndex.from_process_graph(graphs[0], graph),
-                   rule_sets[0], input_rule_set, policies, visibility)
+        registry.freeze()
+        return cls(registry, process_graph_source_id, input_rule_set_source_id,
+                   plant_graph_loader, policies, visibility)
 
     def source_content(self, ref: ContextSourceRef) -> bytes | None:
         """Re-attested bytes of an exact inventory source; None for anything else."""
@@ -773,6 +940,7 @@ class FindingCode(StrEnum):
     VISIBILITY_WIDENED = "VISIBILITY_WIDENED"
     RULE_INVALID = "RULE_INVALID"
     RULE_VERSION_EXISTS = "RULE_VERSION_EXISTS"
+    CONFLICT_UNRESOLVED = "CONFLICT_UNRESOLVED"
     AMBIGUOUS_TARGET = "AMBIGUOUS_TARGET"    # non-blocking review-routing finding
     CONFLICT_DECLARED = "CONFLICT_DECLARED"  # non-blocking; conflicts stay explicit
 
@@ -786,7 +954,7 @@ class ValidationFinding:
     detail: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "code", FindingCode(self.code))
+        object.__setattr__(self, "code", _enum(FindingCode, self.code, "finding code"))
         _text(self.detail, "finding detail")
 
     @property
@@ -809,7 +977,11 @@ class ValidationResult:
 
     def __post_init__(self) -> None:
         _typed_tuple(self.findings, ValidationFinding, "findings")
-        object.__setattr__(self, "result_id", "vr-" + json_digest(self._body()))
+        _typed_tuple(self.selected_scope_refs, PlantTargetRef, "selected_scope_refs")
+        object.__setattr__(self, "result_id", "vr-" + _digest(self._body()))
+
+    def __hash__(self) -> int:
+        return hash(self.result_id)
 
     def _body(self) -> dict[str, Any]:
         return {"candidate_ref": self.candidate_ref.record(), "session_id": self.session_id,
@@ -828,8 +1000,12 @@ class ValidationResult:
 
 
 def validate_candidate(session: CompileSession, candidate: Candidate,
-                       review: "ReviewRecord | None" = None) -> ValidationResult:
-    """Deterministic validators; a REMAP review is revalidated against its selection."""
+                       review: "ReviewRecord | None" = None, *,
+                       known_candidate_ids: frozenset[str] | None = None) -> ValidationResult:
+    """Deterministic validators; a REMAP review is revalidated against its selection.
+
+    ``known_candidate_ids`` (given at staging) resolves declared conflicting candidates.
+    """
     findings: list[ValidationFinding] = []
 
     def add(code: FindingCode, detail: str) -> None:
@@ -839,24 +1015,30 @@ def validate_candidate(session: CompileSession, candidate: Candidate,
         add(FindingCode.SESSION_MISMATCH, "candidate was compiled in another session")
     contents: dict[str, bytes | None] = {}
     for fragment in candidate.fragments():
-        key = fragment.source_ref.source_id
+        # Cache by the complete source identity: a same-id ref with another revision,
+        # path or checksum must be attested on its own and fail.
+        key = json_digest(fragment.source_ref.record())
         if key not in contents:
             contents[key] = session.source_content(fragment.source_ref)
-        if contents[key] is None:
+        content = contents[key]
+        if content is None:
             add(FindingCode.SOURCE_UNRESOLVED, f"{fragment.fragment_id}: source is not an "
                 "exact attested session source")
-        elif not fragment.verify(contents[key]):
+        elif not fragment.verify(content):
             add(FindingCode.FRAGMENT_INVALID, f"{fragment.fragment_id}: location/checksum")
     for ref in candidate.provenance.influencing_sources:
         if session.source_content(ref) is None:
             add(FindingCode.INFLUENCE_UNKNOWN, f"{ref.source_id}: not a session source")
     remap = review is not None and review.decision is ReviewDecision.REMAP
-    scope = review.selected_scope_refs if remap else candidate.scope_refs
+    scope = (review.selected_scope_refs or ()) if review is not None and remap \
+        else candidate.scope_refs
     target = None
     if isinstance(candidate, CandidateBinding):
-        target = review.selected_target if remap else candidate.proposed_target
-        for label, item in (("target", target),
-                            *(("alternative", alt) for alt in candidate.alternative_targets)):
+        target = review.selected_target if review is not None and remap \
+            else candidate.proposed_target
+        checks: list[tuple[str, PlantTargetRef | None]] = [("target", target)]
+        checks += [("alternative", alt) for alt in candidate.alternative_targets]
+        for label, item in checks:
             if item is None:
                 add(FindingCode.TARGET_UNRESOLVED, "mention has no existing plant target")
             elif item.plant_context != session.plant.source_ref:
@@ -883,20 +1065,23 @@ def validate_candidate(session: CompileSession, candidate: Candidate,
     if most_restrictive(session.visibility, *taint) != session.visibility:
         add(FindingCode.VISIBILITY_WIDENED, "an influencing input is more restrictive than "
             "the compilation visibility")
-    if isinstance(candidate, CandidateKnowledge):
-        if candidate.rule is not None:
-            citations = {item.citation() for item in candidate.source_fragments}
-            if candidate.rule.extraction.source not in citations:
-                add(FindingCode.RULE_INVALID, "rule extraction must cite a source fragment")
-            try:
-                session.input_rule_set.registry.get_rule(candidate.rule.ref)
-                add(FindingCode.RULE_VERSION_EXISTS, "an existing rule version is never edited")
-            except KeyError:
-                pass
-        if candidate.conflicting_fragments or candidate.conflicting_candidate_ids:
-            add(FindingCode.CONFLICT_DECLARED, "conflicting sources/candidates are recorded")
-    elif candidate.conflicting_fragments:
-        add(FindingCode.CONFLICT_DECLARED, "conflicting source fragments are recorded")
+    if isinstance(candidate, CandidateKnowledge) and candidate.rule is not None:
+        citations = {item.citation() for item in candidate.source_fragments}
+        if candidate.rule.extraction is None or candidate.rule.extraction.source not in citations:
+            add(FindingCode.RULE_INVALID, "rule extraction must cite a source fragment")
+        try:
+            session.input_rule_set.registry.get_rule(candidate.rule.ref)
+            add(FindingCode.RULE_VERSION_EXISTS, "an existing rule version is never edited")
+        except KeyError:
+            pass
+    conflicting_ids = _conflicting_ids(candidate)
+    if known_candidate_ids is not None:
+        for conflict_id in conflicting_ids:
+            if conflict_id not in known_candidate_ids:
+                add(FindingCode.CONFLICT_UNRESOLVED,
+                    f"conflicting candidate {conflict_id} unknown")
+    if candidate.conflicting_fragments or conflicting_ids:
+        add(FindingCode.CONFLICT_DECLARED, "conflicting sources/candidates are recorded")
     return ValidationResult(candidate_ref=candidate.ref, session_id=session.session_id,
                             validation_policy=session.policies.validation_policy,
                             selected_target=target, selected_scope_refs=tuple(scope),
@@ -924,7 +1109,7 @@ class ReviewPrincipal:
     identifier: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", PrincipalKind(self.kind))
+        object.__setattr__(self, "kind", _enum(PrincipalKind, self.kind, "principal kind"))
         if self.kind is PrincipalKind.HUMAN:
             _text(self.identifier, "reviewer_id")
         else:
@@ -933,6 +1118,10 @@ class ReviewPrincipal:
     @classmethod
     def human(cls, reviewer_id: str) -> "ReviewPrincipal":
         return cls(PrincipalKind.HUMAN, reviewer_id)
+
+    def allowed_by(self, acceptance_policies: Iterable[str]) -> bool:
+        return (self.kind is PrincipalKind.HUMAN
+                or self.identifier in set(acceptance_policies))
 
     def record(self) -> dict[str, str]:
         return {"kind": self.kind.value, "identifier": self.identifier}
@@ -969,19 +1158,19 @@ class ReviewRecord:
         _pattern(self.review_id, _ID, "review_id")
         if not isinstance(self.candidate_ref, CandidateRef):
             raise CompilerError("candidate_ref must be a CandidateRef")
-        object.__setattr__(self, "decision", ReviewDecision(self.decision))
+        object.__setattr__(self, "decision", _enum(ReviewDecision, self.decision, "decision"))
         if not isinstance(self.principal, ReviewPrincipal):
             raise CompilerError("principal must be a ReviewPrincipal")
-        for name in ("reason", "reviewed_at", "review_policy", "validation_policy",
-                     "session_id"):
+        for name in ("reason", "review_policy", "validation_policy", "session_id"):
             _text(getattr(self, name), name)
+        _utc(self.reviewed_at, "reviewed_at")
         _source_ref(self.plant_context, "plant_context")
         if type(self.review_log_position) is not int or self.review_log_position < 1:
             raise CompilerError("review_log_position is a positive integer")
         _typed_tuple(self.supersedes, str, "supersedes")
         if len(set(self.supersedes)) != len(self.supersedes) or self.review_id in self.supersedes:
             raise CompilerError("supersedes names distinct earlier records")
-        object.__setattr__(self, "visibility", Visibility(self.visibility))
+        object.__setattr__(self, "visibility", _visibility(self.visibility))
         if self.decision is ReviewDecision.REMAP:
             _typed_tuple(self.selected_scope_refs, PlantTargetRef, "selected_scope_refs")
             if self.selected_target is not None and not isinstance(self.selected_target,
@@ -989,6 +1178,9 @@ class ReviewRecord:
                 raise CompilerError("selected_target must be a PlantTargetRef")
         elif self.selected_target is not None or self.selected_scope_refs is not None:
             raise CompilerError("only REMAP stores a selected binding")
+
+    def __hash__(self) -> int:
+        return hash((self.review_id, self.review_log_position, self.candidate_ref))
 
     def record(self) -> dict[str, Any]:
         return {"review_id": self.review_id, "candidate_ref": self.candidate_ref.record(),
@@ -1006,7 +1198,7 @@ class ReviewRecord:
                 "visibility": self.visibility.value}
 
     @classmethod
-    def from_record(cls, record: Mapping[str, Any]) -> "ReviewRecord":
+    def from_record(cls, record: Any) -> "ReviewRecord":
         if not isinstance(record, Mapping) or set(record) != _REVIEW_FIELDS:
             raise CompilerError("ReviewRecord record must have exactly the v0 fields")
         principal = record["principal"]
@@ -1024,7 +1216,7 @@ class ReviewRecord:
             reason=record["reason"], reviewed_at=record["reviewed_at"],
             review_policy=record["review_policy"],
             validation_policy=record["validation_policy"], session_id=record["session_id"],
-            plant_context=ContextSourceRef(**dict(record["plant_context"])),
+            plant_context=_context_source(record["plant_context"]),
             review_log_position=record["review_log_position"],
             supersedes=tuple(record["supersedes"]),
             selected_target=None if record["selected_target"] is None
@@ -1077,7 +1269,7 @@ def effective_review(records: Iterable[ReviewRecord], candidate_ref: CandidateRe
                            record, ids)
 
 
-# -- publication --------------------------------------------------------------------------
+# -- staged publication -------------------------------------------------------------------
 @dataclass(frozen=True)
 class ArtifactPathRef:
     """A same-commit reference: repository path plus content checksum, never HEAD/latest."""
@@ -1103,11 +1295,11 @@ class ArtifactPathRef:
 
     @classmethod
     def of(cls, path: str, data: bytes) -> "ArtifactPathRef":
-        return cls(path, content_checksum(data, CANONICAL_JSON_SHA256))
+        return cls(path, _sha256(data))
 
 
 def head_path(lineage_id: str) -> str:
-    return f"{ENGINEERING_CONTEXT_ROOT}/{_pattern(lineage_id, _ID, 'lineage_id')}/HEAD.json"
+    return f"{ENGINEERING_CONTEXT_ROOT}/{_lineage(lineage_id)}/HEAD.json"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1122,17 +1314,20 @@ class PublicationRequest:
     parent_revision: ContextSourceRef | None = None
 
     def __post_init__(self) -> None:
-        _pattern(self.lineage_id, _ID, "lineage_id")
+        _lineage(self.lineage_id)
         _typed_tuple(self.candidate_refs, CandidateRef, "candidate_refs")
         if len(set(self.candidate_refs)) != len(self.candidate_refs):
             raise CompilerError("candidate_refs must be distinct")
         _text(self.published_by, "published_by")
-        _text(self.published_at, "published_at")
+        _utc(self.published_at, "published_at")
         if self.parent_revision is not None:
             parent = _source_ref(self.parent_revision, "parent_revision")
             if (parent.kind != ENGINEERING_CONTEXT_REVISION_KIND
                     or parent.checksum_method != CANONICAL_JSON_SHA256):
                 raise CompilerError("parent_revision is a committed revision ContextSourceRef")
+
+    def __hash__(self) -> int:
+        return hash((self.lineage_id, self.candidate_refs, self.published_at))
 
     @property
     def expected_head(self) -> ArtifactPathRef | None:
@@ -1170,100 +1365,59 @@ class Exclusion:
 
 
 @dataclass(frozen=True)
-class PublicationBundle:
-    """Everything one publication commit adds, plus the head compare-and-set."""
+class StagedPublication:
+    """A validated publication bundle. It is NOT canonical and advances no head.
+
+    Committing it (one git commit that adds ``files`` and moves ``head_path`` from
+    ``expected_head`` to ``revision`` by compare-and-set) is the P1.2D repository
+    transaction. Until then nothing here is consumer-visible trusted context.
+    """
 
     lineage_id: str
     expected_head: ArtifactPathRef | None
-    new_head: ArtifactPathRef
-    files: tuple[tuple[str, bytes], ...]
-
-    @property
-    def head_path(self) -> str:
-        return head_path(self.lineage_id)
-
-    def head_record(self) -> bytes:
-        return canonical_json({"schema_version": HEAD_SCHEMA_VERSION,
-                               "lineage_id": self.lineage_id,
-                               "revision": self.new_head.record()})
-
-
-@dataclass(frozen=True)
-class PublishedRevision:
     revision: ArtifactPathRef
     review_log: ArtifactPathRef
+    candidates: ArtifactPathRef
     published_rule_set: ArtifactPathRef | None
     review_log_position: int
     document: Mapping[str, Any]
     exclusions: tuple[Exclusion, ...]
     files: tuple[tuple[str, bytes], ...]
+    head_path: str = field(init=False)
+    head_record: bytes = field(init=False)
 
+    canonical = False  # staging only; see the class docstring
 
-class PublicationTarget(Protocol):
-    """Repository-backed publication store with a per-lineage head record."""
-
-    def head(self, lineage_id: str) -> ArtifactPathRef | None:
-        ...
-
-    def commit(self, bundle: PublicationBundle) -> None:
-        """Atomically add the files and advance the head iff it equals expected_head."""
-        ...
-
-
-class DirectoryPublicationTarget:
-    """A repository working tree: artifacts are created once, then the head moves by CAS.
-
-    Creating the git commit from these files is the operator's step (P1.2D). A failed
-    commit removes the files it created and leaves the head unchanged.
-    """
-
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).resolve()
-        self._lock = threading.Lock()
-
-    def _path(self, relative: str) -> Path:
-        target = (self.root / checked_relative_path(relative)).resolve()
-        if not target.is_relative_to(self.root):
-            raise PublicationError("artifact path escapes the repository root")
-        return target
-
-    def head(self, lineage_id: str) -> ArtifactPathRef | None:
-        path = self._path(head_path(lineage_id))
-        if not path.exists():
-            return None
-        record = json.loads(path.read_bytes())
-        if (not isinstance(record, Mapping) or record.get("schema_version") != HEAD_SCHEMA_VERSION
-                or record.get("lineage_id") != lineage_id):
-            raise PublicationError("invalid lineage head record")
-        return ArtifactPathRef.from_record(record.get("revision"))
-
-    def commit(self, bundle: PublicationBundle) -> None:
-        with self._lock:
-            if self.head(bundle.lineage_id) != bundle.expected_head:
-                raise StaleHead("lineage head moved; rebuild and review against the new parent")
-            created: list[Path] = []
+    def __post_init__(self) -> None:
+        lineage = _lineage(self.lineage_id)
+        allowed = (f"{ENGINEERING_CONTEXT_ROOT}/{lineage}/", f"{RULE_SET_ROOT}/")
+        paths = [path for path, _ in self.files]
+        if len(set(paths)) != len(paths):
+            raise PublicationError("bundle paths must be distinct")
+        files = dict(self.files)
+        for path, data in self.files:
             try:
-                for relative, data in bundle.files:
-                    path = self._path(relative)
-                    if path.exists():
-                        if path.read_bytes() != data:
-                            raise PublicationError(f"{relative} exists with other content")
-                        continue
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    with path.open("xb") as stream:
-                        created.append(path)
-                        stream.write(data)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                head = self._path(bundle.head_path)
-                head.parent.mkdir(parents=True, exist_ok=True)
-                staged = head.with_name(head.name + ".staged")
-                staged.write_bytes(bundle.head_record())
-                os.replace(staged, head)
-            except BaseException:
-                for path in created:
-                    path.unlink(missing_ok=True)
-                raise
+                checked_relative_path(path)
+            except ValueError as exc:
+                raise PublicationError(str(exc)) from exc
+            if not path.startswith(allowed) or not isinstance(data, bytes):
+                raise PublicationError(f"{path} is outside the publication roots")
+        head = head_path(lineage)
+        if head in files:
+            raise PublicationError("the head record is not a bundle artifact")
+        for ref in (self.revision, self.review_log, self.candidates, self.published_rule_set):
+            if ref is not None and (ref.path not in files
+                                    or _sha256(files[ref.path]) != ref.content_checksum):
+                raise PublicationError(f"{ref.path} is missing or its checksum differs")
+        object.__setattr__(self, "head_path", head)
+        object.__setattr__(self, "head_record", canonical_json({
+            "schema_version": HEAD_SCHEMA_VERSION, "lineage_id": lineage,
+            "expected_parent": None if self.expected_head is None
+            else self.expected_head.record(),
+            "revision": self.revision.record()}))
+
+    def __hash__(self) -> int:
+        return hash(self.revision)
 
 
 @dataclass(frozen=True)
@@ -1287,34 +1441,42 @@ def _scope_records(scope: Iterable[PlantTargetRef]) -> list[dict[str, Any]]:
 
 
 def _traced(item: _Approved) -> dict[str, Any]:
-    candidate, provenance = item.candidate, item.candidate.provenance
+    candidate = item.candidate
     return {"candidate_ref": candidate.ref.record(), "content_key": candidate.content_key,
             "extraction_kind": candidate.extraction_kind.value, "route": candidate.route.value,
             "decision": item.review.decision.value, "review_id": item.review.review_id,
             "scope_refs": _scope_records(item.scope_refs),
+            "original_scope_refs": _scope_records(candidate.scope_refs),
             "fragments": [fragment.record() for fragment in candidate.fragments()],
-            "extraction_method": provenance.extraction_method,
-            "grounding_method": provenance.grounding_method, "model": provenance.model,
-            "confidence": None if provenance.confidence is None
-            else provenance.confidence.record(),
+            "provenance": candidate.provenance.record(),
             "validation": item.validation.record()}
 
 
+def _by_ref(items: Iterable[Any], ref: Callable[[Any], CandidateRef]) -> list[Any]:
+    return sorted(items, key=lambda item: ref(item))
+
+
 class CompilerWorkspace:
-    """Append-only, non-canonical compiler store (spec §Compiler workspace).
+    """Append-only, non-canonical compiler store bound to one visibility.
 
     In memory in P1.2A. It is not a ContextSourceRef kind and is never registered in a
     CanonicalContextRegistry, so consumers cannot resolve it. Candidate versions and
-    ReviewRecords are immutable and the review log is append-only. One workspace lock
-    serializes review appends and publication, from reading the log tail until the
-    publication commit completes. These methods are Application API operations only.
+    ReviewRecords are immutable and the review log is append-only. Every session,
+    candidate and review must be visible at the workspace visibility, so a hidden
+    record never moves the log tail that a less restrictive revision pins (use a
+    separate workspace per visibility). One lock serializes review appends and
+    staging. These methods are Application API operations only.
     """
 
-    def __init__(self, workspace_id: str) -> None:
+    def __init__(self, workspace_id: str, visibility: Visibility = Visibility.AGENT) -> None:
         self.workspace_id = _pattern(workspace_id, _ID, "workspace_id")
-        self._lock = threading.RLock()
+        self.visibility = _visibility(visibility)
+        self._lock = threading.Lock()
         self._entries: dict[CandidateRef, _Entry] = {}
         self._reviews: list[ReviewRecord] = []
+
+    def _visible(self, visibility: Visibility) -> bool:
+        return most_restrictive(visibility, self.visibility) == self.visibility
 
     # -- candidates --------------------------------------------------------------------
     def add_candidate(self, session: CompileSession, candidate: Candidate) -> ValidationResult:
@@ -1322,6 +1484,10 @@ class CompilerWorkspace:
             raise TypeError("CompileSession required")
         if not isinstance(candidate, (CandidateBinding, CandidateKnowledge)):
             raise TypeError("CandidateBinding or CandidateKnowledge required")
+        if session.visibility != self.visibility:
+            raise WorkspaceAppendError("a workspace holds sessions of its own visibility only")
+        if not self._visible(candidate.visibility):
+            raise WorkspaceAppendError("candidate is more restrictive than the workspace")
         with self._lock:
             if candidate.session_id != session.session_id:
                 raise WorkspaceAppendError("candidate belongs to another compile session")
@@ -1364,7 +1530,10 @@ class CompilerWorkspace:
                       selected_target: PlantTargetRef | None = None,
                       selected_scope_refs: Sequence[PlantTargetRef] | None = None,
                       visibility: Visibility = Visibility.AGENT) -> ReviewRecord:
-        decision = ReviewDecision(decision)
+        decision = _enum(ReviewDecision, decision, "decision")
+        if not self._visible(_visibility(visibility)):
+            raise WorkspaceAppendError("review metadata is more restrictive than the "
+                                       "workspace; use a workspace of that visibility")
         with self._lock:
             entry = self._entries.get(candidate_ref)
             if entry is None:
@@ -1372,12 +1541,11 @@ class CompilerWorkspace:
             session, candidate = entry.session, entry.candidate
             if not isinstance(principal, ReviewPrincipal):
                 raise WorkspaceAppendError("an allowed decision principal is required")
-            if (principal.kind is PrincipalKind.DETERMINISTIC_POLICY
-                    and principal.identifier not in session.policies.acceptance_policies):
+            if not principal.allowed_by(session.policies.acceptance_policies):
                 raise WorkspaceAppendError("deterministic acceptance needs a registered policy")
-            if any(item.review_id == review_id for item in self._reviews):
-                raise WorkspaceAppendError("review ids are unique in the append-only log")
             earlier = {item.review_id: item for item in self._reviews}
+            if review_id in earlier:
+                raise WorkspaceAppendError("review ids are unique in the append-only log")
             for review in supersedes:
                 if review not in earlier or earlier[review].candidate_ref != candidate_ref:
                     raise WorkspaceAppendError("supersedes names only earlier records of the "
@@ -1422,40 +1590,55 @@ class CompilerWorkspace:
                       position: int | None = None) -> ReviewStatus:
         return self.effective_review(candidate_ref, position=position).status
 
-    # -- publication ---------------------------------------------------------------------
-    def publish(self, session: CompileSession, request: PublicationRequest,
-                target: PublicationTarget) -> PublishedRevision:
-        """Publish the complete approved set; pinned to the review-log tail under lock."""
+    # -- staged publication ----------------------------------------------------------------
+    def stage_publication(self, session: CompileSession, request: PublicationRequest, *,
+                          derived_input_resolver: Callable[[DerivedInput], bytes] | None = None
+                          ) -> StagedPublication:
+        """Build and fully validate the complete approved set, pinned to the log tail.
+
+        The result is staging only (``StagedPublication``); no head moves. Every
+        considered candidate's derived inputs must resolve to their exact recorded
+        bytes through ``derived_input_resolver``.
+        """
         if not isinstance(session, CompileSession) or not isinstance(request,
                                                                      PublicationRequest):
             raise TypeError("CompileSession and PublicationRequest required")
+        if session.visibility != self.visibility:
+            raise PublicationError("stage from a session of the workspace's visibility")
         with self._lock:
             position = len(self._reviews)
             records = tuple(self._reviews)
-            if target.head(request.lineage_id) != request.expected_head:
-                raise StaleHead("lineage head moved; rebuild and review against the new parent")
             self._check_dependency_closure(session)
-            approved: list[_Approved] = []
-            exclusions: list[Exclusion] = []
-            for ref in request.candidate_refs:
+            known_ids = frozenset(ref.candidate_id for ref in self._entries)
+            entries: list[_Entry] = []
+            for ref in sorted(request.candidate_refs):
                 entry = self._entries.get(ref)
                 if entry is None:
                     raise PublicationError("selection names an unknown candidate version")
-                # Everything about a considered candidate (its exclusion record, its
-                # review-log prefix) enters the revision, so a more restrictive input
-                # cannot be excluded quietly: it would leak membership. Fail instead.
-                taint = most_restrictive(entry.candidate.visibility, *(
-                    item.visibility for item in records if item.candidate_ref == ref))
-                if most_restrictive(taint, session.visibility) != session.visibility:
-                    raise PublicationError("selection includes inputs more restrictive than "
-                                           "the publication; compile an allowed-input one")
-                outcome = self._decide(session, entry.candidate, records, position)
-                (exclusions if isinstance(outcome, Exclusion) else approved).append(outcome)
-            bundle, result = self._build(session, request, records, position, approved,
-                                         tuple(exclusions))
-            verify_publication(dict(bundle.files), result.revision)
-            target.commit(bundle)
-            return result
+                entries.append(entry)
+            approved: list[_Approved] = []
+            exclusions: list[Exclusion] = []
+            for entry in entries:
+                self._check_taint(session, entry.candidate, records)
+                _resolve_derived_inputs(entry.candidate, derived_input_resolver)
+                outcome = self._decide(session, entry.candidate, records, position, known_ids)
+                if isinstance(outcome, Exclusion):
+                    exclusions.append(outcome)
+                else:
+                    approved.append(outcome)
+            staged = self._build(session, request, records, position, approved,
+                                 tuple(exclusions), tuple(entry.candidate for entry in entries))
+            verify_publication(dict(staged.files), staged.revision, session.input_rule_set)
+            return staged
+
+    def _check_taint(self, session: CompileSession, candidate: Candidate,
+                     records: tuple[ReviewRecord, ...]) -> None:
+        # Defence in depth: appends already refuse more restrictive records.
+        taint = most_restrictive(candidate.visibility, *(
+            item.visibility for item in records if item.candidate_ref == candidate.ref))
+        if most_restrictive(taint, session.visibility) != session.visibility:
+            raise PublicationError("selection includes inputs more restrictive than the "
+                                   "publication; compile an allowed-input one")
 
     @staticmethod
     def _check_dependency_closure(session: CompileSession) -> None:
@@ -1471,16 +1654,17 @@ class CompilerWorkspace:
 
     @staticmethod
     def _decide(session: CompileSession, candidate: Candidate,
-                records: tuple[ReviewRecord, ...], position: int) -> _Approved | Exclusion:
+                records: tuple[ReviewRecord, ...], position: int,
+                known_ids: frozenset[str]) -> _Approved | Exclusion:
         ref = candidate.ref
         if candidate.session_id != session.session_id:
             return Exclusion(ref, ExclusionReason.STALE_SESSION,
                              "candidate was compiled under another source/plant/policy tuple")
         effective = effective_review(records, ref, position)
-        if effective.record is None or effective.status in _STATUS_EXCLUSION:
+        review = effective.record
+        if review is None or effective.status in _STATUS_EXCLUSION:
             return Exclusion(ref, _STATUS_EXCLUSION[effective.status],
                              f"effective review status {effective.status.value}")
-        review = effective.record
         if ((review.session_id, review.review_policy, review.validation_policy,
              review.plant_context) != (session.session_id, session.policies.review_policy,
                                        session.policies.validation_policy,
@@ -1488,7 +1672,8 @@ class CompilerWorkspace:
             return Exclusion(ref, ExclusionReason.STALE_REVIEW,
                              "review was made against an incompatible tuple")
         remap = review.decision is ReviewDecision.REMAP
-        validation = validate_candidate(session, candidate, review)
+        validation = validate_candidate(session, candidate, review,
+                                        known_candidate_ids=known_ids)
         if not validation.passed:
             codes = sorted({item.code.value for item in validation.findings if item.blocking})
             return Exclusion(ref, ExclusionReason.REMAP_INVALID if remap
@@ -1498,54 +1683,61 @@ class CompilerWorkspace:
 
     def _build(self, session: CompileSession, request: PublicationRequest,
                records: tuple[ReviewRecord, ...], position: int, approved: list[_Approved],
-               exclusions: tuple[Exclusion, ...]) -> tuple[PublicationBundle, PublishedRevision]:
+               exclusions: tuple[Exclusion, ...], considered: tuple[Candidate, ...]
+               ) -> StagedPublication:
         lineage = request.lineage_id
-        bindings, knowledge, rules = [], [], []
-        for item in approved:
-            if item.candidate.route is Route.BINDING:
-                bindings.append(item)
-            elif item.candidate.route is Route.RULE:
-                rules.append(item)
-            else:
-                knowledge.append(item)
+        root = f"{ENGINEERING_CONTEXT_ROOT}/{lineage}"
+        approved = _by_ref(approved, lambda item: item.candidate.ref)
+        exclusions = tuple(_by_ref(exclusions, lambda item: item.candidate_ref))
+        considered = tuple(_by_ref(considered, lambda item: item.ref))
+        bindings = [item for item in approved if item.candidate.route is Route.BINDING]
+        knowledge = [item for item in approved if item.candidate.route is Route.KNOWLEDGE]
+        rules = [item for item in approved if item.candidate.route is Route.RULE]
         files: list[tuple[str, bytes]] = []
         published_rule_set: ArtifactPathRef | None = None
-        pinned: list[RuleRef] = []
-        if rules:
+        rule_items: list[tuple[_Approved, Rule]] = []
+        for item in rules:
+            if not isinstance(item.candidate, CandidateKnowledge) or item.candidate.rule is None:
+                raise PublicationError("RULE-routed item without a Rule carrier")
+            rule_items.append((item, item.candidate.rule))
+        refs = [rule.ref for _, rule in rule_items]
+        duplicates = sorted({f"{ref.rule_id}@{ref.version}" for ref in refs
+                             if refs.count(ref) > 1})
+        if duplicates:
+            raise PublicationError("two approved candidates publish the same RuleRef: "
+                                   + ", ".join(duplicates))
+        if rule_items:
             try:
                 r1 = session.input_rule_set.derive(
-                    session.input_rule_set_ref, tuple(item.candidate.rule for item in rules),
+                    session.input_rule_set_ref, tuple(rule for _, rule in rule_items),
                     visibility=session.visibility)
             except RuleSetError as exc:
                 raise PublicationError(f"published rule set is invalid: {exc}") from exc
-            pinned = sorted((item.candidate.rule.ref for item in rules),
-                            key=lambda ref: (ref.rule_id, ref.version))
-            if r1.parent != session.input_rule_set_ref:
-                raise PublicationError("published rule set parent is not the input rule set")
-            for ref in pinned:
-                try:
-                    r1.registry.get_rule(ref)
-                except KeyError:
-                    raise PublicationError("a pinned RuleRef does not resolve") from None
             data = r1.serialize()
             published_rule_set = ArtifactPathRef(f"{RULE_SET_ROOT}/{r1.checksum}.json",
                                                  r1.checksum)
             files.append((published_rule_set.path, data))
-        considered = set(request.candidate_refs)
+        pinned = sorted(refs, key=lambda ref: (ref.rule_id, ref.version))
+        considered_refs = {candidate.ref for candidate in considered}
         log_bytes = canonical_json({
             "schema_version": REVIEW_LOG_SCHEMA_VERSION, "workspace_id": self.workspace_id,
             "review_log_position": position,
-            "records": [item.record() for item in records if item.candidate_ref in considered]})
-        log_ref = ArtifactPathRef.of(
-            f"{ENGINEERING_CONTEXT_ROOT}/{lineage}/review-logs/"
-            f"{content_checksum(log_bytes, CANONICAL_JSON_SHA256)}.json", log_bytes)
+            "records": [item.record() for item in records
+                        if item.candidate_ref in considered_refs]})
+        log_ref = ArtifactPathRef.of(f"{root}/review-logs/{_sha256(log_bytes)}.json",
+                                     log_bytes)
         files.append((log_ref.path, log_bytes))
+        candidates_bytes = canonical_json({
+            "schema_version": CANDIDATES_SCHEMA_VERSION,
+            "candidates": [candidate.record() for candidate in considered]})
+        candidates_ref = ArtifactPathRef.of(
+            f"{root}/candidates/{_sha256(candidates_bytes)}.json", candidates_bytes)
+        files.append((candidates_ref.path, candidates_bytes))
         conflicts = [{"candidate_ref": item.candidate.ref.record(),
                       "conflicting_fragments": _fragment_ids(item.candidate.conflicting_fragments),
-                      "conflicting_candidate_ids": list(getattr(
-                          item.candidate, "conflicting_candidate_ids", ()))}
+                      "conflicting_candidate_ids": list(_conflicting_ids(item.candidate))}
                      for item in approved if item.candidate.conflicting_fragments
-                     or getattr(item.candidate, "conflicting_candidate_ids", ())]
+                     or _conflicting_ids(item.candidate)]
         body = {
             "schema_version": REVISION_SCHEMA_VERSION,
             "kind": ENGINEERING_CONTEXT_REVISION_KIND, "lineage_id": lineage,
@@ -1558,15 +1750,16 @@ class CompilerWorkspace:
             "routing_policy": ROUTING_POLICY,
             "validation_policy": session.policies.validation_policy,
             "review_policy": session.policies.review_policy,
+            "acceptance_policies": sorted(session.policies.acceptance_policies),
             "extraction_methods": sorted({item.candidate.provenance.extraction_method
                                           for item in approved}),
             "grounding_methods": sorted({item.candidate.provenance.grounding_method
                                          for item in approved}),
+            "considered_candidate_refs": [candidate.ref.record() for candidate in considered],
+            "candidates": candidates_ref.record(),
             "approved_bindings": [
-                {**_traced(item), "target": item.target.record(),
-                 "proposed_target": None if item.candidate.proposed_target is None
-                 else item.candidate.proposed_target.record(),
-                 "mention_text": item.candidate.mention_text} for item in bindings],
+                {**_traced(item), "target": None if item.target is None
+                 else item.target.record()} for item in bindings],
             "approved_knowledge": [
                 {**_traced(item),
                  "knowledge_ref": {
@@ -1574,12 +1767,8 @@ class CompilerWorkspace:
                                      f"{item.candidate.candidate_version}",
                      "validation_status": KNOWLEDGE_VALIDATION_STATUS,
                      "validation_evidence_review_id": item.review.review_id,
-                     "content": [fragment.record()
-                                 for fragment in item.candidate.source_fragments]},
-                 "derived_annotations": [] if item.candidate.normalized_claim is None
-                 else [item.candidate.normalized_claim.record()],
-                 "conditions": item.candidate.conditions,
-                 "values": [value.record() for value in item.candidate.values]}
+                     "content": [fragment.record() for fragment in item.candidate.fragments()
+                                 if fragment not in item.candidate.conflicting_fragments]}}
                 for item in knowledge],
             "input_rule_set": session.input_rule_set_ref.record(),
             "published_rule_set": {"revision": "INPUT"} if published_rule_set is None
@@ -1587,9 +1776,9 @@ class CompilerWorkspace:
             "pinned_rule_refs": [{"rule_id": ref.rule_id, "version": ref.version}
                                  for ref in pinned],
             "rule_scope_bindings": [
-                {**_traced(item), "rule_ref": {"rule_id": item.candidate.rule.rule_id,
-                                               "version": item.candidate.rule.version},
-                 "rule_scope": item.candidate.rule.scope} for item in rules],
+                {**_traced(item), "rule_ref": {"rule_id": rule.rule_id,
+                                               "version": rule.version},
+                 "rule_scope": rule.scope} for item, rule in rule_items],
             "review_log": {"review_log_position": position, **log_ref.record()},
             "review_ids": sorted(item.review.review_id for item in approved),
             "conflicts": conflicts,
@@ -1598,18 +1787,47 @@ class CompilerWorkspace:
                            "published_at": request.published_at,
                            "workspace_id": self.workspace_id},
         }
-        document = {**body, "revision_id": "ecr-" + json_digest(body)}
+        document = {**body, "revision_id": "ecr-" + _digest(body)}
         data = canonical_json(document)
-        revision = ArtifactPathRef.of(
-            f"{ENGINEERING_CONTEXT_ROOT}/{lineage}/revisions/{document['revision_id']}.json",
-            data)
+        revision = ArtifactPathRef.of(f"{root}/revisions/{document['revision_id']}.json", data)
         files.append((revision.path, data))
-        bundle = PublicationBundle(lineage, request.expected_head, revision, tuple(files))
-        return bundle, PublishedRevision(revision, log_ref, published_rule_set, position,
-                                         freeze_json(document), exclusions, tuple(files))
+        return StagedPublication(lineage, request.expected_head, revision, log_ref,
+                                 candidates_ref, published_rule_set, position,
+                                 freeze_json(document), exclusions, tuple(files))
+
+
+def _resolve_derived_inputs(candidate: Candidate,
+                            resolver: Callable[[DerivedInput], bytes] | None) -> None:
+    for item in candidate.provenance.derived_inputs:
+        if resolver is None:
+            raise PublicationError(f"derived input {item.ref} has no resolver")
+        try:
+            data = resolver(item)
+        except Exception as exc:  # any resolver failure leaves the dependency unresolved
+            raise PublicationError(f"derived input {item.ref} does not resolve") from exc
+        if not isinstance(data, bytes) or _sha256(data) != item.content_checksum:
+            raise PublicationError(f"derived input {item.ref} differs from its exact ref")
 
 
 # -- verification from repository content alone ------------------------------------------
+_REVISION_KEYS = frozenset({
+    "schema_version", "kind", "lineage_id", "parent_revision", "visibility",
+    "compile_session_id", "plant_context", "source_inventory", "compiler_version",
+    "routing_policy", "validation_policy", "review_policy", "acceptance_policies",
+    "extraction_methods", "grounding_methods", "considered_candidate_refs", "candidates",
+    "approved_bindings", "approved_knowledge", "input_rule_set", "published_rule_set",
+    "pinned_rule_refs", "rule_scope_bindings", "review_log", "review_ids", "conflicts",
+    "exclusions", "provenance", "revision_id"})
+_TRACED_KEYS = frozenset({"candidate_ref", "content_key", "extraction_kind", "route",
+                          "decision", "review_id", "scope_refs", "original_scope_refs",
+                          "fragments", "provenance", "validation"})
+_ITEM_KEYS = {"approved_bindings": _TRACED_KEYS | {"target"},
+              "approved_knowledge": _TRACED_KEYS | {"knowledge_ref"},
+              "rule_scope_bindings": _TRACED_KEYS | {"rule_ref", "rule_scope"}}
+_ITEM_ROUTES = {"approved_bindings": Route.BINDING, "approved_knowledge": Route.KNOWLEDGE,
+                "rule_scope_bindings": Route.RULE}
+
+
 @dataclass(frozen=True)
 class VerifiedRevision:
     document: Mapping[str, Any]
@@ -1618,75 +1836,230 @@ class VerifiedRevision:
     published_rule_set: RuleSetRevision | None
 
 
+def _fail(message: str) -> NoReturn:
+    raise PublicationError(message)
+
+
+def _keys(value: Any, expected: Iterable[str], what: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(expected):
+        _fail(f"{what} does not have exactly the v0 fields")
+    return value
+
+
 def _artifact(files: Mapping[str, bytes], ref: ArtifactPathRef) -> Any:
     data = files.get(ref.path)
-    if data is None:
-        raise PublicationError(f"{ref.path} is missing from the publication")
+    if not isinstance(data, bytes):
+        _fail(f"{ref.path} is missing from the publication")
+    if _sha256(data) != ref.content_checksum:
+        _fail(f"{ref.path} content checksum mismatch")
     try:
-        actual = content_checksum(data, CANONICAL_JSON_SHA256)
-    except (TypeError, ValueError) as exc:
-        raise PublicationError(f"{ref.path} is not JSON") from exc
-    if actual != ref.content_checksum:
-        raise PublicationError(f"{ref.path} content checksum mismatch")
-    return json.loads(data)
+        value = strict_json_loads(data)
+        canonical = canonical_json(value)
+    except _JSON_ERRORS as exc:
+        raise PublicationError(f"{ref.path} is not strict JSON") from exc
+    if canonical != data:
+        _fail(f"{ref.path} is not canonical JSON")
+    return value
 
 
-def verify_publication(files: Mapping[str, bytes], revision: ArtifactPathRef
-                       ) -> VerifiedRevision:
-    """Recompute every effective decision and rule-set link from committed content."""
-    document = _artifact(files, revision)
+def _check_candidate_record(record: Any) -> tuple[CandidateRef, Mapping[str, Any]]:
+    """Recompute content key, version and fragment ids of a stored candidate record."""
+    record = _keys(record, _CANDIDATE_RECORD_KEYS, "candidate record")
+    content = record["content"]
+    if record["content_key"] != _digest(content):
+        _fail("candidate content_key does not match its content")
+    if record["candidate_version"] != _version_of(
+            record["candidate_id"], record["session_id"], record["content_key"],
+            record["provenance"], record["version_extra"]):
+        _fail("candidate_version does not match its record")
+    ids = []
+    for fragment in record["fragments"]:
+        identity = {key: value for key, value in fragment.items() if key != "fragment_id"}
+        if fragment["fragment_id"] != "frag-" + _digest(identity):
+            _fail("fragment id does not match its identity")
+        ids.append(fragment["fragment_id"])
+    referenced = [content.get("mention_fragment"), *content.get("supporting_fragments", ()),
+                  *content.get("source_fragments", ()), *content["conflicting_fragments"]]
+    if [item for item in referenced if item is not None] != ids:
+        _fail("candidate fragments differ from its content")
+    plant = [target["plant_context"]["visibility"]
+             for target in (*content["scope_refs"], *record["version_extra"].get(
+                 "alternative_targets", ()), *([content["proposed_target"]]
+                                              if content.get("proposed_target") else []))]
+    visibility = most_restrictive(Visibility.AGENT, *(
+        _visibility(fragment["source_ref"]["visibility"]) for fragment in record["fragments"]),
+        *(_visibility(item) for item in plant),
+        *(_visibility(item["visibility"]) for item in record["provenance"][
+            "influencing_sources"]),
+        *(_visibility(item["visibility"]) for item in record["provenance"]["derived_inputs"]))
+    if record["visibility"] != visibility.value:
+        _fail("candidate visibility differs from its influencing inputs")
+    return CandidateRef(record["candidate_id"], record["candidate_version"]), record
+
+
+def verify_publication(files: Mapping[str, bytes], revision: ArtifactPathRef,
+                       input_rule_set: RuleSetRevision) -> VerifiedRevision:
+    """Recompute every effective decision, target and rule-set link from bundle content.
+
+    ``input_rule_set`` is R0 as loaded from its own committed ContextSourceRef.
+    """
     try:
-        body = {key: value for key, value in document.items() if key != "revision_id"}
-        if (document["schema_version"] != REVISION_SCHEMA_VERSION
-                or document["kind"] != ENGINEERING_CONTEXT_REVISION_KIND
-                or document["revision_id"] != "ecr-" + json_digest(body)):
-            raise PublicationError("revision schema, kind or id is invalid")
-        log_meta = dict(document["review_log"])
-        position = log_meta.pop("review_log_position")
-        log = _artifact(files, ArtifactPathRef.from_record(log_meta))
-        if log["schema_version"] != REVIEW_LOG_SCHEMA_VERSION or log[
-                "review_log_position"] != position:
-            raise PublicationError("review log does not match the pinned position")
-        records = tuple(ReviewRecord.from_record(item) for item in log["records"])
-        positions = [item.review_log_position for item in records]
-        if positions != sorted(set(positions)) or any(item > position for item in positions):
-            raise PublicationError("review log prefix is out of order or past its position")
-        effective = []
-        items = (*document["approved_bindings"], *document["approved_knowledge"],
-                 *document["rule_scope_bindings"])
-        for item in items:
-            result = effective_review(records, CandidateRef.from_record(item["candidate_ref"]),
-                                      position)
-            review = result.record
-            if (result.status not in (ReviewStatus.APPROVED, ReviewStatus.REMAPPED)
-                    or review.review_id != item["review_id"]
-                    or review.session_id != document["compile_session_id"]):
-                raise PublicationError("approved item lacks an effective APPROVE/REMAP")
-            if review.decision is ReviewDecision.REMAP:
-                if item["scope_refs"] != _scope_records(review.selected_scope_refs) or (
-                        "target" in item and item["target"] != review.selected_target.record()):
-                    raise PublicationError("published REMAP binding differs from its review")
-            effective.append(result)
-        pinned = [RuleRef(**ref) for ref in document["pinned_rule_refs"]]
-        bound = [RuleRef(**item["rule_ref"]) for item in document["rule_scope_bindings"]]
-        if sorted(bound, key=lambda ref: (ref.rule_id, ref.version)) != pinned:
-            raise PublicationError("rule scope bindings and pinned RuleRefs differ")
-        published = dict(document["published_rule_set"])
-        rule_set = None
-        if published.pop("revision") == "SAME_COMMIT":
-            location = ArtifactPathRef.from_record(published)
-            rule_set = load_rule_set(files[location.path], location.content_checksum)
-            if rule_set.parent is None or rule_set.parent.record() != document["input_rule_set"]:
-                raise PublicationError("published rule set parent is not the input rule set")
-            for ref in pinned:
-                rule = rule_set.registry.get_rule(ref)
-                if (rule.origin, rule.validation, rule.authority) != (
-                        Origin.LITERATURE, Validation.NONE, Authority.REFERENCE):
-                    raise PublicationError("a compiler-published rule changed its axes")
-        elif pinned or published:
-            raise PublicationError("RuleRefs need a published rule-set revision")
+        return _verify(files, revision, input_rule_set)
     except PublicationError:
         raise
-    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+    except (CompilerError, RuleSetError, KeyError, TypeError, ValueError, AttributeError,
+            RecursionError) as exc:
         raise PublicationError(f"publication does not verify: {exc!r}") from exc
+
+
+def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef,
+            input_rule_set: RuleSetRevision) -> VerifiedRevision:
+    document = _keys(_artifact(files, revision), _REVISION_KEYS, "revision")
+    body = {key: value for key, value in document.items() if key != "revision_id"}
+    if (document["schema_version"] != REVISION_SCHEMA_VERSION
+            or document["kind"] != ENGINEERING_CONTEXT_REVISION_KIND
+            or document["revision_id"] != "ecr-" + _digest(body)):
+        _fail("revision schema, kind or id is invalid")
+    visibility = _visibility(document["visibility"])
+    session_id, policies = document["compile_session_id"], set(document["acceptance_policies"])
+    if session_id != "cs-" + _digest({
+            "inventory": document["source_inventory"],
+            "plant_context": document["plant_context"],
+            "input_rule_set": document["input_rule_set"],
+            "policies": {"review_policy": document["review_policy"],
+                         "compiler_version": document["compiler_version"],
+                         "validation_policy": document["validation_policy"],
+                         "acceptance_policies": document["acceptance_policies"]},
+            "visibility": visibility.value}):
+        _fail("compile_session_id does not match the revision's compatibility tuple")
+    # Review log: strict schema, ordered positions, supersession and compatibility.
+    log_meta = dict(_keys(document["review_log"], ("review_log_position", "path",
+                                                   "content_checksum"), "review_log ref"))
+    position = log_meta.pop("review_log_position")
+    log = _keys(_artifact(files, ArtifactPathRef.from_record(log_meta)),
+                ("schema_version", "workspace_id", "review_log_position", "records"),
+                "review log")
+    if log["schema_version"] != REVIEW_LOG_SCHEMA_VERSION or log[
+            "review_log_position"] != position or type(position) is not int:
+        _fail("review log does not match the pinned position")
+    records = tuple(ReviewRecord.from_record(item) for item in log["records"])
+    by_id: dict[str, ReviewRecord] = {}
+    for record in records:
+        if record.review_id in by_id or record.review_log_position > position or (
+                by_id and record.review_log_position <= max(
+                    item.review_log_position for item in by_id.values())):
+            _fail("review log prefix is out of order, duplicated or past its position")
+        for superseded in record.supersedes:
+            earlier = by_id.get(superseded)
+            if earlier is None or earlier.candidate_ref != record.candidate_ref:
+                _fail("a review supersedes a record outside its candidate prefix")
+        if not record.principal.allowed_by(policies):
+            _fail("a review principal is neither HUMAN nor a registered acceptance policy")
+        if most_restrictive(record.visibility, visibility) != visibility:
+            _fail("review metadata is more restrictive than the revision")
+        by_id[record.review_id] = record
+    # Candidate records: hash-recomputable, exactly the considered set.
+    candidates_doc = _keys(_artifact(files, ArtifactPathRef.from_record(document["candidates"])),
+                           ("schema_version", "candidates"), "candidates artifact")
+    if candidates_doc["schema_version"] != CANDIDATES_SCHEMA_VERSION:
+        _fail("unsupported candidates artifact")
+    candidates = dict(_check_candidate_record(item) for item in candidates_doc["candidates"])
+    considered = [CandidateRef.from_record(item) for item in document["considered_candidate_refs"]]
+    if considered != sorted(set(considered)) or list(candidates) != considered:
+        _fail("candidate records differ from the considered selection")
+    if any(record.candidate_ref not in candidates for record in records):
+        _fail("review log holds records of unconsidered candidates")
+    for stored_record in candidates.values():
+        if most_restrictive(_visibility(stored_record["visibility"]), visibility) != visibility:
+            _fail("a considered candidate is more restrictive than the revision")
+    # Approved items: effective decision, compatibility tuple, target and scope origin.
+    effective: list[EffectiveReview] = []
+    seen: list[CandidateRef] = []
+    for section, route_ in _ITEM_ROUTES.items():
+        refs = []
+        for item in document[section]:
+            item = _keys(item, _ITEM_KEYS[section], section)
+            ref = CandidateRef.from_record(item["candidate_ref"])
+            refs.append(ref)
+            stored = candidates.get(ref)
+            if stored is None or stored["content"]["route"] != route_.value or (
+                    stored["session_id"] != session_id):
+                _fail("approved item has no matching candidate record of this session")
+            result = effective_review(records, ref, position)
+            review = result.record
+            if (review is None or result.status not in (ReviewStatus.APPROVED,
+                                                        ReviewStatus.REMAPPED)
+                    or review.review_id != item["review_id"]
+                    or review.decision.value != item["decision"]):
+                _fail("approved item lacks its effective APPROVE/REMAP")
+            if (review.session_id, review.review_policy, review.validation_policy,
+                    json_digest(review.plant_context.record())) != (
+                    session_id, document["review_policy"], document["validation_policy"],
+                    json_digest(document["plant_context"])):
+                _fail("effective review was made against another compatibility tuple")
+            content = stored["content"]
+            if review.decision is ReviewDecision.REMAP:
+                scope = _scope_records(review.selected_scope_refs or ())
+                target = (None if review.selected_target is None
+                          else review.selected_target.record())
+            else:
+                scope, target = content["scope_refs"], content.get("proposed_target")
+            if item["scope_refs"] != scope or item["original_scope_refs"] != content[
+                    "scope_refs"] or ("target" in item and item["target"] != target):
+                _fail("published target/scope differs from its review or candidate")
+            if item["content_key"] != stored["content_key"] or item["provenance"] != stored[
+                    "provenance"]:
+                _fail("approved item provenance differs from its candidate record")
+            effective.append(result)
+        if refs != sorted(refs):
+            _fail(f"{section} is not in canonical candidate order")
+        seen.extend(refs)
+    if len(set(seen)) != len(seen):
+        _fail("a candidate is approved twice")
+    if sorted(item.record.review_id for item in effective if item.record) != list(
+            document["review_ids"]):
+        _fail("review_ids differ from the effective reviews of approved items")
+    excluded = []
+    for item in document["exclusions"]:
+        item = _keys(item, ("candidate_ref", "reason", "detail"), "exclusion")
+        ref = CandidateRef.from_record(item["candidate_ref"])
+        reason = _enum(ExclusionReason, item["reason"], "exclusion reason")
+        status = effective_review(records, ref, position).status
+        if reason in _STATUS_EXCLUSION.values() and _STATUS_EXCLUSION.get(status) != reason:
+            _fail("exclusion reason contradicts the recomputed review status")
+        excluded.append(ref)
+    if excluded != sorted(excluded) or sorted(excluded + seen) != considered:
+        _fail("approved and excluded candidates do not partition the selection")
+    # Rule sets: R0 identity, R1 = R0 unchanged + exactly the pinned candidate rules.
+    if input_rule_set.checksum != document["input_rule_set"]["content_checksum"]:
+        _fail("input rule set is not the revision's R0")
+    pinned = [RuleRef(**_keys(ref, ("rule_id", "version"), "RuleRef"))
+              for ref in document["pinned_rule_refs"]]
+    bound = [RuleRef(**item["rule_ref"]) for item in document["rule_scope_bindings"]]
+    if sorted(bound, key=lambda ref: (ref.rule_id, ref.version)) != pinned:
+        _fail("rule scope bindings and pinned RuleRefs differ")
+    published = dict(document["published_rule_set"])
+    kind = published.pop("revision")
+    rule_set = None
+    if kind == "SAME_COMMIT":
+        location = ArtifactPathRef.from_record(published)
+        data = files.get(location.path)
+        if not isinstance(data, bytes):
+            _fail("published rule set is missing")
+        rule_set = load_rule_set(data, location.content_checksum)
+        if rule_set.parent is None or rule_set.parent.record() != document["input_rule_set"]:
+            _fail("published rule set parent is not the input rule set")
+        check_extends(input_rule_set, rule_set)
+        expected = {rule.ref for rule in input_rule_set.registry.rules()} | set(pinned)
+        if {rule.ref for rule in rule_set.registry.rules()} != expected:
+            _fail("published rule set holds rules beyond R0 and the pinned candidates")
+        for item in document["rule_scope_bindings"]:
+            rule = rule_set.registry.get_rule(RuleRef(**item["rule_ref"]))
+            candidate_record = candidates[CandidateRef.from_record(item["candidate_ref"])]
+            if rule_record(rule) != candidate_record["content"]["rule"] or (
+                    rule.origin, rule.validation, rule.authority) != (
+                    Origin.LITERATURE, Validation.NONE, Authority.REFERENCE):
+                _fail("a published rule differs from its reviewed candidate")
+    elif kind != "INPUT" or pinned or published:
+        _fail("RuleRefs need a published rule-set revision")
     return VerifiedRevision(freeze_json(document), position, tuple(effective), rule_set)
