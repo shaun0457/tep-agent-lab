@@ -245,19 +245,19 @@ Positioning and scope: [ADR-005](decisions/ADR-005-context-layer-product-positio
 
 D1 measures the value of context, not a ranking of Agent capability levels. The same Agent
 (model, settings, prompt template, one orchestration condition), the same cases and seeds and
-the same budgets are held fixed; only the context provided varies:
+the same budgets are held fixed. Default design (recommended; no spec amendment): run the
+evaluation-v0 ladder and read context value from its single-factor steps:
 
 ```text
-C0  deterministic floor
-C2  telemetry only
-C3  + ProcessGraph topology
-C6  + compiled, reviewed engineering context
+C0        deterministic floor
+C2 -> C3  value of ProcessGraph topology context
+C5 -> C6  value of compiled, reviewed engineering context
 ```
 
 Reported per arm: accuracy, evidence quality, query waste and traceability, with C0 accuracy
-and cost for every case. The arm set must satisfy evaluation-v0 (cumulative C-levels, one
-factor per comparison) and ADR-004 Decision 6 (C6 leakage-audit extension, clean C1–C5
-baselines); see OQ-16. The C6 arm needs P1.2, P1.3 and P1.5.
+and cost for every case. A C3-based context-only arm is a SPEC_CONFLICT alternative that needs
+amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0; see OQ-16. The C6
+arm needs P1.2, P1.3 and P1.5.
 
 ## D2 — Orchestration ablation — parked
 

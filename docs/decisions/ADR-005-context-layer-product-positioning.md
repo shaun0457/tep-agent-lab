@@ -96,7 +96,8 @@ Layer 2  Domain packs
                          | semantic extension, source compilers/adapters, derived state
 Layer 1  Domain-neutral context core  <- the product
            compiler pipeline, canonical entity/relationship/signal model,
-           telemetry, ContextSnapshot, visibility, Context Server and consumers
+           telemetry, ContextSnapshot, visibility, Context Server serving and
+           projection contracts (consumers sit outside the core)
 ```
 
 ### Layer 1 — Domain-neutral context core (the product)
@@ -113,8 +114,12 @@ The core contains:
 - **time-consistent ContextSnapshots** (plant-telemetry §ContextSnapshot);
 - the **visibility rules** (P0 CanonicalContextRegistry, context-compiler-v0 visibility
   taint, benchmark leakage rules);
-- the **Context Server** and its consumers (Decision 1): the Agent, the UI and, later,
-  external systems through APIs and event streams.
+- the **Context Server serving and projection contracts**: the public read boundaries and
+  derived views through which consumers read pinned context.
+
+Consumers are not part of the core. The Agent, the UI and, later, external systems
+reached through APIs and event streams (Decision 1) sit in the workflow and application
+layer and read the core through those contracts.
 
 The core carries no domain vocabulary. This extends the existing rule "TEP semantics stay
 below the generic boundary; generic contracts never import TEP" (ADR-003, ADR-004 §What
@@ -213,12 +218,18 @@ own ADR that amends them explicitly.
    level is best". It asks "how much does each layer of context improve a fixed
    investigation?"
    - Held fixed: the Agent (model, provider, settings, prompt template), one
-     orchestration condition, tool-exposure rules other than the context arm, budgets,
-     and the paired cases and seeds.
-   - Varied: only the context made available.
-   - Arms (evaluation-v0 capability rows): **C0** as the deterministic floor;
-     **C2** telemetry only; **C3** + ProcessGraph topology; **C6** + compiled, reviewed
-     engineering context from a published EngineeringContextRevision.
+     orchestration condition, budgets, and the paired cases and seeds.
+   - Default design (recommended; needs no spec amendment): run the evaluation-v0
+     capability ladder and read context value only from its single-factor steps
+     where the changed factor is context:
+     - **C0**: the deterministic floor;
+     - **C2 -> C3**: the value of ProcessGraph topology context;
+     - **C5 -> C6**: the value of compiled, reviewed engineering context from a
+       published EngineeringContextRevision.
+     The other rows (C1, C4, C5) are run because evaluation-v0 defines the ladder
+     cumulatively and ADR-004 Decision 6 requires clean C1–C5 baselines before a C6
+     claim. Their steps (C3 -> C4, C4 -> C5) are reported but are not context-value
+     contrasts.
    - Reported per arm: accuracy (E2 CausalClaim match, including `NO_ABNORMAL_CAUSE`);
      evidence quality (§Evidence/reference scoring); query waste (E3 relevant and
      irrelevant observation query rate, E4 efficiency); traceability (trace
@@ -227,14 +238,19 @@ own ADR that amends them explicitly.
    - Results are descriptive until the sample size supports paired inference
      (evaluation-v0 §Randomization / stochasticity).
 
-   Existing rules still bind the arm design, and this ADR does not reinterpret them.
+   The default follows the existing rules, and this ADR does not reinterpret them:
    evaluation-v0 defines C6 cumulatively (C6 = C5 + validated knowledge) and requires
-   one intended factor per comparison. ADR-004 Decision 6 requires a versioned
-   leakage-audit extension and clean C1–C5 baselines before a C6 claim. The D1 owning
-   spec must therefore meet those rules as written. It may include the intermediate rows
-   they need; for example, the engineering-context contrast is C5 -> C6, not C3 -> C6.
-   Alternatively, an accepted evaluation-v0 amendment may first define a context-only
-   arm. OQ-16 tracks the choice.
+   one intended factor per comparison; ADR-004 Decision 6 and context-compiler-v0
+   §Benchmark use each require engineering context to enter a blind benchmark run only
+   as C6, under a versioned leakage-audit extension; and ADR-004 Decision 6 requires
+   clean C1–C5 baselines before a C6 claim.
+
+   **SPEC_CONFLICT alternative (not adopted).** A context-only arm on top of C3
+   (C3 + engineering context, without C4/C5) would vary only context with fewer runs.
+   It conflicts with the rules above and would need amendments to evaluation-v0, to
+   ADR-004 Decision 6 and to context-compiler-v0 §Benchmark use, plus an explicit change
+   to the clean C1–C5 baseline rule. This ADR makes none of them. The owner picks
+   between the default and this alternative (OQ-16); the recommendation is the default.
 
    The C6 arm consumes product outputs: a published EngineeringContextRevision (P1.2),
    its scope resolution (P1.3) and Agent-facing snapshot-bound reads and projection
@@ -287,7 +303,7 @@ makes the investigation possible and traceable". Exact changes in
 |---|---|---|
 | §Portfolio MVP exit criterion, lead sentence | "Level 1 is achieved only when one visible demo proves:" | "Level 1 is achieved only when one visible demo proves that the context layer makes one investigation possible and traceable:" |
 | §Portfolio MVP exit criterion, item 8 | "a real Agent performs evidence-backed investigation for Q4;" | "a real Agent, as the first consumer of that context, performs evidence-backed investigation for Q4;" |
-| §Portfolio MVP exit criterion, item 9 | "every important claim can be traced to exact source/snapshot refs;" | "every important investigation claim can be traced back through the context layer to exact source/snapshot refs;" |
+| §Portfolio MVP exit criterion, item 9 | "every important claim can be traced to exact source/snapshot refs;" | "every important claim remains traceable to exact source/snapshot refs, including context-layer provenance where applicable;" |
 | §Product maturity summary, L1 row | "one subsystem: context compilation + live state + ContextSnapshot + real investigation" | "one subsystem: context compilation + live state + ContextSnapshot that make a real investigation possible and traceable" |
 | §MVP implementation priority, step after P1.5 | "D1 / investigation capability" / "real model + evidence-backed RCA" | "B5 + one real-model investigation over the P1.5 path" / "first context consumer; no capability claim" |
 
@@ -355,14 +371,15 @@ the demo. Consequences for claims:
   vocabulary leaks into the product identity.
 - The research track now produces product evidence (measured context value) instead of
   a ranking of Agent configurations.
-- D2 and B4 work leave the near-term path, which shortens the Level-1 route.
+- Parking D2 and B4 reduces near-term research work and resource contention; the
+  Level-1 critical path is unchanged (ADR-004 Decision 2 never included them).
 
 ### Costs
 
 - D1 depends on product milestones for its C6 arm (P1.2, P1.3, P1.5), so the full study
   cannot run until those land.
-- Meeting evaluation-v0 and ADR-004 Decision 6 as written may need more D1 arms than the
-  three context arms (OQ-16).
+- The default D1 design runs the full C0–C6 ladder, more runs than the three context
+  arms alone (OQ-16).
 - The target profile is broader than anything TEP can demonstrate; honest claims stay
   narrower than the profile.
 
@@ -374,8 +391,9 @@ the demo. Consequences for claims:
   - an adjacent batch or process domain: lower risk and more reuse of the process pack, but
     a weaker generality proof.
   The choice is not needed for Level 1.
-- **D1 arm set** (OQ-16): intermediate rows, or an evaluation-v0 amendment for a
-  context-only arm.
+- **D1 arm set** (OQ-16): the default full ladder with single-factor context steps
+  (recommended), or the SPEC_CONFLICT alternative of a C3-based context-only arm, which
+  needs amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0.
 
 ## Governance follow-ups (not done here)
 

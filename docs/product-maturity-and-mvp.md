@@ -318,7 +318,7 @@ Level 1 is achieved only when one visible demo proves that the context layer mak
 6. plant + telemetry + engineering knowledge assemble into a time-consistent ContextSnapshot;
 7. the system answers Q3: "what is happening now in this subsystem?";
 8. a real Agent, as the first consumer of that context, performs evidence-backed investigation for Q4;
-9. every important investigation claim can be traced back through the context layer to exact source/snapshot refs;
+9. every important claim remains traceable to exact source/snapshot refs, including context-layer provenance where applicable;
 10. TEP-specific semantics remain below the generic context boundary.
 
 ## Level 2 — Pilot-grade Product
