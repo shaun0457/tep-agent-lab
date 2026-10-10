@@ -102,3 +102,13 @@ Later compare:
 2D topology + telemetry + investigation/work/branch timeline is sufficient for v0.
 
 Only add 3D if a concrete spatial-reasoning question appears.
+
+## OQ-15 — D0.2C pilot viability and identifiability
+
+Owning spec: `docs/specs/benchmark-comparative-pilot-v0.md`.
+
+Open empirical checks, answered only by D0.2C1–C3 evidence:
+
+- whether `IDV(4)` produces supported, differing dynamics under the common 0.1 h + 0.5 h pilot window (checked so far only under 0.1 h + 0.2 h); a failure is `SPEC_CONFLICT` or an explicit timeline revision for all classes;
+- which candidates are separable across seeds under the frozen C0 features, and which must be excluded or relabeled as not identifiable under this evidence window;
+- the benchmark size needed for statistical inference, set from pilot within-class and between-class variation.

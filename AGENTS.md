@@ -18,6 +18,7 @@ Before implementation, read the relevant owning spec:
 - `docs/specs/engineering-records-v0.md`
 - `docs/specs/benchmark-design-v0.md`
 - `docs/specs/evaluation-v0.md`
+- `docs/specs/benchmark-comparative-pilot-v0.md`
 - `docs/specs/rca-v0.md`
 - `docs/specs/hazop-v0.md`
 - `docs/specs/recovery-v0.md`

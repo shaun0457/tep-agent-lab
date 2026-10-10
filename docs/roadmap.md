@@ -213,7 +213,29 @@ no-intervention setup. This does not make the benchmark balanced.
 
 Implementation note: `docs/d0-2b-healthy-negative.md`.
 
-### D0.2C — C0 + identifiability pilot — next
+### D0.2C — C0 + identifiability pilot — current
+
+Owning spec: `docs/specs/benchmark-comparative-pilot-v0.md`. The historical fixtures
+`rca-dev-001..004` stay immutable and are not comparable experimental cases; the pilot
+uses new identities under `tep-rca-benchmark/v1-pilot`.
+
+#### D0.2C0 — comparative pilot design freeze — complete
+
+Frozen design: four EVALUATOR classes (`NO_ABNORMAL_CAUSE`, `IDV(4)`, `IDV(11)`,
+`IDV(14)`) × paired seeds 21/22/23 = 12 DEVELOPMENT pilot cases (a design count, not a
+statistically sufficient size); one neutral goal and one 0.1 h + 0.5 h timeline for every
+class; opaque case ids; scorer-v1 semantics; the deterministic C0 contract; the required
+identifiability outputs; retain/exclude rules. No code, fixture, C0 result or difficulty
+threshold.
+
+#### D0.2C1 — comparable pilot variants — next
+
+Viability check, twelve paired pilot fixtures, scorer-v1, leakage policy v2,
+nuisance-proxy and leakage checks.
+
+#### D0.2C2 — deterministic C0 — pending
+
+#### D0.2C3 — identifiability pilot — pending
 
 ## Phase 0 — Reproducible lab / benchmark shell
 
@@ -319,7 +341,8 @@ Exit: runtime can inspect/analyze/simulate TEP only through typed, versioned, le
 ## Phase 5 — Benchmark identifiability + C0
 
 Branch: `exp/rca-benchmark-pilot-v0`  
-Specs: `benchmark-design-v0.md`, `evaluation-v0.md`, `rca-v0.md`
+Specs: `benchmark-design-v0.md`, `evaluation-v0.md`, `rca-v0.md`,
+`benchmark-comparative-pilot-v0.md` (D0.2C pilot)
 
 Deliver:
 
