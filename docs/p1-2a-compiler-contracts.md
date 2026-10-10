@@ -33,7 +33,9 @@ compare-and-set. P1.2A therefore does not write anything:
   - no partially written content-addressed files on failure: write to a temporary
     location first, so an interrupted commit leaves no artifact behind;
   - CAS on the git ref and the `HEAD.json` record together, so `StaleHead` means
-    nothing was committed.
+    nothing was committed;
+  - attestation of ancestor rule sets (and parent revisions) by commit and path, not
+    only by content checksum (see Known limitations).
 
 ## What is implemented
 
@@ -143,22 +145,37 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   matching checksum. It parses the revision strictly; lineage, review-log ref and
   position, candidates ref, rule-set ref, expected head (from `parent_revision`) and
   exclusions must agree with it, and `document` is derived from those bytes. The head
-  record is built from the revision ref and kept out of the files. Full dependency
-  verification is `verify_publication`.
+  record is built from the revision ref and kept out of the files. Dependency
+  verification (the shared closure plus item re-validation) is `verify_publication`.
 - **Bundle layout** (canonical JSON; same-commit refs are `ArtifactPathRef`):
 
   ```text
   context/engineering-context/<lineage>/revisions/<revision_id>.json
   context/engineering-context/<lineage>/review-logs/<sha256>.json   prefix for considered candidates
-  context/engineering-context/<lineage>/candidates/<sha256>.json    complete candidate records
+  context/engineering-context/<lineage>/candidates/<sha256>.json    considered + dependency records
   context/rule-sets/<sha256>.json                                   R1, when rules were approved
   context/engineering-context/<lineage>/HEAD.json                   head record (P1.2D writes it)
   ```
 
-- **`verify_publication(files, revision, session, parent_resolver=...)`** recomputes
-  everything from bundle content plus the exact dependencies. `session` is a compile
-  session over the revision's own inventory (the pinned PROCESS_GRAPH and R0), and its
-  id must equal the revision's. It checks:
+- **One dependency closure.** `_dependency_closure` is the single check that both
+  `stage_publication` and `verify_publication` call. It covers:
+  - re-attesting every session source;
+  - re-loading R0 and its whole lineage from exact bytes (equal to the frozen R0 and
+    visible at the revision's visibility);
+  - resolving the parent revision;
+  - checking candidate and review visibility for every stored candidate;
+  - resolving every stored candidate's derived inputs through a required resolver;
+  - conflict dependencies: candidates that a selected candidate names in
+    `conflicting_candidate_ids` are stored in the candidates artifact as exact
+    dependency records (not approved), and the known ids used for conflict validation
+    come from stored records only.
+
+  The verifier only adds checks on top of it.
+- **`verify_publication(files, revision, session, derived_input_resolver=...,
+  parent_resolver=...)`** recomputes everything from bundle content plus the exact
+  dependencies. `session` is a compile session over the revision's own inventory (the
+  pinned PROCESS_GRAPH and R0), and its id must equal the revision's. Beyond the
+  shared closure it checks:
   - strict revision, review-log and candidate schemas, with duplicate keys rejected;
   - the revision id and the `compile_session_id` tuple;
   - review supersession, the compatibility tuple and principals against the recorded
@@ -172,10 +189,11 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
     item must equal the record rebuilt from candidate, review and validation:
     fragments, `KnowledgeRef.content`, extraction kind, target, scope, provenance and
     validation record;
-  - the parent revision, resolved like staging does;
+  - the `conflicts` summary, re-derived from the approved candidates;
   - exclusion reasons against the recomputed status;
-  - R1: parent = R0, every R0 rule and conflict unchanged, no rules beyond the pinned
-    ones, each pinned rule equal to its reviewed candidate rule with literature axes.
+  - R1: visibility no more restricted than the revision, parent = R0, every R0 rule and
+    conflict unchanged, no rules beyond the pinned ones, no duplicate pinned RuleRef,
+    and each pinned rule equal to its reviewed candidate rule with literature axes.
 
 ## Ownership
 
@@ -202,13 +220,13 @@ review findings they cover.
 | 11 | covered: complete records are staged; the verifier rebuilds and re-validates every approved item (H5, round-2 item 1) |
 | 13, 18 | covered: workspace visibility (H4), parent-revision visibility and rule-set lineage taint (round-2 items 2 and 3) |
 | 16 | covered, including a staging test where two terminal reviews block publication |
-| 17 | covered: REMAP target, scope and conflict revalidation at staging and again in the verifier; units/values are immutable content |
+| 17 | covered: REMAP target, scope and conflict revalidation at staging and in the verifier, against stored candidate records and stored conflict dependencies; units/values are immutable content |
 | 1, 2 | partial: hand-built fragments over registered fixture sources; parser corpus in P1.2B |
 | 3 | partial: immutable candidate contracts; model-assisted extraction in P1.2C |
 | 14 | partial: contract level; end-to-end demo in P1.2D |
 | 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
 | 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
-| 21 | partial: the full dependency closure (sources, R0 lineage, derived inputs, parent revision) fails closed with no bundle; commit atomicity and crash safety are P1.2D |
+| 21 | partial: the shared closure fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input, an unresolvable or foreign parent, and a missing conflict dependency. Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
@@ -216,6 +234,11 @@ The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.
 
 - The workspace is in memory. Candidate records and the review-log prefix persist
   only through a committed publication, which P1.2D adds.
+- Ancestor rule sets are identified by content checksum only. The default resolver
+  reads the ancestor's path from the session's materialization and checks its
+  checksum. The git revision recorded in the parent ref is not attested, so a parent
+  ref naming a nonexistent ancestor commit is accepted when the content matches.
+  Commit and path attestation of ancestors is a P1.2D repository-adapter requirement.
 - Plant-wide scope is not representable yet: no plant-context scope policy exists, so
   an empty scope fails validation.
 - No deterministic acceptance policy is registered, so every approved item needs a
