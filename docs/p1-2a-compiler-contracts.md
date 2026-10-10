@@ -35,7 +35,11 @@ compare-and-set. P1.2A therefore does not write anything:
   - CAS on the git ref and the `HEAD.json` record together, so `StaleHead` means
     nothing was committed;
   - attestation of ancestor rule sets (and parent revisions) by commit and path, not
-    only by content checksum (see Known limitations).
+    only by content checksum (see Known limitations);
+  - the trusted `WorkspaceAnchor` (workspace id, review-log tail position and hash,
+    candidate-log count and tail hash) read from repository history, not from the
+    bundle;
+  - binding `published_by` / `published_at` to the commit author and time.
 
 ## What is implemented
 
@@ -122,7 +126,15 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   `DETERMINISTIC_POLICY` principal (none exist in v0). `reviewed_at` and
   `published_at` must be strict UTC ISO-8601 ending in `Z`. `effective_review` takes
   the single terminal record; no record means UNREVIEWED and several mean
-  UNRESOLVED.
+  UNRESOLVED. Each record carries `previous_hash`, so the review log is a hash chain.
+  Its `effective_visibility` is the taint over every ref it carries (declared
+  visibility, plant context, selected target, selected scope refs).
+  `append_review` refuses a record whose effective visibility exceeds the workspace's,
+  and a REMAP that does not change target or scope is refused at append and excluded
+  as `REMAP_UNCHANGED` when publishing.
+- **Workspace anchor**: candidate appends form a second hash chain (ordered
+  candidate refs). `CompilerWorkspace.anchor()` returns the `WorkspaceAnchor` that
+  pins both chains and the workspace id.
 - **Workspace visibility**: a workspace is bound to one visibility. Sessions,
   candidates and reviews more restrictive than the workspace are refused, so hidden
   activity can never move the log tail or change the checksum of a less restrictive
@@ -151,49 +163,74 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
 
   ```text
   context/engineering-context/<lineage>/revisions/<revision_id>.json
-  context/engineering-context/<lineage>/review-logs/<sha256>.json   prefix for considered candidates
+  context/engineering-context/<lineage>/review-logs/<sha256>.json   full hash-chained review log + candidate log
   context/engineering-context/<lineage>/candidates/<sha256>.json    considered + dependency records
   context/rule-sets/<sha256>.json                                   R1, when rules were approved
   context/engineering-context/<lineage>/HEAD.json                   head record (P1.2D writes it)
   ```
 
-- **One dependency closure.** `_dependency_closure` is the single check that both
-  `stage_publication` and `verify_publication` call. It covers:
-  - re-attesting every session source;
-  - re-loading R0 and its whole lineage from exact bytes (equal to the frozen R0 and
-    visible at the revision's visibility);
-  - resolving the parent revision;
-  - checking candidate and review visibility for every stored candidate;
-  - resolving every stored candidate's derived inputs through a required resolver;
-  - conflict dependencies: candidates that a selected candidate names in
-    `conflicting_candidate_ids` are stored in the candidates artifact as exact
-    dependency records (not approved), and the known ids used for conflict validation
-    come from stored records only.
+- **One staging function.** `_stage_bundle` is staging as a pure function of its
+  inputs: the session, the request, the review records, the candidate log, and the
+  considered and dependency candidates. `stage_publication` calls it with
+  workspace state. Inside it runs:
+  - `_dependency_closure`: re-attest every session source; re-load R0 and its lineage
+    from exact bytes, visible at the revision's visibility; resolve the parent; check
+    the effective visibility of every review record and every stored candidate;
+    resolve the derived inputs of every stored candidate through a required resolver;
+    re-attest the sources and fragments of conflict dependencies; and limit the known
+    ids to stored candidates;
+  - `_decide` for every considered candidate;
+  - `_build_bundle`.
 
-  The verifier only adds checks on top of it.
-- **`verify_publication(files, revision, session, derived_input_resolver=...,
-  parent_resolver=...)`** recomputes everything from bundle content plus the exact
-  dependencies. `session` is a compile session over the revision's own inventory (the
-  pinned PROCESS_GRAPH and R0), and its id must equal the revision's. Beyond the
-  shared closure it checks:
-  - strict revision, review-log and candidate schemas, with duplicate keys rejected;
-  - the revision id and the `compile_session_id` tuple;
-  - review supersession, the compatibility tuple and principals against the recorded
-    `acceptance_policies`;
-  - candidate hashes and visibility;
-  - effective review ids and decisions against each item;
-  - every approved item: the candidate is rebuilt from its stored record (it must
-    re-serialize identically) and re-validated with `validate_candidate`. Fragments
-    are re-attested against the sources and targets against the pinned PROCESS_GRAPH
-    index, so a REMAP to a nonexistent target fails. Validation must pass, and the
-    item must equal the record rebuilt from candidate, review and validation:
-    fragments, `KnowledgeRef.content`, extraction kind, target, scope, provenance and
-    validation record;
-  - the `conflicts` summary, re-derived from the approved candidates;
-  - exclusion reasons against the recomputed status;
-  - R1: visibility no more restricted than the revision, parent = R0, every R0 rule and
-    conflict unchanged, no rules beyond the pinned ones, no duplicate pinned RuleRef,
-    and each pinned rule equal to its reviewed candidate rule with literature axes.
+  Conflict dependencies are exactly the candidate-log entries that a selected
+  candidate names in `conflicting_candidate_ids`. They are stored as exact records but
+  not approved.
+- **`verify_publication(files, revision, session, *, anchor, derived_input_resolver,
+  parent_resolver)`**:
+  - Trusted inputs: the compile session over the revision's dependencies (its id must
+    equal the revision's) and the `WorkspaceAnchor`. A missing anchor or resolver
+    fails closed.
+  - It checks that the bundle's review log is a contiguous hash chain and that the
+    review log and candidate log both match the anchor.
+  - It re-runs `PublicationRequest` on the revision's request metadata, rebuilds every
+    candidate record exactly (duplicate rows are rejected), and calls the same
+    `_stage_bundle`.
+  - Every re-staged artifact (revision, review log, candidates, R1) must equal the
+    bundle byte for byte, so the verifier performs every staging check, and only adds
+    checks to it.
+
+### Field audit
+
+Classes: **A**: recomputed by the verifier from trusted inputs and compared
+byte-exactly. **B**: checked against a trusted anchor supplied by the caller (the
+session, the `WorkspaceAnchor`, or the parent resolver). **C**: not verified, with a
+justification. `TamperEveryFieldTests` mutates every A/B field listed here, recomputes
+every hash and expects rejection. It skips only the fields marked C.
+
+| Artifact | Field | Class | How it is verified, or why C is safe |
+|---|---|---|---|
+| revision | `schema_version`, `kind`, `routing_policy` | A | constants of `_build_bundle` (implemented routing version) |
+| revision | `visibility`, `compile_session_id`, `plant_context`, `source_inventory`, `compiler_version`, `validation_policy`, `review_policy`, `acceptance_policies`, `input_rule_set` | A | from the trusted session, whose id must equal `compile_session_id` |
+| revision | `lineage_id` | C | publisher input. Constructor constraints are re-run, every artifact path and the head path derive from it, and the parent must be in the same lineage. Renaming it consistently re-stages a revision with identical approved content, so it grants no trust or visibility. Which lineage head it advances is the P1.2D head CAS |
+| revision | `parent_revision` | B | resolved through the trusted parent resolver: exact checksum, strict schema, same lineage, visibility (the head CAS in P1.2D decides which parent is current) |
+| revision | `considered_candidate_refs` | B (membership) / C (subset) | each ref must be in the anchored candidate log (B). Which anchored candidates to consider is the publisher's selection (spec: publication selects candidate versions); every subset re-stages to a fully validated revision, so it cannot add unreviewed, unvalidated or hidden content (C) |
+| revision | `dependency_candidate_refs` | A | recomputed from the anchored candidate log (exact conflict partners) |
+| revision | `extraction_methods`, `grounding_methods`, `approved_bindings`, `approved_knowledge`, `rule_scope_bindings`, `review_ids`, `conflicts`, `exclusions` | A | re-staged: `_decide` on anchored reviews and rebuilt candidates, `validate_candidate` against the exact dependencies |
+| revision | `published_rule_set`, `pinned_rule_refs` | A | R1 re-derived from the re-loaded R0 and the approved rules |
+| revision | `candidates` (path, checksum), `review_log.path`, `review_log.content_checksum` | A | re-staged artifact refs |
+| revision | `review_log.review_log_position`, `.tail_hash`, `.candidate_count`, `.candidate_tail_hash` | B | equal to the anchor |
+| revision | `provenance.workspace_id` | B | equal to the anchor's `workspace_id` |
+| revision | `provenance.published_by`, `provenance.published_at` | C | publisher-asserted audit metadata. Constructor constraints are re-run (nonempty, strict UTC); no decision, trust or visibility depends on them; P1.2D binds them to the commit author and time |
+| revision | `revision_id` | A | recomputed digest |
+| review log | `schema_version` | A | constant |
+| review log | `workspace_id`, `review_log_position`, `tail_hash`, `candidate_count`, `candidate_tail_hash`, `candidate_log` | B | the candidate-log hash chain and counts must equal the anchor |
+| review log | `records[*]` (every field, including `previous_hash`) | B | contiguous hash chain whose tail hash equals the anchor; each record is then used as staging input |
+| candidates | `schema_version` | A | constant |
+| candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed). Membership comes from the anchored candidate log; approved items are re-validated against the exact sources and the plant index; exclusions are re-decided. Fragments of an excluded candidate are not attested, which is safe because an excluded candidate contributes nothing to the approved set |
+| candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log; sources, fragments and derived inputs are attested |
+| R1 | every field | A | re-derived from R0 and the approved rules, byte-exact; visibility no more restricted than the revision |
+| head record | `schema_version`, `lineage_id`, `expected_parent`, `revision` | A | built by `StagedPublication` from the revision ref and the parent; P1.2D writes it |
+| staged metadata | `lineage_id`, refs, `review_log_position`, `expected_head`, `exclusions`, `document` | A | `StagedPublication.__post_init__` parses the revision and requires agreement |
 
 ## Ownership
 
@@ -216,9 +253,10 @@ review findings they cover.
 
 | Criterion | P1.2A state |
 |---|---|
-| 4, 5, 6, 7, 8, 9, 12, 15, 19, 22, 23, 24, 25 | covered at the contract level |
+| 4, 5, 6, 7, 8, 9, 12, 15, 19, 23, 24, 25 | covered at the contract level |
 | 11 | covered: complete records are staged; the verifier rebuilds and re-validates every approved item (H5, round-2 item 1) |
-| 13, 18 | covered: workspace visibility (H4), parent-revision visibility and rule-set lineage taint (round-2 items 2 and 3) |
+| 13, 18 | covered. Workspace visibility, review taint over every carried ref (including REMAP targets and scopes), parent-revision visibility, rule-set lineage taint, R1 visibility. Every one is re-checked when verifying |
+| 22 | covered at the contract level: effective decisions come from the complete hash-chained review log up to its tail, pinned by a trusted `WorkspaceAnchor`; a dropped or reordered record fails. In P1.2A the anchor comes from the workspace; P1.2D reads it from repository history |
 | 16 | covered, including a staging test where two terminal reviews block publication |
 | 17 | covered: REMAP target, scope and conflict revalidation at staging and in the verifier, against stored candidate records and stored conflict dependencies; units/values are immutable content |
 | 1, 2 | partial: hand-built fragments over registered fixture sources; parser corpus in P1.2B |
@@ -226,7 +264,7 @@ review findings they cover.
 | 14 | partial: contract level; end-to-end demo in P1.2D |
 | 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
 | 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
-| 21 | partial: the shared closure fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input, an unresolvable or foreign parent, and a missing conflict dependency. Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
+| 21 | partial. The same `_stage_bundle` fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input, an unresolvable, foreign or hidden parent, a missing or fabricated conflict dependency, and a dependency fragment outside the inventory. Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
