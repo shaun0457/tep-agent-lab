@@ -2,26 +2,27 @@
 
 A ``RuleSetRevision`` is one complete, immutable ``RuleRegistry`` serialized
 deterministically as an ``ENGINEERING_RULE_SET`` source artifact: every Rule field and
-every RuleConflict, so that loading round-trips ``find_rule_conflicts``. Its identity
-is the repository revision plus content checksum (a ``ContextSourceRef``); inside the
-commit that introduces it, it is referenced by path plus checksum. A revision may name
-a parent for lineage only. Serialization changes no Rule axis and grants no authority.
+every RuleConflict (in canonical order), so that loading round-trips
+``find_rule_conflicts``. Its identity is the repository revision plus content checksum
+(a ``ContextSourceRef``); inside the commit that introduces it, it is referenced by
+path plus checksum. A revision may name a parent for lineage only. Serialization
+changes no Rule axis and grants no authority.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, fields
-import json
+from dataclasses import dataclass, field, fields
+import hashlib
 from typing import Any
 
 from industrial_agent_runtime import Visibility
 
 from .canonical_context import (
     CANONICAL_JSON_SHA256, CanonicalContextRegistry, ContextSourceRef, ProjectionScope,
-    content_checksum, most_restrictive,
+    most_restrictive,
 )
-from .persistence import canonical_json
+from .persistence import canonical_json, strict_json_loads
 from .rules import (
     Authority, Behavior, ExtractionMetadata, Origin, Rule, RuleConflict, RuleRef,
     RuleRegistry, SourceVersion, Validation,
@@ -35,6 +36,7 @@ _ENUMS = {"origin": Origin, "validation": Validation, "authority": Authority}
 _TUPLE_FIELDS = ("inputs", "source_refs", "validation_refs")
 _OPTIONAL_TEXT = ("expected_effect_or_constraint", "operating_envelope", "units",
                   "support_summary", "reviewed_by")
+_RECORD_ERRORS = (TypeError, ValueError, KeyError, AttributeError, RecursionError)
 
 
 class RuleSetError(ValueError):
@@ -98,24 +100,30 @@ def rule_record(rule: Rule) -> dict[str, Any]:
 
 
 def rule_from_record(record: Any) -> Rule:
-    record = _exact_keys(record, (item.name for item in fields(Rule)), "Rule")
-    values = dict(record)
-    for name, kind in _ENUMS.items():
-        values[name] = kind(values[name])
-    values["behavior"] = None if values["behavior"] is None else Behavior(values["behavior"])
-    for name in _TUPLE_FIELDS:
-        if not isinstance(values[name], list):
-            raise RuleSetError(f"{name} must be a list")
-    values["inputs"] = tuple(values["inputs"])
-    values["source_refs"] = tuple(_source_version(item) for item in values["source_refs"])
-    values["validation_refs"] = tuple(_source_version(item)
-                                      for item in values["validation_refs"])
-    for name in _OPTIONAL_TEXT:
-        if values[name] is not None and not isinstance(values[name], str):
-            raise RuleSetError(f"{name} must be text or null")
-    if values["extraction"] is not None:
-        values["extraction"] = _extraction(values["extraction"])
-    return Rule(**values)
+    try:
+        record = _exact_keys(record, (item.name for item in fields(Rule)), "Rule")
+        values = dict(record)
+        for name, kind in _ENUMS.items():
+            values[name] = kind(values[name])
+        values["behavior"] = (None if values["behavior"] is None
+                              else Behavior(values["behavior"]))
+        for name in _TUPLE_FIELDS:
+            if not isinstance(values[name], list):
+                raise RuleSetError(f"{name} must be a list")
+        values["inputs"] = tuple(values["inputs"])
+        values["source_refs"] = tuple(_source_version(item) for item in values["source_refs"])
+        values["validation_refs"] = tuple(_source_version(item)
+                                          for item in values["validation_refs"])
+        for name in _OPTIONAL_TEXT:
+            if values[name] is not None and not isinstance(values[name], str):
+                raise RuleSetError(f"{name} must be text or null")
+        if values["extraction"] is not None:
+            values["extraction"] = _extraction(values["extraction"])
+        return Rule(**values)
+    except RuleSetError:
+        raise
+    except _RECORD_ERRORS as exc:
+        raise RuleSetError(f"invalid Rule record: {exc}") from exc
 
 
 def _rule_ref_record(ref: RuleRef) -> dict[str, str]:
@@ -133,15 +141,21 @@ def conflict_record(conflict: RuleConflict) -> dict[str, Any]:
 
 
 def conflict_from_record(record: Any) -> RuleConflict:
-    record = _exact_keys(record, (item.name for item in fields(RuleConflict)),
-                         "RuleConflict")
-    refs = record["rule_refs"]
-    if not isinstance(refs, list):
-        raise RuleSetError("rule_refs must be a list")
-    return RuleConflict(
-        tuple(RuleRef(**_exact_keys(ref, ("rule_id", "version"), "RuleRef")) for ref in refs),
-        record["overlapping_scope"], record["differing_relation_or_constraint"],
-        record["operating_envelope_differences"], record["resolution_status"])
+    try:
+        record = _exact_keys(record, (item.name for item in fields(RuleConflict)),
+                             "RuleConflict")
+        refs = record["rule_refs"]
+        if not isinstance(refs, list):
+            raise RuleSetError("rule_refs must be a list")
+        return RuleConflict(
+            tuple(RuleRef(**_exact_keys(ref, ("rule_id", "version"), "RuleRef"))
+                  for ref in refs),
+            record["overlapping_scope"], record["differing_relation_or_constraint"],
+            record["operating_envelope_differences"], record["resolution_status"])
+    except RuleSetError:
+        raise
+    except _RECORD_ERRORS as exc:
+        raise RuleSetError(f"invalid RuleConflict record: {exc}") from exc
 
 
 def _rule_set_ref(ref: Any) -> ContextSourceRef:
@@ -152,20 +166,39 @@ def _rule_set_ref(ref: Any) -> ContextSourceRef:
     return ref
 
 
+def _conflict_key(conflict: RuleConflict) -> bytes:
+    return canonical_json(conflict_record(conflict))
+
+
 @dataclass(frozen=True)
 class RuleSetRevision:
-    """One complete rule set; a parent ref records lineage only, never inheritance."""
+    """One complete rule set; a parent ref records lineage only, never inheritance.
+
+    Conflict records are held in canonical order, so the serialization (and therefore
+    the checksum) never depends on registration order.
+    """
 
     registry: RuleRegistry
     visibility: Visibility
     parent: ContextSourceRef | None = None
+    _serialized: bytes = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.registry, RuleRegistry):
             raise TypeError("Expected RuleRegistry")
-        object.__setattr__(self, "visibility", Visibility(self.visibility))
+        try:
+            object.__setattr__(self, "visibility", Visibility(self.visibility))
+        except ValueError:
+            raise RuleSetError("invalid rule-set visibility") from None
         if self.parent is not None:
             _rule_set_ref(self.parent)
+        conflicts = tuple(sorted(self.registry.conflicts(), key=_conflict_key))
+        if conflicts != self.registry.conflicts():
+            object.__setattr__(self, "registry", RuleRegistry(self.registry.rules(), conflicts))
+        object.__setattr__(self, "_serialized", canonical_json(self.document()))
+
+    def __hash__(self) -> int:  # consistent with equality; ContextSourceRef is unhashable
+        return hash(self._serialized)
 
     def document(self) -> dict[str, Any]:
         return {"schema_version": RULE_SET_SCHEMA_VERSION, "kind": RULE_SET_KIND,
@@ -175,11 +208,11 @@ class RuleSetRevision:
                 "conflicts": [conflict_record(item) for item in self.registry.conflicts()]}
 
     def serialize(self) -> bytes:
-        return canonical_json(self.document())
+        return self._serialized
 
     @property
     def checksum(self) -> str:
-        return content_checksum(self.serialize(), CANONICAL_JSON_SHA256)
+        return hashlib.sha256(self._serialized).hexdigest()
 
     def derive(self, parent_ref: ContextSourceRef, added: Iterable[Rule], *,
                visibility: Visibility | None = None) -> "RuleSetRevision":
@@ -192,7 +225,10 @@ class RuleSetRevision:
         if parent_ref.content_checksum != self.checksum:
             raise RuleSetError("parent ref does not address this rule-set content")
         floor = most_restrictive(self.visibility, parent_ref.visibility)
-        target = floor if visibility is None else Visibility(visibility)
+        try:
+            target = floor if visibility is None else Visibility(visibility)
+        except ValueError:
+            raise RuleSetError("invalid rule-set visibility") from None
         if most_restrictive(floor, target) != target:
             raise RuleSetError("a derived rule set cannot widen its parent's visibility")
         try:
@@ -223,12 +259,12 @@ def check_extends(parent: RuleSetRevision, child: RuleSetRevision) -> None:
 
 
 def load_rule_set(data: bytes, expected_checksum: str) -> RuleSetRevision:
-    """Verify the checksum and schema, then return the immutable rule-set revision."""
+    """Strictly parse (no duplicate keys), verify the checksum and schema, then load."""
     try:
-        actual = content_checksum(data, CANONICAL_JSON_SHA256)
-        document = json.loads(data)
-    except (TypeError, ValueError) as exc:
-        raise RuleSetError("rule-set artifact is not canonical JSON") from exc
+        document = strict_json_loads(data)
+        actual = hashlib.sha256(canonical_json(document)).hexdigest()
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise RuleSetError("rule-set artifact is not strict canonical JSON") from exc
     if actual != expected_checksum:
         raise RuleSetError("rule-set artifact checksum mismatch")
     document = _exact_keys(document, _DOCUMENT_KEYS, "rule-set artifact")
@@ -246,7 +282,7 @@ def load_rule_set(data: bytes, expected_checksum: str) -> RuleSetRevision:
         revision = RuleSetRevision(registry, Visibility(document["visibility"]), parent)
     except RuleSetError:
         raise
-    except (TypeError, ValueError, KeyError) as exc:
+    except _RECORD_ERRORS as exc:
         raise RuleSetError(f"invalid rule-set artifact: {exc}") from exc
     if revision.serialize() != canonical_json(document):
         raise RuleSetError("rule-set artifact is not in deterministic canonical order")

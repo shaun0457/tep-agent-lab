@@ -198,6 +198,45 @@ class RuleSetRevisionTests(unittest.TestCase):
         with self.assertRaises(RuleSetError):
             check_extends(parent, forged)
 
+    def test_conflict_order_is_canonical_and_checksum_cached(self) -> None:
+        base = registry()
+        first, second, policy = base.rules()[0], base.rules()[1], base.rules()[2]
+        a = RuleConflict((first.ref, second.ref), "test/cooling", "a", "b", "open")
+        b = RuleConflict((second.ref, policy.ref), "test/cooling", "c", "d", "open")
+        one = RuleSetRevision(RuleRegistry(base.rules(), (a, b)), Visibility.AGENT)
+        two = RuleSetRevision(RuleRegistry(base.rules(), (b, a)), Visibility.AGENT)
+        self.assertEqual(one.serialize(), two.serialize())
+        self.assertEqual(one, two)
+        self.assertEqual({one}, {two})
+        self.assertIs(one.serialize(), one.serialize())
+        loaded = load_rule_set(one.serialize(), one.checksum)
+        for rule in base.rules():
+            self.assertEqual(set(RuleRegistry(base.rules(), (a, b)).find_rule_conflicts(
+                rule.ref)), set(loaded.registry.find_rule_conflicts(rule.ref)))
+            self.assertEqual(one.registry.find_rule_conflicts(rule.ref),
+                             loaded.registry.find_rule_conflicts(rule.ref))
+        unsorted = json.loads(one.serialize())
+        unsorted["conflicts"].reverse()
+        encoded = json.dumps(unsorted).encode()
+        from tep_agent_lab.canonical_context import content_checksum
+        with self.assertRaises(RuleSetError):  # non-canonical order is not a valid artifact
+            load_rule_set(encoded, content_checksum(encoded, "sha256:canonical-json"))
+
+    def test_malformed_artifacts_raise_rule_set_errors(self) -> None:
+        revision = RuleSetRevision(registry(), Visibility.AGENT)
+        data = revision.serialize()
+        for broken in (b'{"visibility":"EVALUATOR",' + data[1:],  # duplicate key (M7)
+                       b"[" * 100000, bytes([0xff]), b'{"a": NaN}'):
+            with self.assertRaises(RuleSetError):
+                load_rule_set(broken, revision.checksum)
+        record = rule_record(full_rule())
+        for broken in ({**record, "authority": "HARD_GATE"}, {**record, "source_refs": []},
+                       {**record, "inputs": [1]}):
+            with self.assertRaises(RuleSetError):
+                rule_from_record(broken)
+        with self.assertRaises(RuleSetError):
+            RuleSetRevision(registry(), "PUBLIC")
+
     def test_visibility_taint(self) -> None:
         parent = RuleSetRevision(registry(), Visibility.EVALUATOR)
         parent_ref = self.commit(parent, "context/rule-sets/hidden.json", Visibility.EVALUATOR)

@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tep_agent_lab.persistence import CorruptRunLog, RunLog, canonical_json
+from tep_agent_lab.persistence import (CorruptRunLog, RunLog, canonical_json,
+                                       strict_json_loads)
 
 
 class RunLogTests(unittest.TestCase):
@@ -64,6 +65,13 @@ class RunLogTests(unittest.TestCase):
             with self.assertRaises((ValueError, TypeError)):
                 self.log.append("INVALID", bad)
         self.assertEqual((), self.log.events())
+
+    def test_strict_json_rejects_duplicate_keys_and_nonfinite_numbers(self):
+        self.assertEqual({"a": [{"b": 1}]}, strict_json_loads(b'{"a": [{"b": 1}]}'))
+        for data in (b'{"a": 1, "a": 2}', b'{"x": [{"b": 1, "b": 1}]}', b'[NaN]',
+                     b'{"x": Infinity}'):
+            with self.assertRaises(ValueError):
+                strict_json_loads(data)
 
     def test_mapping_order_is_irrelevant(self):
         self.assertEqual(canonical_json({"a": 1, "b": 2}),

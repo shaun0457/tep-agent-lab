@@ -42,6 +42,26 @@ def content_checksum(value: Any) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
+def strict_json_loads(data: bytes | str) -> Any:
+    """Parse JSON, rejecting duplicate object keys at any depth and NaN/Infinity.
+
+    Plain ``json.loads`` keeps the last duplicate key, so a forged leading key could
+    otherwise survive a checksum taken over the re-encoded value.
+    """
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            result[key] = value
+        return result
+
+    def constant(name: str) -> Any:
+        raise ValueError(f"non-finite JSON number {name}")
+
+    return json.loads(data, object_pairs_hook=pairs, parse_constant=constant)
+
+
 def _write_new(path: Path, data: bytes) -> None:
     with path.open("xb") as stream:
         stream.write(data)
