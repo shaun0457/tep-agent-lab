@@ -46,7 +46,7 @@ from .persistence import canonical_json, strict_json_loads
 from .persistence import content_checksum as json_digest
 from .rule_sets import (
     RULE_SET_KIND, RuleSetError, RuleSetRevision, check_extends, load_rule_set,
-    load_rule_set_source, rule_record,
+    load_rule_set_source, rule_from_record, rule_record,
 )
 from .rules import Authority, Origin, Rule, RuleRef, SourceVersion, Validation
 
@@ -814,6 +814,85 @@ def _conflicting_ids(candidate: Candidate) -> tuple[str, ...]:
                                                              CandidateKnowledge) else ()
 
 
+def _fragment_from_record(record: Any) -> SourceFragmentRef:
+    record = dict(record)
+    location = dict(record["location"])
+    fragment = SourceFragmentRef(
+        source_ref=_context_source(record["source_ref"]),
+        location=FragmentLocation(location["kind"], location["start"], location["end"],
+                                  location["pointer"]),
+        content_checksum=record["content_checksum"], fragment_kind=record["fragment_kind"],
+        fragmentation_policy=record["fragmentation_policy"], label=record["label"])
+    if fragment.record() != record:
+        raise CompilerError("fragment record does not reconstruct exactly")
+    return fragment
+
+
+def _provenance_from_record(record: Any) -> DerivationProvenance:
+    confidence = record["confidence"]
+    return DerivationProvenance(
+        extraction_method=record["extraction_method"],
+        grounding_method=record["grounding_method"], routing_policy=record["routing_policy"],
+        model=record["model"],
+        influencing_sources=tuple(_context_source(item)
+                                  for item in record["influencing_sources"]),
+        derived_inputs=tuple(DerivedInput(item["ref"], item["role"], item["visibility"],
+                                          item["content_checksum"])
+                             for item in record["derived_inputs"]),
+        confidence=None if confidence is None
+        else Confidence(confidence["score"], confidence["method"]))
+
+
+def candidate_from_record(record: Any) -> "Candidate":
+    """Rebuild a candidate from its complete record; it must re-serialize identically."""
+    if not isinstance(record, Mapping) or set(record) != _CANDIDATE_RECORD_KEYS:
+        raise CompilerError("candidate record must have exactly the v0 fields")
+    fragments = {item["fragment_id"]: _fragment_from_record(item)
+                 for item in record["fragments"]}
+    content, provenance = record["content"], _provenance_from_record(record["provenance"])
+
+    def pick(ids: Iterable[str]) -> tuple[SourceFragmentRef, ...]:
+        return tuple(fragments[item] for item in ids)
+
+    def targets(items: Iterable[Any]) -> tuple[PlantTargetRef, ...]:
+        return tuple(PlantTargetRef.from_record(item) for item in items)
+
+    candidate: Candidate
+    if record["candidate_type"] == "BINDING":
+        candidate = CandidateBinding(
+            candidate_id=record["candidate_id"], session_id=record["session_id"],
+            extraction_kind=content["extraction_kind"],
+            mention_fragment=fragments[content["mention_fragment"]],
+            mention_text=content["mention_text"], target_kind=content["target_kind"],
+            proposed_target=None if content["proposed_target"] is None
+            else PlantTargetRef.from_record(content["proposed_target"]),
+            scope_refs=targets(content["scope_refs"]), provenance=provenance,
+            normalized_mention=content["normalized_mention"],
+            alternative_targets=targets(record["version_extra"]["alternative_targets"]),
+            supporting_fragments=pick(content["supporting_fragments"]),
+            conflicting_fragments=pick(content["conflicting_fragments"]))
+    elif record["candidate_type"] == "KNOWLEDGE":
+        claim = content["normalized_claim"]
+        candidate = CandidateKnowledge(
+            candidate_id=record["candidate_id"], session_id=record["session_id"],
+            extraction_kind=content["extraction_kind"],
+            source_fragments=pick(content["source_fragments"]),
+            scope_refs=targets(content["scope_refs"]), provenance=provenance,
+            rule=None if content["rule"] is None else rule_from_record(content["rule"]),
+            normalized_claim=None if claim is None
+            else DerivedAnnotation(claim["text"], claim["generator"]),
+            conditions=content["conditions"],
+            values=tuple(TypedValue(item["name"], item["value"], item["unit"])
+                         for item in content["values"]),
+            conflicting_fragments=pick(content["conflicting_fragments"]),
+            conflicting_candidate_ids=tuple(content["conflicting_candidate_ids"]))
+    else:
+        raise CompilerError("unknown candidate type")
+    if canonical_json(candidate.record()) != canonical_json(record):
+        raise CompilerError("candidate record does not reconstruct exactly")
+    return candidate
+
+
 # -- compile session --------------------------------------------------------------------
 @dataclass(frozen=True)
 class CompilerPolicies:
@@ -854,6 +933,9 @@ class CompileSession:
     plant_graph_loader: Callable[[Any], Any]
     policies: CompilerPolicies
     visibility: Visibility = Visibility.AGENT
+    # Resolves the input rule set's ancestors by exact ref (content checksum); a parent
+    # that cannot be resolved fails closed.
+    rule_set_parent_resolver: Callable[[ContextSourceRef], bytes] | None = None
     inventory: tuple[ContextSourceRef, ...] = field(init=False)
     plant: PlantContextIndex = field(init=False)
     input_rule_set_ref: ContextSourceRef = field(init=False)
@@ -880,15 +962,21 @@ class CompileSession:
         if len(rule_sets) != 1 or rule_sets[0].source_id != self.input_rule_set_source_id:
             raise CompilerError("select exactly one input ENGINEERING_RULE_SET source")
         try:
-            input_rule_set = load_rule_set_source(self.registry, rule_sets[0].source_id,
-                                                  ProjectionScope.EVALUATOR)
+            input_rule_set = load_rule_set_source(
+                self.registry, rule_sets[0].source_id, ProjectionScope.EVALUATOR,
+                resolve_parent=self.rule_set_parent_resolver)
             graph_json = _json(self.registry.resolve(graphs[0].source_id,
                                                      ProjectionScope.EVALUATOR).content,
                                "PROCESS_GRAPH source")
         except (RuleSetError, ContextSourceError) as exc:
             raise CompilerError(f"compile input failed to load: {exc}") from exc
-        plant = PlantContextIndex.from_process_graph(graphs[0],
-                                                     self.plant_graph_loader(graph_json))
+        try:
+            plant = PlantContextIndex.from_process_graph(graphs[0],
+                                                         self.plant_graph_loader(graph_json))
+        except CompilerError:
+            raise
+        except Exception as exc:  # the caller-supplied loader owns its error types
+            raise CompilerError(f"PROCESS_GRAPH source does not load: {exc}") from exc
         object.__setattr__(self, "inventory", inventory)
         object.__setattr__(self, "plant", plant)
         object.__setattr__(self, "input_rule_set_ref", rule_sets[0])
@@ -913,7 +1001,8 @@ class CompileSession:
             raise CompilerError(f"compile input is not an exact attested source: {exc}") from exc
         registry.freeze()
         return cls(registry, process_graph_source_id, input_rule_set_source_id,
-                   plant_graph_loader, policies, visibility)
+                   plant_graph_loader, policies, visibility,
+                   rule_set_parent_resolver=_materialized(materializers))
 
     def source_content(self, ref: ContextSourceRef) -> bytes | None:
         """Re-attested bytes of an exact inventory source; None for anything else."""
@@ -923,6 +1012,17 @@ class CompileSession:
             return self.registry.resolve(ref.source_id, ProjectionScope.EVALUATOR).content
         except (UnknownContextSource, ContextSourceError):
             return None
+
+
+def _materialized(materializers: Mapping[str, SourceMaterializer]
+                 ) -> Callable[[ContextSourceRef], bytes]:
+    """Read an exact ancestor artifact; load_rule_set then checks its content checksum."""
+    def resolve(ref: ContextSourceRef) -> bytes:
+        materializer = materializers.get(ref.repository)
+        if materializer is None:
+            raise LookupError(f"no materialization for {ref.repository}")
+        return materializer.read_bytes(ref.path_or_ref)
+    return resolve
 
 
 # -- deterministic validation -------------------------------------------------------------
@@ -1366,7 +1466,11 @@ class Exclusion:
 
 @dataclass(frozen=True)
 class StagedPublication:
-    """A validated publication bundle. It is NOT canonical and advances no head.
+    """A self-consistent publication bundle. It is NOT canonical and advances no head.
+
+    Construction parses the revision strictly and checks that every metadata field
+    (lineage, refs, position, parent/expected head, exclusions) agrees with it; the
+    full dependency verification is ``verify_publication``.
 
     Committing it (one git commit that adds ``files`` and moves ``head_path`` from
     ``expected_head`` to ``revision`` by compare-and-set) is the P1.2D repository
@@ -1380,9 +1484,9 @@ class StagedPublication:
     candidates: ArtifactPathRef
     published_rule_set: ArtifactPathRef | None
     review_log_position: int
-    document: Mapping[str, Any]
     exclusions: tuple[Exclusion, ...]
     files: tuple[tuple[str, bytes], ...]
+    document: Mapping[str, Any] = field(init=False)
     head_path: str = field(init=False)
     head_record: bytes = field(init=False)
 
@@ -1409,6 +1513,21 @@ class StagedPublication:
             if ref is not None and (ref.path not in files
                                     or _sha256(files[ref.path]) != ref.content_checksum):
                 raise PublicationError(f"{ref.path} is missing or its checksum differs")
+        document = _keys(_artifact(files, self.revision), _REVISION_KEYS, "revision")
+        parent = document["parent_revision"]
+        expected_parent = None if parent is None else ArtifactPathRef(
+            parent["path_or_ref"], parent["content_checksum"])
+        rule_set = ({"revision": "INPUT"} if self.published_rule_set is None
+                    else {"revision": "SAME_COMMIT", **self.published_rule_set.record()})
+        if (document["lineage_id"] != lineage
+                or document["review_log"] != {"review_log_position": self.review_log_position,
+                                              **self.review_log.record()}
+                or document["candidates"] != self.candidates.record()
+                or document["published_rule_set"] != rule_set
+                or expected_parent != self.expected_head
+                or document["exclusions"] != [item.record() for item in self.exclusions]):
+            raise PublicationError("bundle metadata disagrees with its revision")
+        object.__setattr__(self, "document", freeze_json(document))
         object.__setattr__(self, "head_path", head)
         object.__setattr__(self, "head_record", canonical_json({
             "schema_version": HEAD_SCHEMA_VERSION, "lineage_id": lineage,
@@ -1450,6 +1569,59 @@ def _traced(item: _Approved) -> dict[str, Any]:
             "fragments": [fragment.record() for fragment in candidate.fragments()],
             "provenance": candidate.provenance.record(),
             "validation": item.validation.record()}
+
+
+def _item_record(item: _Approved) -> dict[str, Any]:
+    """The published record of one approved item; the verifier rebuilds it exactly."""
+    candidate = item.candidate
+    if candidate.route is Route.BINDING:
+        return {**_traced(item),
+                "target": None if item.target is None else item.target.record()}
+    if not isinstance(candidate, CandidateKnowledge):
+        raise PublicationError("knowledge routes need a CandidateKnowledge")
+    if candidate.route is Route.RULE:
+        if candidate.rule is None:
+            raise PublicationError("RULE-routed item without a Rule carrier")
+        return {**_traced(item),
+                "rule_ref": {"rule_id": candidate.rule.rule_id,
+                             "version": candidate.rule.version},
+                "rule_scope": candidate.rule.scope}
+    return {**_traced(item),
+            "knowledge_ref": {
+                "knowledge_id": f"{candidate.candidate_id}@{candidate.candidate_version}",
+                "validation_status": KNOWLEDGE_VALIDATION_STATUS,
+                "validation_evidence_review_id": item.review.review_id,
+                "content": [fragment.record() for fragment in candidate.source_fragments]}}
+
+
+def _check_parent_revision(parent: ContextSourceRef | None,
+                           resolver: Callable[[ContextSourceRef], bytes] | None,
+                           lineage: str, visibility: Visibility) -> None:
+    """A parent revision resolves exactly, belongs to the lineage and is not hidden."""
+    if parent is None:
+        return
+    if most_restrictive(parent.visibility, visibility) != visibility:
+        raise PublicationError("parent revision is more restrictive than the publication")
+    if resolver is None:
+        raise PublicationError("parent revision cannot be resolved")
+    try:
+        data = resolver(parent)
+    except Exception as exc:  # any resolver failure leaves the parent unresolved
+        raise PublicationError("parent revision cannot be resolved") from exc
+    if not isinstance(data, bytes):
+        raise PublicationError("parent revision resolver must return bytes")
+    document = _keys(_artifact({parent.path_or_ref: data},
+                               ArtifactPathRef(parent.path_or_ref, parent.content_checksum)),
+                     _REVISION_KEYS, "parent revision")
+    body = {key: value for key, value in document.items() if key != "revision_id"}
+    if (document["schema_version"] != REVISION_SCHEMA_VERSION
+            or document["kind"] != ENGINEERING_CONTEXT_REVISION_KIND
+            or document["revision_id"] != "ecr-" + _digest(body)):
+        raise PublicationError("parent is not a valid engineering-context revision")
+    if document["lineage_id"] != lineage:
+        raise PublicationError("parent revision belongs to another lineage")
+    if most_restrictive(_visibility(document["visibility"]), visibility) != visibility:
+        raise PublicationError("parent revision is more restrictive than the publication")
 
 
 def _by_ref(items: Iterable[Any], ref: Callable[[Any], CandidateRef]) -> list[Any]:
@@ -1592,13 +1764,15 @@ class CompilerWorkspace:
 
     # -- staged publication ----------------------------------------------------------------
     def stage_publication(self, session: CompileSession, request: PublicationRequest, *,
-                          derived_input_resolver: Callable[[DerivedInput], bytes] | None = None
+                          derived_input_resolver: Callable[[DerivedInput], bytes] | None = None,
+                          parent_resolver: Callable[[ContextSourceRef], bytes] | None = None
                           ) -> StagedPublication:
         """Build and fully validate the complete approved set, pinned to the log tail.
 
         The result is staging only (``StagedPublication``); no head moves. Every
         considered candidate's derived inputs must resolve to their exact recorded
-        bytes through ``derived_input_resolver``.
+        bytes through ``derived_input_resolver``, and a parent revision must resolve
+        through ``parent_resolver`` to the same lineage at no more restricted visibility.
         """
         if not isinstance(session, CompileSession) or not isinstance(request,
                                                                      PublicationRequest):
@@ -1609,6 +1783,8 @@ class CompilerWorkspace:
             position = len(self._reviews)
             records = tuple(self._reviews)
             self._check_dependency_closure(session)
+            _check_parent_revision(request.parent_revision, parent_resolver,
+                                   request.lineage_id, session.visibility)
             known_ids = frozenset(ref.candidate_id for ref in self._entries)
             entries: list[_Entry] = []
             for ref in sorted(request.candidate_refs):
@@ -1628,7 +1804,8 @@ class CompilerWorkspace:
                     approved.append(outcome)
             staged = self._build(session, request, records, position, approved,
                                  tuple(exclusions), tuple(entry.candidate for entry in entries))
-            verify_publication(dict(staged.files), staged.revision, session.input_rule_set)
+            verify_publication(dict(staged.files), staged.revision, session,
+                               parent_resolver=parent_resolver)
             return staged
 
     def _check_taint(self, session: CompileSession, candidate: Candidate,
@@ -1645,8 +1822,9 @@ class CompilerWorkspace:
         try:
             for ref in session.inventory:
                 session.registry.resolve(ref.source_id, ProjectionScope.EVALUATOR)
-            reloaded = load_rule_set_source(session.registry, session.input_rule_set_ref.source_id,
-                                            ProjectionScope.EVALUATOR)
+            reloaded = load_rule_set_source(
+                session.registry, session.input_rule_set_ref.source_id,
+                ProjectionScope.EVALUATOR, resolve_parent=session.rule_set_parent_resolver)
         except (ContextSourceError, RuleSetError) as exc:
             raise PublicationError(f"publication dependency failed to re-attest: {exc}") from exc
         if reloaded != session.input_rule_set:
@@ -1757,28 +1935,14 @@ class CompilerWorkspace:
                                          for item in approved}),
             "considered_candidate_refs": [candidate.ref.record() for candidate in considered],
             "candidates": candidates_ref.record(),
-            "approved_bindings": [
-                {**_traced(item), "target": None if item.target is None
-                 else item.target.record()} for item in bindings],
-            "approved_knowledge": [
-                {**_traced(item),
-                 "knowledge_ref": {
-                     "knowledge_id": f"{item.candidate.candidate_id}@"
-                                     f"{item.candidate.candidate_version}",
-                     "validation_status": KNOWLEDGE_VALIDATION_STATUS,
-                     "validation_evidence_review_id": item.review.review_id,
-                     "content": [fragment.record() for fragment in item.candidate.fragments()
-                                 if fragment not in item.candidate.conflicting_fragments]}}
-                for item in knowledge],
+            "approved_bindings": [_item_record(item) for item in bindings],
+            "approved_knowledge": [_item_record(item) for item in knowledge],
             "input_rule_set": session.input_rule_set_ref.record(),
             "published_rule_set": {"revision": "INPUT"} if published_rule_set is None
             else {"revision": "SAME_COMMIT", **published_rule_set.record()},
             "pinned_rule_refs": [{"rule_id": ref.rule_id, "version": ref.version}
                                  for ref in pinned],
-            "rule_scope_bindings": [
-                {**_traced(item), "rule_ref": {"rule_id": rule.rule_id,
-                                               "version": rule.version},
-                 "rule_scope": rule.scope} for item, rule in rule_items],
+            "rule_scope_bindings": [_item_record(item) for item, _ in rule_items],
             "review_log": {"review_log_position": position, **log_ref.record()},
             "review_ids": sorted(item.review.review_id for item in approved),
             "conflicts": conflicts,
@@ -1792,8 +1956,8 @@ class CompilerWorkspace:
         revision = ArtifactPathRef.of(f"{root}/revisions/{document['revision_id']}.json", data)
         files.append((revision.path, data))
         return StagedPublication(lineage, request.expected_head, revision, log_ref,
-                                 candidates_ref, published_rule_set, position,
-                                 freeze_json(document), exclusions, tuple(files))
+                                 candidates_ref, published_rule_set, position, exclusions,
+                                 tuple(files))
 
 
 def _resolve_derived_inputs(candidate: Candidate,
@@ -1898,13 +2062,20 @@ def _check_candidate_record(record: Any) -> tuple[CandidateRef, Mapping[str, Any
 
 
 def verify_publication(files: Mapping[str, bytes], revision: ArtifactPathRef,
-                       input_rule_set: RuleSetRevision) -> VerifiedRevision:
+                       session: CompileSession, *,
+                       parent_resolver: Callable[[ContextSourceRef], bytes] | None = None
+                       ) -> VerifiedRevision:
     """Recompute every effective decision, target and rule-set link from bundle content.
 
-    ``input_rule_set`` is R0 as loaded from its own committed ContextSourceRef.
+    ``session`` is the compile session over the revision's exact dependencies (its
+    sources, the pinned PROCESS_GRAPH and R0); its id must equal the revision's. Every
+    approved item is rebuilt from its stored candidate record and re-validated against
+    those dependencies with ``validate_candidate``.
     """
+    if not isinstance(session, CompileSession):
+        raise PublicationError("verification needs the revision's compile session")
     try:
-        return _verify(files, revision, input_rule_set)
+        return _verify(files, revision, session, parent_resolver)
     except PublicationError:
         raise
     except (CompilerError, RuleSetError, KeyError, TypeError, ValueError, AttributeError,
@@ -1912,8 +2083,10 @@ def verify_publication(files: Mapping[str, bytes], revision: ArtifactPathRef,
         raise PublicationError(f"publication does not verify: {exc!r}") from exc
 
 
-def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef,
-            input_rule_set: RuleSetRevision) -> VerifiedRevision:
+def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef, session: CompileSession,
+            parent_resolver: Callable[[ContextSourceRef], bytes] | None
+            ) -> VerifiedRevision:
+    input_rule_set = session.input_rule_set
     document = _keys(_artifact(files, revision), _REVISION_KEYS, "revision")
     body = {key: value for key, value in document.items() if key != "revision_id"}
     if (document["schema_version"] != REVISION_SCHEMA_VERSION
@@ -1932,6 +2105,11 @@ def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef,
                          "acceptance_policies": document["acceptance_policies"]},
             "visibility": visibility.value}):
         _fail("compile_session_id does not match the revision's compatibility tuple")
+    if session.session_id != session_id:
+        _fail("verification session differs from the revision's compile session")
+    parent = document["parent_revision"]
+    _check_parent_revision(None if parent is None else _context_source(parent),
+                           parent_resolver, document["lineage_id"], visibility)
     # Review log: strict schema, ordered positions, supersession and compatibility.
     log_meta = dict(_keys(document["review_log"], ("review_log_position", "path",
                                                    "content_checksum"), "review_log ref"))
@@ -1997,19 +2175,18 @@ def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef,
                     session_id, document["review_policy"], document["validation_policy"],
                     json_digest(document["plant_context"])):
                 _fail("effective review was made against another compatibility tuple")
-            content = stored["content"]
-            if review.decision is ReviewDecision.REMAP:
-                scope = _scope_records(review.selected_scope_refs or ())
-                target = (None if review.selected_target is None
-                          else review.selected_target.record())
-            else:
-                scope, target = content["scope_refs"], content.get("proposed_target")
-            if item["scope_refs"] != scope or item["original_scope_refs"] != content[
-                    "scope_refs"] or ("target" in item and item["target"] != target):
-                _fail("published target/scope differs from its review or candidate")
-            if item["content_key"] != stored["content_key"] or item["provenance"] != stored[
-                    "provenance"]:
-                _fail("approved item provenance differs from its candidate record")
+            # Rebuild the exact candidate and re-validate it (fragments against the
+            # attested sources, targets against the pinned PROCESS_GRAPH index).
+            candidate = candidate_from_record(stored)
+            validation = validate_candidate(session, candidate, review)
+            if not validation.passed:
+                _fail("approved item does not re-validate: " + ",".join(sorted(
+                    item.code.value for item in validation.findings if item.blocking)))
+            expected = _item_record(_Approved(candidate, review, validation,
+                                              validation.selected_target,
+                                              validation.selected_scope_refs))
+            if canonical_json(dict(item)) != canonical_json(expected):
+                _fail("approved item differs from its candidate, review and validation")
             effective.append(result)
         if refs != sorted(refs):
             _fail(f"{section} is not in canonical candidate order")
@@ -2050,8 +2227,8 @@ def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef,
         if rule_set.parent is None or rule_set.parent.record() != document["input_rule_set"]:
             _fail("published rule set parent is not the input rule set")
         check_extends(input_rule_set, rule_set)
-        expected = {rule.ref for rule in input_rule_set.registry.rules()} | set(pinned)
-        if {rule.ref for rule in rule_set.registry.rules()} != expected:
+        expected_refs = {rule.ref for rule in input_rule_set.registry.rules()} | set(pinned)
+        if {rule.ref for rule in rule_set.registry.rules()} != expected_refs:
             _fail("published rule set holds rules beyond R0 and the pinned candidates")
         for item in document["rule_scope_bindings"]:
             rule = rule_set.registry.get_rule(RuleRef(**item["rule_ref"]))

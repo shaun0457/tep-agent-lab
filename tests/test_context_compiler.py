@@ -219,6 +219,7 @@ class CompilerTestCase(unittest.TestCase):
         self.c = Compilation(self.root / "sources")
         self.session = self.c.session
         self.workspace = CompilerWorkspace("ws-1")
+        self.staged_files: dict[str, bytes] = {}
 
     def add(self, candidate, session=None, workspace=None):
         (workspace or self.workspace).add_candidate(session or self.session, candidate)
@@ -240,12 +241,18 @@ class CompilerTestCase(unittest.TestCase):
                                   parent_revision=parent)
 
     def stage(self, refs, session=None, workspace=None, **changes):
-        return (workspace or self.workspace).stage_publication(
+        staged = (workspace or self.workspace).stage_publication(
             session or self.session, self.request(refs, **changes),
-            derived_input_resolver=resolver)
+            derived_input_resolver=resolver, parent_resolver=self.resolve_parent)
+        self.staged_files.update(staged.files)  # stands in for the P1.2D commit
+        return staged
 
-    def verify(self, files, revision):
-        return verify_publication(files, revision, self.c.r0)
+    def resolve_parent(self, ref: ContextSourceRef) -> bytes:
+        return self.staged_files[ref.path_or_ref]
+
+    def verify(self, files, revision, session=None):
+        return verify_publication(files, revision, session or self.session,
+                                  parent_resolver=self.resolve_parent)
 
 
 class CompileSessionTests(CompilerTestCase):
@@ -996,10 +1003,125 @@ class VerifierForgeryTests(CompilerTestCase):
         with self.assertRaises(RuleSetError):
             load_rule_set(b'{"visibility":"EVALUATOR",' + r0[1:], self.c.r0.checksum)
 
-    def test_wrong_input_rule_set(self) -> None:
-        other = RuleSetRevision(RuleRegistry(()), Visibility.AGENT)
+    def test_wrong_session_or_parent_resolution(self) -> None:
+        other = self.c.prepare([GRAPH, self.c.sop_ref, self.c.r0_ref],
+                               review_policy="lab-review@2")
+        with self.assertRaises(PublicationError):  # another compatibility tuple / R0
+            self.verify(self.files, self.staged.revision, other)
         with self.assertRaises(PublicationError):
-            verify_publication(self.files, self.staged.revision, other)
+            verify_publication(self.files, self.staged.revision, self.c.r0)
+
+    def test_r2_2_verifier_rejects_an_unresolvable_or_hidden_parent(self) -> None:
+        hidden_parent = {
+            "source_id": "lab.ecr.parent", "repository": LAB_REPOSITORY,
+            "git_revision": "e" * 40, "path_or_ref": self.staged.revision.path,
+            "content_checksum": self.staged.revision.content_checksum,
+            "kind": ENGINEERING_CONTEXT_REVISION_KIND,
+            "schema_version": context_compiler.REVISION_SCHEMA_VERSION,
+            "visibility": "EVALUATOR", "checksum_method": "sha256:canonical-json",
+            "provenance": {}, "governance": {}}
+        document = json.loads(json.dumps(self.document))
+        document["parent_revision"] = hidden_parent
+        self.assertForged(document)
+        document = json.loads(json.dumps(self.document))
+        document["parent_revision"] = {**hidden_parent, "visibility": "AGENT",
+                                       "content_checksum": "6" * 64}
+        self.assertForged(document)
+
+    # Round-2 review: re-checksummed forgeries of approved items must fail.
+    def test_r2_1a_failed_validation_record(self) -> None:
+        item = self.document["approved_bindings"][0]
+        item["validation"]["findings"].append(
+            {"code": "TARGET_UNKNOWN", "detail": "forged", "blocking": True})
+        item["validation"]["passed"] = False
+        self.assertForged(self.document)
+
+    def test_r2_1b_deleted_fragments_or_knowledge_content(self) -> None:
+        document = json.loads(json.dumps(self.document))
+        document["approved_bindings"][0]["fragments"] = []
+        self.assertForged(document)
+        document = json.loads(json.dumps(self.document))
+        document["approved_knowledge"][0]["knowledge_ref"]["content"] = []
+        self.assertForged(document)
+
+    def test_r2_1c_changed_extraction_kind(self) -> None:
+        item = next(item for item in self.document["approved_bindings"]
+                    if item["candidate_ref"]["candidate_id"] == "reactor")
+        item["extraction_kind"] = "SIGNAL_MENTION"
+        self.assertForged(self.document)
+
+    def test_r2_1d_remap_to_a_nonexistent_target(self) -> None:
+        record = next(item for item in self.log["records"] if item["review_id"] == "r-actuator")
+        record["selected_target"]["target_id"] = "does-not-exist"
+        item = next(item for item in self.document["approved_bindings"]
+                    if item["candidate_ref"]["candidate_id"] == "actuator")
+        item["target"]["target_id"] = "does-not-exist"
+        self.assertForged(self.document, self.log)
+
+
+class RoundTwoStagingTests(CompilerTestCase):
+    def approved(self):
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref)
+        return ref
+
+    def parent_ref(self, staged, **changes):
+        fields = dict(source_id="lab.ecr.parent", repository=LAB_REPOSITORY,
+                      git_revision="e" * 40, path_or_ref=staged.revision.path,
+                      content_checksum=staged.revision.content_checksum,
+                      kind=ENGINEERING_CONTEXT_REVISION_KIND,
+                      schema_version=context_compiler.REVISION_SCHEMA_VERSION,
+                      visibility=Visibility.AGENT)
+        fields.update(changes)
+        return ContextSourceRef(**fields)
+
+    def test_r2_2_parent_must_resolve_in_lineage_and_visibility(self) -> None:
+        ref = self.approved()
+        other_lineage = self.stage([ref], lineage="other-lineage")
+        missing = self.parent_ref(other_lineage, path_or_ref="context/engineering-context/"
+                                  "reactor-cooling/revisions/missing.json",
+                                  content_checksum="4" * 64)
+        for parent in (missing, self.parent_ref(other_lineage),
+                       self.parent_ref(self.stage([ref]), visibility=Visibility.EVALUATOR)):
+            with self.subTest(parent=parent.path_or_ref):
+                with self.assertRaises(PublicationError):
+                    self.stage([ref], parent=parent)
+
+    def test_r2_4_staged_publication_is_self_consistent(self) -> None:
+        staged = self.stage([self.approved()])
+        empty = ArtifactPathRef.of(staged.revision.path, b"{}")
+        files = tuple((path, b"{}" if path == staged.revision.path else data)
+                      for path, data in staged.files)
+        for changes in ({"files": files, "revision": empty}, {"review_log_position": 999},
+                        {"expected_head": ArtifactPathRef(
+                            "context/engineering-context/other/revisions/x.json", "5" * 64)}):
+            with self.subTest(changes=sorted(changes)):
+                with self.assertRaises(PublicationError):
+                    replace(staged, **changes)
+
+    def test_r2_5_graph_loader_errors_are_compiler_errors(self) -> None:
+        self.c.write("graphs/empty.json", b"{}")
+        empty_graph = ContextSourceRef(
+            source_id=GRAPH.source_id, repository=LAB_REPOSITORY, git_revision=LAB_REVISION,
+            path_or_ref="graphs/empty.json",
+            content_checksum=hashlib.sha256(b"{}").hexdigest(), kind="PROCESS_GRAPH",
+            schema_version="tep-sim.process-graph/v0", visibility=Visibility.AGENT)
+        with self.assertRaises(CompilerError):
+            self.c.prepare([empty_graph, self.c.sop_ref, self.c.r0_ref])
+
+    def test_r2_3_prepare_rejects_a_rule_set_that_widens_its_parent(self) -> None:
+        hidden = RuleSetRevision(RuleRegistry((reviewed_blind_rca_policy(),)),
+                                 Visibility.EVALUATOR)
+        self.c.write("context/rule-sets/hidden.json", hidden.serialize())
+        lie = replace(self.c.r0_ref, source_id="lab.rules.hidden",
+                      path_or_ref="context/rule-sets/hidden.json",
+                      content_checksum=hidden.checksum)  # the parent ref claims AGENT
+        child = RuleSetRevision(hidden.registry, Visibility.AGENT, lie)
+        self.c.write("context/rule-sets/child.json", child.serialize())
+        child_ref = replace(self.c.r0_ref, path_or_ref="context/rule-sets/child.json",
+                            content_checksum=child.checksum)
+        with self.assertRaises(CompilerError):
+            self.c.prepare([GRAPH, self.c.sop_ref, child_ref])
 
 
 class BoundaryTests(unittest.TestCase):
