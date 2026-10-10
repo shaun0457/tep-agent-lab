@@ -467,8 +467,8 @@ Two target spaces exist and are never confused:
 EVALUATOR target space (C0 candidate space)     4 classes
   NO_ABNORMAL_CAUSE, IDV(4), IDV(11), IDV(14)
 
-primary-equivalence target space (scorer-v1)    3 classes unless entity_id is
-                                                identifier-reachable
+primary-equivalence target space (scorer-v1)    3 classes with the current truth
+                                                table (recomputed from frozen roles)
   {NO_ABNORMAL_CAUSE}
   {IDV(4), IDV(11)}   -> TEMPERATURE_DISTURBANCE equivalence class
   {IDV(14)}           -> VALVE_STICKING equivalence class
@@ -727,11 +727,13 @@ What freezes when:
 | Artifact | Frozen at | A later change requires |
 |---|---|---|
 | pilot cases, candidate set, timeline, truth, scorer-v1 | D0.2C1 fixture freeze | a new benchmark version |
-| C0 features, healthy rule, tolerances | D0.2C2, before any pilot-case C0 run is reported | a new C0 version (benchmark version unchanged) |
+| C0 features, healthy rule, tolerances | D0.2C2, before any pilot-case C0 run is reported | a new C0 version and a new benchmark version (`benchmark-design-v0.md` "Benchmark evolution") |
 
-D0.2C2 design iteration on calibration seeds happens before the C0 freeze and needs no
-version. After a C0 version has produced reported numbers, those numbers stay attached to
-it, and a revised C0 is reported next to it, never in place of it.
+D0.2C2 design iteration on calibration seeds happens before the first C0 freeze and needs
+no version. After a C0 version has produced reported numbers, any change to it creates a
+new C0 version and a new benchmark version, as `benchmark-design-v0.md` requires for C0
+implementation changes. The earlier numbers stay attached to the earlier versions, and
+the revised C0 is reported next to them, never in place of them.
 
 ## Leakage
 
@@ -747,22 +749,32 @@ as D0.2A did across its family.
 
 D0.2C1 adds `tep-agent-lab.benchmark-leakage-policy/v2` before it freezes pilot fixture
 bytes. Leakage policy is owned by `benchmark-case-v0.md`; the D0.2C1 PR updates that spec
-explicitly.
+explicitly. v2 is defined in full here, not as a delta:
 
-- v2 is leakage policy v1 plus one rule: the complete value set of the frozen
-  `CausalMechanism` vocabulary, offered as a whole as an Agent output schema, is not a
-  finding.
-- Any other occurrence of a truth label on an Agent surface stays a finding: a single
-  mechanism value, any proper subset of the vocabulary, or a value outside that complete
-  block.
-- The hidden-vocabulary screen (for example `disturbance`) still applies everywhere
-  outside the complete block.
-- v2 applies to setup/v1 cases whose scoring schema is
+- **Scope.** v2 audits setup/v1 cases whose scoring schema is
   `tep-agent-lab.benchmark-scoring/v1`, that is, the pilot cases. Every other case keeps
   the policy its setup schema maps to. Leakage policy v0/v1 behavior and every historical
   audit result are unchanged.
-- D0.2C1 tests both directions: the complete vocabulary block passes, and a single
-  mechanism value or a proper subset on an Agent surface fails.
+- **Inherited checks.** Every leakage policy v1 check applies, including the
+  `NO_INTERVENTION` hidden labels (setup kind, setup schema, setup policy version) and the
+  cross-case union of all four classes' labels and all twelve cases' hidden sources. The
+  implementation must not key those labels on `policy == v1` alone; D0.2C1 tests that a v2
+  audit still finds each of them.
+- **Whole-vocabulary check.** Outside the exempt node below, every value of the frozen
+  `CausalMechanism` vocabulary on an Agent surface is a finding (all ten values, not only
+  the pilot truth labels), and the hidden-vocabulary screen (for example `disturbance`)
+  applies.
+- **Exempt node.** Exactly one node is exempt: the `enum` of the mechanism field in a
+  versioned, case-independent Agent output schema. Its value list is byte-identical, in
+  the order the frozen vocabulary version lists the values, in every case and on every
+  audit surface that shows it. The node carries no per-value description, default,
+  example, ordering hint or other annotation. The exemption covers only the matching of
+  those enum elements; everything else in the schema, including its title and field
+  descriptions, is audited in full. The cross-case audit uses the same rule.
+- **Tests.** D0.2C1 tests both directions. The exact exempt node passes. Each of these
+  fails: a single value, a proper subset, a reordered list, an annotated list
+  (description, default or example), the same list outside the exempt node, and an extra
+  hidden ref next to the node.
 
 **Semantic nuisance proxy** (class inferable from a property that is not itself a hidden
 label) is a separate comparative check. Class must not be inferable from:
