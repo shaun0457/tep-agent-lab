@@ -237,6 +237,40 @@ class RuleSetRevisionTests(unittest.TestCase):
         with self.assertRaises(RuleSetError):
             RuleSetRevision(registry(), "PUBLIC")
 
+    def test_r2_3_child_never_widens_its_parent_visibility(self) -> None:
+        hidden = RuleSetRevision(registry(), Visibility.EVALUATOR)
+        hidden_ref = self.commit(hidden, "context/rule-sets/hidden.json", Visibility.EVALUATOR)
+        with self.assertRaises(RuleSetError):  # the parent ref itself is EVALUATOR
+            RuleSetRevision(hidden.registry, Visibility.AGENT, hidden_ref)
+        lie = replace(hidden_ref, visibility=Visibility.AGENT)
+        child = RuleSetRevision(hidden.registry, Visibility.AGENT, lie)
+        with self.assertRaises(RuleSetError):
+            check_extends(hidden, child)
+        child_ref = self.commit(child, "context/rule-sets/child.json")
+        context = self.source_registry(child_ref)
+        for resolver in (None, self.resolve):  # unresolvable, then resolved and too hidden
+            with self.assertRaises(RuleSetError):
+                load_rule_set_source(context, child_ref.source_id, ProjectionScope.AGENT,
+                                     resolve_parent=resolver)
+
+    def resolve(self, ref: ContextSourceRef) -> bytes:
+        return (self.root / ref.path_or_ref).read_bytes()
+
+    def test_child_lineage_loads_through_its_resolved_parent(self) -> None:
+        parent = RuleSetRevision(registry(), Visibility.AGENT)
+        parent_ref = self.commit(parent, "context/rule-sets/r0.json")
+        child = parent.derive(parent_ref, ())
+        child_ref = replace(self.commit(child, "context/rule-sets/r1.json"),
+                            source_id="rules.r1")
+        context = self.source_registry(child_ref)
+        loaded = load_rule_set_source(context, "rules.r1", ProjectionScope.AGENT,
+                                      resolve_parent=self.resolve)
+        self.assertEqual(child, loaded)
+        (self.root / "context/rule-sets/r0.json").write_bytes(b"{}")
+        with self.assertRaises(RuleSetError):  # the ancestor must match its checksum
+            load_rule_set_source(context, "rules.r1", ProjectionScope.AGENT,
+                                 resolve_parent=self.resolve)
+
     def test_visibility_taint(self) -> None:
         parent = RuleSetRevision(registry(), Visibility.EVALUATOR)
         parent_ref = self.commit(parent, "context/rule-sets/hidden.json", Visibility.EVALUATOR)

@@ -11,7 +11,7 @@ changes no Rule axis and grants no authority.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, fields
 import hashlib
 from typing import Any
@@ -37,6 +37,8 @@ _TUPLE_FIELDS = ("inputs", "source_refs", "validation_refs")
 _OPTIONAL_TEXT = ("expected_effect_or_constraint", "operating_envelope", "units",
                   "support_summary", "reviewed_by")
 _RECORD_ERRORS = (TypeError, ValueError, KeyError, AttributeError, RecursionError)
+_MAX_LINEAGE_DEPTH = 64
+ParentResolver = Callable[[ContextSourceRef], bytes]
 
 
 class RuleSetError(ValueError):
@@ -192,6 +194,8 @@ class RuleSetRevision:
             raise RuleSetError("invalid rule-set visibility") from None
         if self.parent is not None:
             _rule_set_ref(self.parent)
+            if most_restrictive(self.parent.visibility, self.visibility) != self.visibility:
+                raise RuleSetError("a rule set is never less restricted than its parent")
         conflicts = tuple(sorted(self.registry.conflicts(), key=_conflict_key))
         if conflicts != self.registry.conflicts():
             object.__setattr__(self, "registry", RuleRegistry(self.registry.rules(), conflicts))
@@ -245,6 +249,8 @@ def check_extends(parent: RuleSetRevision, child: RuleSetRevision) -> None:
     """The child names this parent and keeps every parent rule and conflict unchanged."""
     if child.parent is None or child.parent.content_checksum != parent.checksum:
         raise RuleSetError("child rule set does not name this parent")
+    if most_restrictive(parent.visibility, child.visibility) != child.visibility:
+        raise RuleSetError("child rule set is less restricted than its parent")
     for rule in parent.registry.rules():
         try:
             kept = child.registry.get_rule(rule.ref)
@@ -289,12 +295,46 @@ def load_rule_set(data: bytes, expected_checksum: str) -> RuleSetRevision:
     return revision
 
 
+def _check_ref_visibility(ref: ContextSourceRef, revision: RuleSetRevision) -> None:
+    if most_restrictive(ref.visibility, revision.visibility) != ref.visibility:
+        raise RuleSetError("source ref visibility is wider than the rule set it addresses")
+
+
+def verify_rule_set_lineage(revision: RuleSetRevision,
+                            resolve_parent: ParentResolver | None) -> None:
+    """Resolve every ancestor by its exact ref and check each link, visibility included.
+
+    A parent ref is data inside the child, so its declared visibility proves nothing:
+    the parent content is loaded by checksum and its own visibility is the floor. A
+    parent that cannot be resolved fails closed.
+    """
+    child, depth = revision, 0
+    while child.parent is not None:
+        depth += 1
+        if depth > _MAX_LINEAGE_DEPTH:
+            raise RuleSetError("rule-set lineage is too deep")
+        if resolve_parent is None:
+            raise RuleSetError("rule-set parent cannot be resolved")
+        try:
+            data = resolve_parent(child.parent)
+        except Exception as exc:  # any resolver failure leaves the parent unresolved
+            raise RuleSetError("rule-set parent cannot be resolved") from exc
+        if not isinstance(data, bytes):
+            raise RuleSetError("rule-set parent resolver must return bytes")
+        parent = load_rule_set(data, child.parent.content_checksum)
+        _check_ref_visibility(child.parent, parent)
+        check_extends(parent, child)
+        child = parent
+
+
 def load_rule_set_source(registry: CanonicalContextRegistry, source_id: str,
-                         scope: ProjectionScope) -> RuleSetRevision:
-    """Load through a frozen source inventory, which re-attests revision and checksum."""
+                         scope: ProjectionScope, *,
+                         resolve_parent: ParentResolver | None = None) -> RuleSetRevision:
+    """Load through a frozen source inventory (re-attesting revision and checksum) and
+    verify the whole parent lineage through ``resolve_parent``."""
     resolved = registry.resolve(source_id, scope)
     ref = _rule_set_ref(resolved.ref)
     revision = load_rule_set(resolved.content, ref.content_checksum)
-    if most_restrictive(ref.visibility, revision.visibility) != ref.visibility:
-        raise RuleSetError("source ref visibility is wider than the rule set it addresses")
+    _check_ref_visibility(ref, revision)
+    verify_rule_set_lineage(revision, resolve_parent)
     return revision
