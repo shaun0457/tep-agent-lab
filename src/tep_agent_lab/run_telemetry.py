@@ -1,0 +1,214 @@
+"""Run-scoped canonical telemetry for one prepared P0 session (P1.1C).
+
+docs/p1-1c-canonical-telemetry-integration.md::
+
+    ReferenceWorld.history()                 (unchanged owner; harness advances it)
+      -> RunTelemetry.sync_reference_history (once, inside RunManager.prepare)
+      -> TEPSimulationSource.translate_sanitized   (one batch per record)
+      -> TelemetryIngestor (trusted P0 clock supplies ingest_time)
+      -> run-scoped InMemoryTimeSeriesStore -> TelemetryReadSnapshot -> TimeSeriesReader
+
+Every prepare attempt draws an opaque incarnation token. Public identifiers (source,
+clocks, namespace, incarnation) carry that token, never the attempt counter, the
+session directory or a failure count, so failed prepares stay invisible to AGENT
+readers. The token-to-attempt association exists only in this trusted in-process
+object. ``translate``/``deliver`` are a trusted harness seam reachable through the
+in-process ``RunSession`` only; no public P0, application or transport read reaches
+them.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from fractions import Fraction
+import re
+import secrets
+import threading
+from typing import Any
+
+from industrial_agent_runtime import checksum, to_jsonable
+from tep_sim import ProcessGraph
+
+from .canonical_context import ContextSourceRef
+from .telemetry import (TELEMETRY_CONTRACT_VERSION, AppendResult, ClockDescriptor, ClockKind,
+                        InMemoryTimeSeriesStore, SignalSample, SnapshotUnavailable,
+                        SourceObservation, StoreRef, TelemetryError, TelemetryIngestor,
+                        TelemetryReadSnapshot, TimePoint, TimeSeriesReader)
+from .tep_telemetry import TEPSimulationSource
+
+TELEMETRY_STORE_ID = "p0-reference-telemetry"
+CANONICAL_SOURCE = "P0 run-scoped canonical reference telemetry"
+# Trusted acceptance clock: the P0 RunManager clock, in UTC milliseconds. Ingest time is
+# diagnostic only; the store commit revision K orders knowledge.
+INGEST_CLOCK = ClockDescriptor("p0-ingest-utc", ClockKind.UTC, Fraction(1, 1000),
+                               "1970-01-01T00:00:00Z/utc")
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_RESOLUTION = re.compile(r"[1-9][0-9]*/[1-9][0-9]*")
+SNAPSHOT_KEYS = frozenset({"contract", "store", "ingest_sequence", "event_horizon",
+                           "event_clock", "context_ref", "visibility_policy_ref",
+                           "snapshot_ref"})
+
+
+@dataclass(frozen=True)
+class TelemetryReadPolicy:
+    """P0 reader service policy (not contract): returned points, interval, window scan."""
+
+    max_points_limit: int = 1000
+    max_interval_ticks: int = 2_592_000      # 30 simulated days at 1 s/tick
+    max_scan_records: int = 50_000
+
+
+def context_ref_for(graph_source: ContextSourceRef) -> str:
+    """Exact ref of the attested AGENT PROCESS_GRAPH source the bindings come from.
+
+    Not a PlantContextRevision; P1.3 maps it through this recorded source ref.
+    """
+    if not isinstance(graph_source, ContextSourceRef) or graph_source.kind != "PROCESS_GRAPH":
+        raise TelemetryError("context_ref requires the PROCESS_GRAPH ContextSourceRef")
+    return f"context-source:{graph_source.source_id}:sha256:{checksum(to_jsonable(graph_source))}"
+
+
+def snapshot_json(snapshot: TelemetryReadSnapshot) -> dict[str, Any]:
+    """The public snapshot object: the core snapshot body plus its ``snapshot_ref``."""
+    return {**snapshot.as_json(), "snapshot_ref": snapshot.snapshot_ref}
+
+
+def sample_json(sample: SignalSample) -> dict[str, Any]:
+    return {"source_id": sample.source_id, "signal_id": sample.signal_id,
+            "sequence": sample.sequence, "event_ticks": sample.event_time.ticks,
+            "ingest_time_ticks": sample.ingest_time.ticks, "value": sample.value,
+            "quality": str(sample.quality)}
+
+
+def utc_ticks(timestamp: Any) -> int:
+    """Milliseconds since the UTC epoch of a trusted ISO-8601 timestamp with offset."""
+    if not isinstance(timestamp, str):
+        raise TelemetryError("trusted clock must return an ISO-8601 timestamp")
+    try:
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        raise TelemetryError("trusted clock must return an ISO-8601 timestamp") from None
+    if moment.utcoffset() is None:
+        raise TelemetryError("trusted clock timestamp must carry a UTC offset")
+    return (moment - _EPOCH) // timedelta(milliseconds=1)
+
+
+def _exact(value: Any, keys: set[str], name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise TelemetryError(f"snapshot {name} has an unexpected shape")
+    return value
+
+
+def _nonnegative(name: str, value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise TelemetryError(f"{name} must be a non-negative integer")
+    return value
+
+
+class RunTelemetry:
+    """Source, store, ingestor and reader of one prepared P0 session (one incarnation)."""
+
+    def __init__(self, *, run_id: str, graph: ProcessGraph, graph_source: ContextSourceRef,
+                 visibility_policy_ref: str, clock: Callable[[], str],
+                 policy: TelemetryReadPolicy | None = None) -> None:
+        policy = policy or TelemetryReadPolicy()
+        if not isinstance(policy, TelemetryReadPolicy):
+            raise TelemetryError("TelemetryReadPolicy required")
+        self._token = secrets.token_hex(16)   # opaque; never the attempt number
+        token = self._token
+        self.policy = policy
+        self.source = TEPSimulationSource(graph, source_id=f"tep-reference:{run_id}:{token}",
+                                          clock_id=f"tep-sim:{run_id}:{token}",
+                                          clock_origin=f"tep-reset:{run_id}:{token}")
+        self.store = InMemoryTimeSeriesStore(
+            store_id=TELEMETRY_STORE_ID, namespace=f"p0-run:{run_id}:{token}",
+            context_ref=context_ref_for(graph_source),
+            visibility_policy_ref=visibility_policy_ref, event_clock=self.source.event_clock,
+            ingest_clock=INGEST_CLOCK, bindings=self.source.store_bindings(),
+            incarnation=f"inc-{token}")
+        self.reader = TimeSeriesReader(self.store, max_interval_ticks=policy.max_interval_ticks,
+                                       max_scan_records=policy.max_scan_records,
+                                       max_points_limit=policy.max_points_limit)
+        self._ingestor = TelemetryIngestor(self.store)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._cursor = 0
+
+    @property
+    def source_id(self) -> str:
+        return self.source.source_id
+
+    # -- trusted ingestion seam ---------------------------------------------------------
+    def translate(self, record: Mapping[str, Any]) -> tuple[SourceObservation, ...]:
+        """One sanitized record -> one batch with a newly allocated source sequence."""
+        return self.source.translate_sanitized(record)
+
+    def deliver(self, batch: Sequence[SourceObservation]) -> AppendResult:
+        """Commit one batch atomically at the trusted P0 clock's ingest time."""
+        return self._ingestor.ingest(batch, ingest_time=TimePoint(
+            INGEST_CLOCK.clock_id, utc_ticks(self._clock())))
+
+    def sync_reference_history(self, history: Sequence[Mapping[str, Any]]) -> int:
+        """Translate and ingest ``history[cursor:]`` in order; return the committed K."""
+        with self._lock:
+            if len(history) < self._cursor:
+                raise TelemetryError("reference history shrank below the ingested prefix")
+            for record in history[self._cursor:]:
+                self.deliver(self.translate(record))
+                self._cursor += 1
+            return self.store.current_ingest_sequence
+
+    # -- snapshots ----------------------------------------------------------------------
+    def snapshot(self, *, event_horizon_ticks: int | None = None,
+                 ingest_sequence: int | None = None) -> TelemetryReadSnapshot:
+        """Freeze (T, K) once. K defaults to now; T to the K frontier, or tick 0 if empty."""
+        if ingest_sequence is None:
+            ingest_sequence = self.store.current_ingest_sequence
+        _nonnegative("ingest_sequence", ingest_sequence)
+        if event_horizon_ticks is None:
+            frontier = self.store.event_frontier(ingest_sequence)
+            event_horizon_ticks = 0 if frontier is None else frontier.ticks
+        _nonnegative("event_horizon_ticks", event_horizon_ticks)
+        return self.store.snapshot(TimePoint(self.store.event_clock.clock_id,
+                                             event_horizon_ticks), ingest_sequence)
+
+    def resolve_snapshot(self, value: Any) -> TelemetryReadSnapshot:
+        """Rebuild an exact public snapshot object, check its ref, resolve it here."""
+        if isinstance(value, TelemetryReadSnapshot):
+            return self.store.resolve(value)
+        body = _exact(value, set(SNAPSHOT_KEYS), "object")
+        if body["contract"] != TELEMETRY_CONTRACT_VERSION:
+            raise SnapshotUnavailable("unsupported snapshot contract")
+        store = _exact(body["store"], {"store_id", "incarnation", "namespace"}, "store")
+        horizon = _exact(body["event_horizon"], {"clock_id", "ticks"}, "event_horizon")
+        clock = _exact(body["event_clock"], {"clock_id", "kind", "resolution", "origin"},
+                       "event_clock")
+        if not isinstance(clock["resolution"], str) or not _RESOLUTION.fullmatch(
+                clock["resolution"]):
+            raise TelemetryError("snapshot clock resolution must be an exact n/d fraction")
+        numerator, denominator = clock["resolution"].split("/")
+        try:
+            pinned = TelemetryReadSnapshot(
+                StoreRef(store["store_id"], store["incarnation"], store["namespace"]),
+                body["ingest_sequence"], TimePoint(horizon["clock_id"], horizon["ticks"]),
+                ClockDescriptor(clock["clock_id"], clock["kind"],
+                                Fraction(int(numerator), int(denominator)), clock["origin"]),
+                body["context_ref"], body["visibility_policy_ref"])
+        except (TypeError, ValueError) as error:
+            if isinstance(error, TelemetryError):
+                raise
+            raise TelemetryError("snapshot fields have invalid types") from None
+        if body["snapshot_ref"] != pinned.snapshot_ref:
+            raise SnapshotUnavailable("snapshot reference does not match its contents")
+        return self.store.resolve(pinned)
+
+    def history_bounds(self, snapshot: TelemetryReadSnapshot, event_start_ticks: Any,
+                       event_end_ticks: Any) -> tuple[int, int]:
+        """Default end = T and start = max(0, end - max_interval_ticks), resolved once."""
+        end = (snapshot.event_horizon.ticks if event_end_ticks is None
+               else _nonnegative("event_end_ticks", event_end_ticks))
+        start = (max(0, end - self.policy.max_interval_ticks) if event_start_ticks is None
+                 else _nonnegative("event_start_ticks", event_start_ticks))
+        return start, end

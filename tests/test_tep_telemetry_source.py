@@ -708,10 +708,10 @@ class DependencyDirectionTests(unittest.TestCase):
                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
         self.assertFalse(called & forbidden)
 
-    def test_existing_production_path_does_not_use_adapter(self) -> None:
-        for path in self.ROOT.glob("*.py"):
-            if path.name != "tep_telemetry.py":
-                self.assertNotIn("tep_telemetry", path.read_text(encoding="utf-8"), path.name)
+    def test_adapter_reuses_the_existing_sanitizer(self) -> None:
+        # P1.1C replaced the P1.1B parallel-path invariant with a positive integration
+        # test (test_canonical_telemetry_integration: P0 prepare ingests through this
+        # adapter); the adapter still reuses the one Agent-visible sanitizer.
         self.assertIs(tep_world.sanitize_observation, sanitize_observation)
 
 

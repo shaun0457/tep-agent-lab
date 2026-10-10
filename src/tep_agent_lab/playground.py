@@ -48,6 +48,7 @@ from .canonical_context import (_SHA256, CANONICAL_JSON_SHA256, RESERVED_NAMES,
 from .investigation import (RcaResultIngestor, RcaState, RcaStateStore,
                             readiness_deficiencies)
 from .persistence import RunLog, canonical_json
+from .run_telemetry import RunTelemetry, TelemetryReadPolicy
 from .tep_world import ArtifactStore, ReferenceWorld
 from .tool_bridge import BRIDGE_VERSION, AnalysisToolBridge, BridgedToolSurface
 from .tool_surface import TOOL_SURFACE_VERSION, BlindRcaToolSurface
@@ -545,6 +546,8 @@ class RunSession:
     provider: ModelProvider
     registry: CanonicalContextRegistry
     closed: bool = False
+    # Run-scoped canonical telemetry (P1.1C); survives close() for snapshot reads.
+    telemetry: RunTelemetry | None = None
 
     def close(self) -> None:
         """Release simulator handles; in-memory history/lineage stays readable."""
@@ -622,9 +625,15 @@ class RunManager:
     def __init__(self, root: str | Path, *, revisions: SourceRevisions,
                  dependency_pins: Mapping[str, str],
                  materializers: Mapping[str, SourceMaterializer] | None = None,
-                 clock: Callable[[], str] | None = None) -> None:
+                 clock: Callable[[], str] | None = None,
+                 telemetry_policy: TelemetryReadPolicy | None = None) -> None:
         if not isinstance(revisions, SourceRevisions):
             raise TypeError("SourceRevisions required")
+        if telemetry_policy is not None and not isinstance(telemetry_policy,
+                                                           TelemetryReadPolicy):
+            raise TypeError("TelemetryReadPolicy required")
+        # Trusted host configuration of the canonical telemetry reader (not a manifest field).
+        self.telemetry_policy = telemetry_policy or TelemetryReadPolicy()
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.revisions = revisions
@@ -854,7 +863,8 @@ class RunManager:
                         applied, benchmark, registry, request, world).record()}
             else:
                 benchmark_record = {"case_setup_applied": case_setup is not None}
-            session = self._session(run, request, directory, world, provider, registry)
+            session = self._session(run, request, directory, world, provider, registry,
+                                    graph_source)
         except BaseException:
             if environment is not None:
                 environment.close()
@@ -955,7 +965,15 @@ class RunManager:
 
     def _session(self, run: _Run, request: RunRequest, directory: Path,
                  world: ReferenceWorld, provider: ModelProvider,
-                 registry: CanonicalContextRegistry) -> RunSession:
+                 registry: CanonicalContextRegistry,
+                 graph_source: ContextSourceRef) -> RunSession:
+        # Canonical telemetry first: every reference record the harness produced is
+        # ingested through the TEP source before READY; a failure fails prepare.
+        telemetry = RunTelemetry(run_id=run.run_id, graph=world.graph,
+                                 graph_source=graph_source,
+                                 visibility_policy_ref=f"{VISIBILITY_POLICY_VERSION}#AGENT",
+                                 clock=self.clock, policy=self.telemetry_policy)
+        telemetry.sync_reference_history(world.history())
         artifacts = ArtifactStore(directory / "lab-artifacts")
         holder: list[RcaStateStore] = []
 
@@ -988,7 +1006,8 @@ class RunManager:
         task = Task(task_id, request.goal, (incident,), tuple(allowed), request.budget,
                     request.output_schema, metadata={"run_id": run.run_id})
         return RunSession(directory, world, artifacts, bridged, run_log, store,
-                          TraceRecorder(directory / "trace"), task, provider, registry)
+                          TraceRecorder(directory / "trace"), task, provider, registry,
+                          telemetry=telemetry)
 
     # -- start --------------------------------------------------------------------------
     def start(self, run_id: str) -> RunOutcome:
