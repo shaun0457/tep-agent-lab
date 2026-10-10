@@ -69,16 +69,22 @@ contract). The P1.1A note is updated in the implementation PR.
 ### 2. Run-scoped store and ingestion (`run_telemetry.py`, `playground.py`)
 
 `RunManager._session` builds one `RunTelemetry` per prepare attempt and stores it in
-`RunSession.telemetry`. Registration, all derived from the frozen run inputs:
+`RunSession.telemetry`. Each attempt draws an opaque incarnation token
+`token = secrets.token_hex(16)`. The token is never derived from the attempt counter,
+the session directory (`prepare-000N`) or a failure count. The token-to-attempt mapping
+lives only in trusted in-process session state (EVALUATOR/trusted reads), never in a
+public view. This keeps failed prepares invisible to AGENT readers, as the
+`PREPARE_FAILED` filtering in `RunQueries.events` already does (playground-backend-v0
+§RunOutcome: hidden setup/error isolation). Registration:
 
 | Field | Value |
 |---|---|
-| source | `TEPSimulationSource(graph, source_id=f"tep-reference:{run_id}/{attempt}", clock_id=f"tep-sim:{run_id}/{attempt}", clock_origin=f"tep-reset:{run_id}/{attempt}")` |
-| store | `store_id="p0-reference-telemetry"`, `namespace=f"p0-run:{run_id}/{attempt}"`, bindings `source.store_bindings()` (53) |
+| source | `TEPSimulationSource(graph, source_id=f"tep-reference:{run_id}:{token}", clock_id=f"tep-sim:{run_id}:{token}", clock_origin=f"tep-reset:{run_id}:{token}")` |
+| store | `store_id="p0-reference-telemetry"`, `namespace=f"p0-run:{run_id}:{token}"`, `incarnation=f"inc-{token}"`, bindings `source.store_bindings()` (53) |
 | `context_ref` | see §4 |
 | `visibility_policy_ref` | `f"{VISIBILITY_POLICY_VERSION}#AGENT"` (store holds only sanitized AGENT-visible data) |
 | ingest clock | `UTC`, 1 ms/tick, origin `1970-01-01T00:00:00Z/utc`; `ingest_time` = trusted `RunManager.clock()`; diagnostic only, K orders knowledge |
-| reader | `max_points_limit=1000`, `max_interval_ticks=2_592_000` (30 d), `max_scan_records=50_000` (service policy, not contract) |
+| reader | `TelemetryReadPolicy(max_points_limit=1000, max_interval_ticks=2_592_000 (30 d), max_scan_records=50_000)`: service policy, not contract; a trusted `RunManager(telemetry_policy=...)` argument may lower it (tests) |
 
 Ingestion rules:
 
@@ -91,11 +97,13 @@ Ingestion rules:
 - In P0 v0 the reference history cannot change after READY (blind RCA has no MUTATE;
   harness advances only in `case_setup`), so no ingestion happens during or after
   RUNNING. A future reference-mutating path must call `sync_reference_history`.
-- `deliver(batch)` is the single commit seam (`TelemetryIngestor` plus next trusted
-  ingest time). It is reachable only through the in-process `RunSession` (trusted
-  harness), never through `RunQueries`, `ApplicationViewService` or transport. Tests use
-  it to re-deliver, reorder or add batches (§Acceptance). It is not the deferred
-  dirty-stream harness: it injects no gaps, quality, skew or disconnect.
+- `translate(record)` (the session's `TEPSimulationSource.translate_sanitized`) and
+  `deliver(batch)` (`TelemetryIngestor` plus the next trusted ingest time) form the
+  single commit seam. They are reachable only through the in-process `RunSession`
+  (trusted harness), never through `RunQueries`, `ApplicationViewService` or
+  transport. Tests use them to re-deliver, reorder or add batches (§Acceptance). This
+  is not the deferred dirty-stream harness: it injects no gaps, quality, skew or
+  disconnect.
 - Reference and counterfactual streams stay separate: branches are not ingested.
 - The store lives as long as the session object; `RunSession.close()` releases simulator
   handles but keeps the store. A run reopened from disk has no store: snapshots report
@@ -114,8 +122,11 @@ telemetry_history(signal_id: str, *, snapshot: Mapping, event_start_ticks: int,
 ```
 
 - `telemetry_snapshot` is the only call that chooses (T, K). Defaults are resolved once
-  and disclosed: K = committed revision now, T = `event_frontier(K)`. Explicit K must be
-  `<= current`; explicit T is any non-negative tick on the run clock.
+  and disclosed: K = committed revision now, T = `event_frontier(K)`, and T = run-clock
+  tick 0 when `event_frontier(K)` is `None` (K = 0, an empty prefix). Explicit K must be
+  `<= current`; explicit T is any non-negative tick on the run clock. After `prepare()`,
+  K >= 1, so K = 0 is reachable only through an explicit `ingest_sequence=0`; it reads
+  `NO_DATA`.
 - `current`/`history` require `snapshot` (the `snapshot` mapping of a
   `TelemetrySnapshotView`). P0 rebuilds `TelemetryReadSnapshot` from it with an exact
   key set and contract version, recomputes `snapshot_ref`, requires equality, then calls
@@ -125,7 +136,11 @@ telemetry_history(signal_id: str, *, snapshot: Mapping, event_start_ticks: int,
   accepted on this path.
 - Views go through `RunQueries._view` (leakage screen, frozen JSON). They carry
   `snapshot_ref`, the snapshot body, binding, bounds, eligible/returned counts, sample
-  identities, event ticks, ingest times, qualities, reduction policy and coverage.
+  identities, event ticks, ingest times, qualities, reduction policy and coverage. Every
+  identifier in them comes from the opaque token (§2), never from the attempt number.
+- Failures keep the core exception types and fixed messages (no counts or values):
+  `SnapshotUnavailable`/`ClockMismatch`/`TelemetryError`/`ResourceLimitExceeded`. The
+  application layer maps them without adding detail.
 - These reads never touch the world, so they do not take `world_lock`. They work in
   READY, RUNNING and terminal states while the session is in-process; otherwise
   `ViewUnavailable`.
@@ -156,8 +171,8 @@ metadata. The manifest is not changed. The ref is recomputable from the manifest
 | File | Change |
 |---|---|
 | `src/tep_agent_lab/telemetry.py` | event-time index, window-bounded scans, `event_frontier`; still stdlib-only, no TEP vocabulary |
-| `src/tep_agent_lab/run_telemetry.py` (new) | `RunTelemetry`: source/store/ingestor/reader registration, `sync_reference_history`, `deliver`, `snapshot`, `resolve_snapshot(mapping)`, `context_ref_for(graph_source)` |
-| `src/tep_agent_lab/playground.py` | `RunSession.telemetry`; build and sync in `_session`; prepare fails closed on ingest failure |
+| `src/tep_agent_lab/run_telemetry.py` (new) | `RunTelemetry`: source/store/ingestor/reader registration, `TelemetryReadPolicy`, opaque incarnation token, `sync_reference_history`, `translate`, `deliver`, `snapshot`, `resolve_snapshot(mapping)`, `context_ref_for(graph_source)` |
+| `src/tep_agent_lab/playground.py` | `RunSession.telemetry` (holds the opaque token); optional trusted `RunManager(telemetry_policy=...)`; build and sync in `_session`; prepare fails closed on ingest failure |
 | `src/tep_agent_lab/playground_views.py` | three canonical telemetry views; `TelemetryView` v0 untouched |
 | `src/tep_agent_lab/application_views.py`, `application_models.py` | three snapshot-bound reads and four models; v0 reads untouched |
 | `tests/test_telemetry_core.py` | index tests; scan-bound tests rewritten to window semantics |
@@ -188,12 +203,15 @@ prepare with `FakeProvider`; reads through `RunQueries` and `ApplicationViewServ
 | `test_production_wiring_dependency_direction` | Replaces `test_existing_production_path_does_not_use_adapter`: `playground` imports `run_telemetry`; only `run_telemetry` imports `tep_telemetry`; `telemetry` imports neither; `tool_surface`, `tool_bridge`, `benchmark` import neither; §TEP boundaries |
 | `test_store_context_ref_is_the_attested_process_graph_source` | §Canonical Plant Context ("telemetry's pinned context must agree with the plant revision used for its bindings"); ADR-004 Decision 4 item 4; I9 |
 | `test_prepare_fails_closed_when_ingestion_fails` | playground-backend-v0 prepare atomicity; §Sources (fail closed) |
+| `test_public_telemetry_ids_hide_prepare_attempts` | playground-backend-v0 §RunOutcome hidden setup/error isolation: a failed prepare followed by a successful retry. No public telemetry identifier (source, clocks, origin, namespace, incarnation, snapshot body, `snapshot_ref`, view and model fields) contains `prepare-`, the attempt number or a failure count. The ids have the same shape as a first-try run and differ only by the opaque token. K and sequences start fresh |
 | `test_reads_require_an_exact_snapshot` | §Append store and read snapshots: no read without a snapshot; forged `snapshot_ref`, other incarnation/context/policy, future K rejected; ADR-004 Decision 6 "no latest" |
-| `test_live_temporal_leakage_invariant` | §Hard temporal leakage invariant: at (T, K), a late sample (event <= T) committed at K+1 and a sample with event > T are invisible; repeated reads equal and `repr`-identical, via both boundaries |
+| `test_k0_snapshot_reads_no_data` | §Bounded reads ("empty valid interval is an empty result"; explicit no-data): `telemetry_snapshot(ingest_sequence=0)` defaults to T = tick 0; current is `NO_DATA` and history is empty, via both boundaries |
+| `test_live_temporal_leakage_matrix` | §Hard temporal leakage invariant and §Bounded reads ("both cutoffs before sorting, reduction or aggregate"; contract line 473). Snapshot (T, K) with explicit T below the frontier, so real history gives set A: commit <= K, event > T. Deliveries after pinning give set B: commit > K, event <= T. For {current, history} x {RunQueries, ApplicationViewService} x `max_points` in {1, 2}, no A/B sample affects values, identities, `eligible_count`, `returned_count`, the reduced flag or the selected endpoints (m=1 is the last eligible at or before T; m=2 is both eligible endpoints). Repeated reads are equal and `repr`-identical |
+| `test_live_post_k_data_cannot_change_old_snapshot_outcomes` | §Bounded reads (no hidden effect on metadata) and P1.1A determinism, error channel. Small trusted `telemetry_policy`. Post-K deliveries into the old snapshot's window push the window count past `max_scan_records`. Afterwards, the old snapshot's successful reads return identical results, and its failing reads (`ResourceLimitExceeded`; `event_end` beyond T) raise the same exception type and message at both boundaries |
 | `test_live_late_and_out_of_order_delivery` | §Identity: late/out-of-order arrivals append with original event time and new commit; older snapshots unchanged; new snapshot reads in `(ticks, source_id, sequence)` order |
 | `test_live_duplicate_redelivery_is_idempotent` | §Identity bullet 1: redelivered batch returns originals, K unchanged, reads identical; bullet 3: re-translated record is a new observation (duplicates undetectable at the TEP boundary, P1.1B) |
 | `test_live_identity_conflict_rejects_batch` | §Identity bullet 2: changed content under an existing identity fails the whole batch; K unchanged |
-| `test_live_same_tick_observations_retained` | §Four time concepts "tick collisions do not collapse samples": real MANUAL MV observe/apply/observe at one second, captured in `case_setup`; both retained; current returns the higher sequence |
+| `test_live_same_tick_observations_retained` | §Four time concepts "tick collisions do not collapse samples". In a MANUAL run, `case_setup` captures two sanitized records: `world.observe()` before and after an MV apply at the same second. `observe()` does not append to history, so `sync` never ingests them. After prepare they go through that session's `translate` (`translate_sanitized`) and `deliver`. Both boundaries show distinct sequences, both values kept, and current returning the higher sequence. `ReferenceWorld` is unchanged |
 | `test_snapshot_survives_run_and_is_unavailable_after_reopen` | §Append store retention: READY snapshot reads identically after COMPLETED; reopened run reports unavailable, never today's contents |
 | `test_canonical_views_hide_hidden_state` | Hidden-state isolation and ADR-002: harness-injected hidden disturbance; views pass `leakage_findings`, carry canonical ids only; ApplicationViewService rejects non-AGENT queries |
 | `test_no_public_ingestion_path` | §Application boundaries ("cannot drive source physics"); `RunQueries` is read-only: no public method reaches `deliver`/`sync_reference_history` |
@@ -207,35 +225,44 @@ Regression:
 | D0 freeze gate | `git diff --exit-code origin/main -- src/tep_agent_lab/fixtures tests/test_benchmark.py tests/test_benchmark_family.py tests/test_benchmark_healthy.py tests/test_tool_surface.py tests/test_tool_bridge.py` is empty and those suites pass (Decision 6: frozen D0 fixtures and tests stay byte-identical) |
 | full check | `scripts/check.py` with pinned runtime/tep-sim; existing P1.1A/B boundary tests stay green |
 
-The late, out-of-order, duplicate, conflict and same-tick tests inject batches through
-`RunSession.telemetry.deliver`, because `ReferenceWorld.history()` cannot produce them in
-P0 v0 (O3). Injected records never enter `ReferenceWorld.history()`, so Agent tools
-cannot see them.
+The leakage-matrix (set B), post-K, late, out-of-order, duplicate, conflict and
+same-tick tests inject records through `RunSession.telemetry.translate` and `deliver`,
+because `ReferenceWorld.history()` cannot produce them in P0 v0 (O3). Every such test
+uses a real prepared session, the session's source translation, its ingestor, and the
+public reads. Same-tick records come from real `world.observe()` output captured in
+`case_setup`; the other tests use sanitized-shape records on the run clock. Injected
+records never enter `ReferenceWorld.history()`, so Agent tools cannot see them.
 
 ## Open questions / SPEC_CONFLICT
 
-`SPEC_CONFLICT: none` identified. The design changes no accepted semantic. Owner
-decisions needed:
+Review of `e8b2d47` found one design-level `SPEC_CONFLICT`: telemetry identifiers that
+encoded the prepare attempt (`prepare-000N`) would have told AGENT readers how many
+prepares failed. That contradicts playground-backend-v0 §RunOutcome (hidden setup/error
+isolation). This note now resolves it with the opaque per-prepare incarnation token (§2)
+and `test_public_telemetry_ids_hide_prepare_attempts`. No accepted contract changes.
+No other conflict was found.
 
-- **O1 — playground-backend-v0 amendment.** The three canonical views are new P0 read
-  projections. Recommended: the implementation PR adds an additive "Canonical telemetry
-  views" subsection under §Read projections, citing the plant-telemetry obligation.
-  `TelemetryView` text is unchanged. Alternative: keep them documented in this note only.
-- **O2 — v0 application reads.** `get_run`/`get_signal`/`get_signal_history` keep
-  reading `TelemetryView` (runtime ids, recent window, unpinned) so transport v0 and the
-  desktop keep working. Recommended: keep them in P1.1C; retire or re-point them in a
-  versioned application/transport change with MVP integration. Until then the
-  application boundary has two telemetry read semantics, and only the new reads satisfy
+Owner decisions (recommendations):
+
+- **O1 — playground-backend-v0 amendment.** Recommended: the implementation PR amends the
+  owning spec additively. It adds a "Canonical telemetry views" subsection under §Read
+  projections, citing the plant-telemetry obligation; `TelemetryView` text is unchanged.
+  The views are not left documented only in this note.
+- **O2 — v0 application reads.** Recommended: keep `get_run`/`get_signal`/
+  `get_signal_history` and transport v0 on `TelemetryView` as compatibility reads, so the
+  desktop keeps working. Their documentation states that they give no snapshot
+  guarantee (unpinned, recent window, runtime ids). P1.4 must use the new canonical
+  reads. Migration gate: a later versioned application/transport change (with MVP
+  integration) re-points or retires them. Until then they must not be cited as satisfying
   the plant-telemetry contract.
-- **O3 — Live-path injection seam.** In P0 v0 the reference history is in order and
-  frozen after READY. Late, out-of-order, duplicate and same-tick deliveries are
-  therefore proven by injecting at the run-scoped `deliver` seam, with reads through the
-  public boundaries. Confirm that this meets "through the live P0 wiring" in Decision 6.
-  The alternative is a harness-only `ReferenceWorld` append path, which changes the
-  world owner.
-- **O4 — Snapshot defaults.** `telemetry_snapshot()` resolves K = now and
-  T = `event_frontier(K)` once, at creation, and discloses both. Confirm that this
-  creation-time default is acceptable, or require explicit T/K from every caller.
+- **O3 — Live-path injection seam.** Recommended: accept the run-scoped `translate` +
+  `deliver` seam as "through the live P0 wiring" (Decision 6), provided every such test
+  uses a real prepared session, that session's source translation and ingestor, and the
+  public reads. A harness-only `ReferenceWorld` append path is rejected: it would change
+  the world owner.
+- **O4 — Snapshot defaults.** Recommended: accept creation-time resolution, disclosed in
+  the view: K = now, T = `event_frontier(K)`, and T = run-clock tick 0 for an empty
+  prefix (K = 0).
 
 ## Next step
 
