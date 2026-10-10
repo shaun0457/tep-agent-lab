@@ -426,6 +426,11 @@ It is not the MVP gate.
 
 ## MVP implementation priority
 
+> Sequencing authority: [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md). It adds
+> P1.1C (canonical telemetry integration) before P1.4 and lists runtime B5 (first real
+> provider) as a prerequisite of the real-model step. Current state:
+> [`program-status.md`](program-status.md).
+
 For Level 1, prioritize depth in this order:
 
 ```text

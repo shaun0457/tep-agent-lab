@@ -2,7 +2,7 @@
 
 These v0 specs define TEP-specific integration, investigation, research, application hosting, and evaluation on top of `tep-sim` and `industrial-agent-runtime`.
 
-Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Program Re-baseline v1 adds an Application / Playground Plane and canonical-context contract without reopening those accepted runtime/world/investigation boundaries.
+Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Program Re-baseline v1 adds an Application / Playground Plane and canonical-context contract without reopening those accepted runtime/world/investigation boundaries. Industrial Context Platform sequencing is owned by [ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md); current state is in [`program-status.md`](../program-status.md).
 
 ## State / knowledge / experiment contracts
 
@@ -10,6 +10,10 @@ Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Progra
 - [`knowledge-rule-registry-v0.md`](knowledge-rule-registry-v0.md) — `origin × validation × authority` rule metadata, provenance, enforcement classes, and later promotion direction.
 - [`hypothesis-experiment-v0.md`](hypothesis-experiment-v0.md) — first-class hypotheses, typed Predictions, evidence links, experiment proposals/run specs/results, and explicit interpretation-to-StateDelta mapping.
 - [`engineering-records-v0.md`](engineering-records-v0.md) — InvestigationReport / DecisionRecord / ExperimentRecord archive contracts.
+
+## Industrial Context Platform
+
+- [`plant-telemetry-contract-v0.md`](plant-telemetry-contract-v0.md) — frozen P1.0 plant context, engineering context, telemetry (clocks, SignalSample, append store, T/K snapshots, bounded reads), ContextSnapshot and evidence-provenance semantics. Sequencing per ADR-004.
 
 ## Application / Playground
 

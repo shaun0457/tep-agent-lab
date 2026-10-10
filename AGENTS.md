@@ -4,7 +4,7 @@ Rules for coding agents working on `tep-agent-lab`.
 
 ## Product boundary
 
-This repository owns TEP-specific Agent tools, domain state/projection, lab policy, experiments, Engineering Records, and evaluation. It does not own TEP physics or generic runtime internals.
+This repository owns TEP-specific Agent tools, domain state/projection, lab policy, experiments, Engineering Records, and evaluation. It also hosts the P0 Playground application plane, the observatory/desktop clients (ADR-002) and the Industrial Context Platform contracts (ADR-003, ADR-004). It does not own TEP physics or generic runtime internals.
 
 ## Canonical specs
 
@@ -27,6 +27,16 @@ Before implementation, read the relevant owning spec:
 - `docs/decisions/ADR-001-simulate-before-reference-mutation.md`
 
 `evaluation-v0.md` is the sole canonical capability/orchestration comparison matrix.
+
+Also canonical:
+
+- `docs/specs/benchmark-case-v0.md` (frozen D0 case contract)
+- `docs/specs/plant-telemetry-contract-v0.md` (frozen P1.0 telemetry/context semantics)
+- `docs/decisions/ADR-002-ui-application-boundary.md`
+- `docs/decisions/ADR-003-industrial-environment-boundary.md`
+- `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (P1 sequencing; milestone numbers never own semantics)
+
+Product direction guardrails (non-normative): `docs/industrial-context-platform-north-star.md`, `docs/product-maturity-and-mvp.md`. Current state, open PRs and next gate: `docs/program-status.md`.
 
 If implementation discovers an architecture/spec contradiction, emit `SPEC_CONFLICT`; do not silently invent a local state/tool/runtime path.
 
@@ -95,7 +105,9 @@ successful SubtaskResult
 
 Observation registration is automatic. The model must explicitly link observations as evidence later.
 
-## v0 implementation/research order
+## Research-track order (v0)
+
+Product-track (P1) sequencing is owned by `docs/decisions/ADR-004-p1-milestone-rebaseline.md`; current state is in `docs/program-status.md`.
 
 ```text
 RcaState / run-log / ContextProjection
@@ -148,5 +160,9 @@ Every first-family report should include:
 - gate/authority violations;
 - benchmark/tool/scorer versions;
 - final InvestigationReport ref.
+
+## Session protocol
+
+Start every planning, review or implementation session with `docs/program-status.md`: current main, open PRs, next gate and the step-by-step protocol. Record only merged facts there.
 
 Keep this file concise. Detailed workflow semantics belong in `docs/specs`; unresolved empirical questions belong in `docs/open-questions.md`.
