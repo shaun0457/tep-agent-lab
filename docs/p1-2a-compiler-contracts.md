@@ -6,7 +6,34 @@ Status: implemented (P1.2A). Normative contracts:
 [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) Decisions 4 and 5.
 
 > Candidate Context and canonical context are different trust domains. P1.2A builds
-> the contracts between them. It has no parser, no model call and no extraction.
+> the contracts between them and stops at a validated, **non-canonical** staged
+> publication. It has no parser, no model call, no extraction and no repository write.
+
+## Publication split: staging in P1.2A, the repository transaction in P1.2D
+
+context-compiler-v0 §Publication atomicity requires that a publication is one
+repository commit that adds its artifacts and advances the per-lineage head by
+compare-and-set. P1.2A therefore does not write anything:
+
+- `CompilerWorkspace.stage_publication` builds and fully validates the complete
+  bundle and returns a `StagedPublication`. The bundle holds the revision, the
+  review-log prefix, the candidate records, R1, the expected head and the new head
+  record. `StagedPublication.canonical` is `False`. Staging advances no head, and
+  nothing in it is consumer-visible trusted context.
+- No production API returns a "published" result, writes a file or writes a head
+  (a test checks the module source for file writes).
+- **P1.2D** adds the repository transaction: one git commit, per-root serialized
+  writers, real ref/head compare-and-set and crash safety. Requirements for that
+  adapter, carried over from the P1.2A review (the removed working-tree prototype
+  had these defects):
+  - one cross-process writer lock per repository root, not a per-instance lock;
+  - unique temporary names (no fixed `.staged` file), fsync of files and
+    directories, and Windows-safe replace that handles `PermissionError`;
+  - a head reader that raises the module's own errors, never a raw `JSONDecodeError`;
+  - no partially written content-addressed files on failure: write to a temporary
+    location first, so an interrupted commit leaves no artifact behind;
+  - CAS on the git ref and the `HEAD.json` record together, so `StaleHead` means
+    nothing was committed.
 
 ## What is implemented
 
@@ -14,154 +41,164 @@ Status: implemented (P1.2A). Normative contracts:
 
 ```text
 RuleRegistry  -> RuleSetRevision(registry, visibility, parent?)
-              -> serialize(): canonical JSON, kind ENGINEERING_RULE_SET
+              -> serialize(): canonical JSON, kind ENGINEERING_RULE_SET (cached)
               -> load_rule_set(bytes, checksum) / load_rule_set_source(registry, id, scope)
               -> derive(parent_ref, added_rules): complete child set R1, parent = R0
 ```
 
 - `rule_record` / `rule_from_record` cover every `Rule` field, including behavior,
-  scope, source and validation refs and `ExtractionMetadata`.
-  `conflict_record` / `conflict_from_record` cover every `RuleConflict`. Records are
-  strict: no missing, extra or mistyped field.
-- A round trip returns an equal `RuleRegistry`, so `find_rule_conflicts` returns the
-  same records in the same order. Conflict RuleRefs must resolve within the set.
-- Identity is a `ContextSourceRef` (repository revision, path, canonical-JSON
-  checksum). The loader verifies the checksum and rejects non-canonical order, and the
-  same ref always loads an equal immutable registry. `RuleRegistry` gained read-only
-  `rules()` / `conflicts()` accessors for this.
-- `derive` keeps every parent rule and conflict unchanged (`check_extends`), refuses
-  to re-publish an existing `(rule_id, version)` and records the parent ref for
-  lineage only. A derived set never widens its parent's visibility.
-- `canonical_context.most_restrictive(...)` is the shared derivation-taint helper.
+  scope, source and validation refs and `ExtractionMetadata`. The `RuleConflict`
+  record functions do the same. Records are strict, and every malformed input raises
+  `RuleSetError`.
+- Conflicts are serialized in canonical order, so the checksum does not depend on
+  registration order. A round trip returns the revision's registry unchanged, so
+  `find_rule_conflicts` returns the same records. Conflict RuleRefs must resolve
+  within the set.
+- The loader parses strictly before it computes the checksum: duplicate keys at any
+  depth and NaN/Infinity are rejected (`persistence.strict_json_loads`). It also
+  rejects non-canonical order. Identity is a `ContextSourceRef`, and the same ref
+  always loads an equal immutable registry.
+- `derive` and `check_extends` keep every parent rule and conflict unchanged, refuse
+  to re-publish an existing `(rule_id, version)` and never widen visibility.
+- `RuleRegistry` gained read-only `rules()` / `conflicts()` accessors.
+  `canonical_context.most_restrictive(...)` is the shared derivation-taint helper.
 
-`src/tep_agent_lab/context_compiler.py` (compiler contracts, generic, no `tep_sim`
-import):
+`src/tep_agent_lab/context_compiler.py` (generic; never imports `tep_sim`):
 
 ```text
 ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRegistry
-                  -> SourceFragmentRef             BYTE_RANGE / JSON_POINTER + checksum
+                  -> SourceFragmentRef             BYTE_RANGE (exact bytes) / JSON_POINTER
                   -> CandidateBinding | CandidateKnowledge   immutable versions
-                  -> CompilerWorkspace.add_candidate         append-only + validation
-                  -> CompilerWorkspace.append_review         append-only review log
-                  -> CompilerWorkspace.publish(session, request, target)
-                       EngineeringContextRevision + review-log prefix (+ R1)
-                       -> PublicationTarget.commit           per-lineage head CAS
-                  -> verify_publication(files, revision)      recompute from content
+                  -> CompilerWorkspace(id, visibility).add_candidate   append-only
+                  -> CompilerWorkspace.append_review                    append-only log
+                  -> CompilerWorkspace.stage_publication(session, request,
+                                                         derived_input_resolver=...)
+                       -> StagedPublication (non-canonical bundle)
+                  -> verify_publication(files, revision, input_rule_set)
 ```
 
-- **CompileSession**: registers and freezes its own `CanonicalContextRegistry` over
-  the exact attested inputs. It requires exactly one AGENT-visible `PROCESS_GRAPH`
-  source (the plant context until P1.3) and exactly one `ENGINEERING_RULE_SET` input
-  (R0). An AGENT session rejects any non-AGENT input. `session_id` hashes the
-  inventory, plant context, R0, compiler, validation and review policy versions, and
-  visibility: this is the compatibility tuple. `PlantContextIndex` holds ProcessGraph
-  node, binding-semantic and edge ids (ENTITY, SIGNAL, RELATIONSHIP). The caller
-  supplies the ProcessGraph loader.
-- **SourceFragmentRef**: exact source ref, location, SHA-256 of the extracted bytes,
-  fragment kind and `fragmentation_policy@version`. `fragment_id` is derived
-  deterministically. `citation()` is the `SourceVersion` a Rule-routed item's
-  `ExtractionMetadata` must cite.
-- **Candidates**: the versioned routing (`ROUTING_POLICY`) maps ENTITY/SIGNAL mentions
-  to `CandidateBinding`. OPERATING_LIMIT and CONTROL_RELATION go to `CandidateKnowledge`
-  carrying a `literature_candidate` Rule that must stay LITERATURE/NONE/REFERENCE.
-  Procedure, troubleshooting and maintenance kinds go to non-rule `CandidateKnowledge`.
-  Unknown kinds raise and stay unclassified. `content_key` hashes the fragments, typed
-  content, target and scope. `candidate_version` adds the session and every provenance
-  version (extraction, grounding, model, routing, influencing inputs, confidence). A
-  model retry therefore keeps the key and changes the version. `Confidence` (score and
-  method) is routing metadata only, and the model-normalized claim is a
-  `DerivedAnnotation`.
-- **Validation** (`validate_candidate`, `VALIDATION_POLICY`): it checks that sources
-  resolve exactly, fragment checksum and location, influencing sources, the plant
-  context, target existence and kind compatibility, unresolved targets, empty or
-  unknown scope (an empty scope is never plant-wide), visibility widening (candidate
-  plus review taint), that a Rule extraction cites a fragment, and that an existing
-  `(rule_id, version)` is untouched. `AMBIGUOUS_TARGET` and `CONFLICT_DECLARED` are
-  non-blocking findings. A REMAP is revalidated against its selected target and scope.
-- **Review**: `ReviewRecord` holds candidate version, decision
-  (APPROVE/REJECT/REMAP/KEEP_CANDIDATE), principal (`HUMAN` or a
-  `DETERMINISTIC_POLICY` registered in `CompilerPolicies.acceptance_policies`; none
-  exist in v0, and no model/Agent kind exists), reason, session/policy/plant refs,
-  `supersedes` (same candidate, earlier records only), the selected binding for REMAP
-  only, the visibility of the review metadata and the 1-based `review_log_position`
-  that the workspace assigns. `effective_review` computes over every record of the
-  candidate version up to a position. Exactly one terminal record decides; none means
-  UNREVIEWED; more than one means UNRESOLVED. `review_status` is a derived projection.
-- **Publication** (`CompilerWorkspace.publish`): the workspace lock is held from
-  reading the review-log tail to the end of `target.commit`. The position is always
-  the tail; no API accepts a position. Publication re-attests every session source and
-  R0. A candidate-local failure becomes an `Exclusion` (stale session or review,
-  unreviewed, unresolved, rejected, kept, validation, invalid REMAP). A revision-level
-  failure raises `PublicationError` and writes nothing: an unknown candidate, a source
-  changed on disk, an invalid R1 or an unresolvable RuleRef. A selected candidate, or
-  any of its review records, that is more restrictive than the publication also fails
-  the whole publication. Excluding it instead would put its exclusion record and
-  review-log prefix into a less restrictive revision and expose hidden membership.
-  Targets and scopes come from the effective review (REMAP) or the reviewed candidate
-  version (APPROVE); `PublicationRequest` only selects candidate versions. Approved
-  rules produce R1 = R0 plus those rules; R1 is committed alongside the revision and
-  its RuleRefs are pinned with rule scope bindings. Non-rule items become KnowledgeRefs
-  with `validation_status=VERIFIED` (scope and extraction fidelity only), with the
-  fragment as content and the effective review as evidence.
-- **Artifacts** (canonical JSON; same-commit refs are `ArtifactPathRef` path plus
-  checksum):
+- **CompileSession**: `__post_init__` checks every invariant, so direct construction
+  cannot skip them. The registry must be frozen. The session needs exactly one
+  AGENT-visible `PROCESS_GRAPH` (the plant context until P1.3) and exactly one R0, and
+  no input may be more restrictive than the session. The plant index is rebuilt from
+  the source with the supplied ProcessGraph loader. `session_id` hashes the
+  compatibility tuple (inventory, plant context, R0, policies including
+  `acceptance_policies`, visibility). The verifier recomputes it from the revision.
+- **SourceFragmentRef**: an exact source ref, a location, the SHA-256 of the
+  extracted bytes and `fragmentation_policy@version`. `fragment_id` is
+  deterministic. `BYTE_RANGE` is allowed only on `BYTES_SHA256` sources: a
+  canonical-JSON checksum ignores line endings, so a CRLF checkout would shift the
+  offsets silently. `citation()` is the `SourceVersion` that a Rule-routed item must
+  cite.
+- **Candidates**: the versioned routing (`ROUTING_POLICY`) sends ENTITY/SIGNAL
+  mentions to `CandidateBinding`. OPERATING_LIMIT and CONTROL_RELATION become
+  `CandidateKnowledge` carrying a `literature_candidate` Rule that stays
+  LITERATURE/NONE/REFERENCE. The other kinds become non-rule `CandidateKnowledge`,
+  and unknown kinds stay unclassified. `content_key` and `candidate_version` hash
+  NFC-normalized canonical JSON. A model retry keeps the key and changes the version.
+  `record()` is the complete immutable candidate and derivation record (content,
+  alternatives, provenance with every influencing input and exact derived-input
+  checksums, fragments); its hashes can be recomputed. Numbers are normalized to
+  float, and integers beyond 2^53, booleans and non-finite values are rejected.
+- **Validation** (`validate_candidate`): sources must match the frozen inventory by
+  their complete identity; a same-id ref with another revision, path or checksum
+  fails. The validator also checks fragment checksum/location, influencing sources,
+  plant context, target existence and kind, unresolved targets, empty or unknown
+  scope, visibility widening, rule citation and immutability, and, at staging,
+  `CONFLICT_UNRESOLVED` for conflicting candidate ids missing from the workspace.
+  A REMAP is fully revalidated against its selected target and scope. Units and
+  values are immutable candidate content that a REMAP cannot change.
+- **Review**: a `ReviewRecord` is made by `HUMAN` or by a registered
+  `DETERMINISTIC_POLICY` principal (none exist in v0). `reviewed_at` and
+  `published_at` must be strict UTC ISO-8601 ending in `Z`. `effective_review` takes
+  the single terminal record; no record means UNREVIEWED and several mean
+  UNRESOLVED.
+- **Workspace visibility**: a workspace is bound to one visibility. Sessions,
+  candidates and reviews more restrictive than the workspace are refused, so hidden
+  activity can never move the log tail or change the checksum of a less restrictive
+  revision. Use a separate workspace per visibility.
+- **Staging** (`stage_publication`): a plain `threading.Lock` is held from reading
+  the tail to the end of self-verification. The position is always the tail. Staging
+  re-attests every session source and R0. Every considered candidate's
+  `DerivedInput`s must resolve through `derived_input_resolver` to their exact bytes;
+  an input with no resolver fails. Candidate-local failures become `Exclusion`s.
+  Revision-level failures raise `PublicationError` and produce no bundle: an unknown
+  candidate, a changed source, an unresolved derived input, a duplicate RuleRef
+  across candidates, an invalid R1 or a hidden-tainted selection. Targets and scopes
+  come from the effective review (REMAP) or the reviewed candidate version (APPROVE).
+  Every list is sorted by `CandidateRef`, so the selection order never changes the
+  bytes. `StagedPublication` validates its own bundle: paths under the publication
+  roots, every referenced artifact present with a matching checksum, and a head
+  record built from the revision ref and kept out of the files.
+- **Bundle layout** (canonical JSON; same-commit refs are `ArtifactPathRef`):
 
   ```text
   context/engineering-context/<lineage>/revisions/<revision_id>.json
-  context/engineering-context/<lineage>/review-logs/<checksum>.json   prefix for considered candidates
-  context/rule-sets/<checksum>.json                                   R1, when rules were approved
-  context/engineering-context/<lineage>/HEAD.json                     publisher bookkeeping, not a source
+  context/engineering-context/<lineage>/review-logs/<sha256>.json   prefix for considered candidates
+  context/engineering-context/<lineage>/candidates/<sha256>.json    complete candidate records
+  context/rule-sets/<sha256>.json                                   R1, when rules were approved
+  context/engineering-context/<lineage>/HEAD.json                   head record (P1.2D writes it)
   ```
 
-  `DirectoryPublicationTarget.commit` creates each artifact once and moves the head by
-  compare-and-set on `(path, checksum)`; a lost CAS raises `StaleHead`. On failure it
-  removes the files it created. Once committed, a revision enters a run only as an
-  `ENGINEERING_CONTEXT_REVISION` ContextSourceRef registered at prepare time.
-- `verify_publication` recomputes every effective decision from the committed review
-  log and checks REMAP targets and scopes, R1's parent (must equal R0), pinned RuleRef
-  resolution and that the published rules keep their literature axes.
+- **`verify_publication(files, revision, input_rule_set)`** recomputes everything
+  from bundle content. It checks:
+  - strict revision, review-log and candidate schemas, with duplicate keys rejected;
+  - the revision id and the `compile_session_id` tuple;
+  - review supersession, the compatibility tuple and principals against the recorded
+    `acceptance_policies`;
+  - candidate hashes and visibility;
+  - effective review ids and decisions against each item;
+  - APPROVE target and scope against the stored candidate, REMAP against the review;
+  - exclusion reasons against the recomputed status;
+  - R1: parent = R0, every R0 rule and conflict unchanged, no rules beyond the pinned
+    ones, each pinned rule equal to its reviewed candidate rule with literature axes.
 
 ## Ownership
 
 | Concern | Owner reused |
 |---|---|
-| source inventory, attestation | `CanonicalContextRegistry` / `ContextSourceRef` (a fresh instance per session) |
+| source inventory, attestation | `CanonicalContextRegistry` / `ContextSourceRef` (fresh instance per session) |
 | plant identities before P1.3 | the selected `PROCESS_GRAPH` source; ProcessGraph ids are never renamed |
 | rules | `Rule`, `RuleRegistry`, `literature_candidate`, `ExtractionMetadata` |
 | visibility | runtime `Visibility` |
+| strict JSON parsing | `persistence.strict_json_loads` (a pure addition next to `canonical_json`) |
 
 The workspace is not a ContextSourceRef kind and is never registered. Review and
-publication are Application API methods. No ToolSpec, gate policy, ContextProjection,
-tool surface or playground module imports or exposes them (tested).
+staging are Application API methods. No ToolSpec, gate policy, tool surface or
+playground module imports or exposes them (tested).
 
 ## Acceptance criteria (context-compiler-v0 §Acceptance criteria)
 
-`tests/test_context_compiler.py` and `tests/test_rule_sets.py` name the criteria they
-cover.
+`tests/test_context_compiler.py` and `tests/test_rule_sets.py` name the criteria and
+review findings they cover.
 
-| Covered in P1.2A (contract level) | Deferred |
+| Criterion | P1.2A state |
 |---|---|
-| 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25 | — |
-| 1, 2 for hand-built fragments over registered fixture sources | parser/fixture corpus path: P1.2B |
-| 3 for immutable candidate contracts | typed model-assisted extraction producing them: P1.2C |
-| 11, 14 at the contract level | end-to-end demo traceability: P1.2D |
-| 20: repository artifact; registration-compatible ContextSourceRef verified | `RunManager.prepare` consumer registration: a later milestone (P1.3/P1.5); git commit creation: P1.2D |
+| 4, 5, 6, 7, 8, 9, 12, 15, 19, 22, 23, 24, 25 | covered at the contract level |
+| 11 | covered: complete candidate and derivation records are staged and verified (H5) |
+| 13, 18 | covered after the workspace-visibility fix (H4) |
+| 16 | covered, including a staging test where two terminal reviews block publication |
+| 17 | covered: REMAP target, scope and conflict revalidation; units/values are immutable content |
+| 1, 2 | partial: hand-built fragments over registered fixture sources; parser corpus in P1.2B |
+| 3 | partial: immutable candidate contracts; model-assisted extraction in P1.2C |
+| 14 | partial: contract level; end-to-end demo in P1.2D |
+| 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
+| 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
+| 21 | partial: dependency failures produce no bundle; commit atomicity and crash safety are P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
 ## Known limitations
 
-- The workspace is in memory; review logs persist only through publication. A durable
-  workspace store is a later implementation choice under the same contract.
-- `DirectoryPublicationTarget` writes into a working tree. Creating the repository
-  commit is the operator's step until P1.2D. The CAS covers one process; there is no
-  cross-process lock (v0 is local and single-user).
+- The workspace is in memory. Candidate records and the review-log prefix persist
+  only through a committed publication, which P1.2D adds.
 - Plant-wide scope is not representable yet: no plant-context scope policy exists, so
   an empty scope fails validation.
-- No deterministic acceptance policy is registered; every approved item needs a human
-  review.
+- No deterministic acceptance policy is registered, so every approved item needs a
+  human review.
 - The location kinds are BYTE_RANGE and JSON_POINTER. Semantic locators (section,
   table rows, procedure steps) arrive with the P1.2B parser policy.
+- Derived-input resolvers are caller-supplied until P1.2C defines model-call records.
 
 ## Next step
 

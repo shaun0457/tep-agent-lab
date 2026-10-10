@@ -49,7 +49,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.1B TEP simulation source | merged (PR #23) |
 | ADR-004 P1 re-baseline | merged (adds this file) |
 | P1.1C canonical telemetry integration | not started; write the implementation note first |
-| P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace and rule-set revision merged ([note](p1-2a-compiler-contracts.md)); P1.2B next, then P1.2C, P1.2D |
+| P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B next, then P1.2C; P1.2D adds the repository transaction (one git commit, head CAS) and the review demo |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4 context serving + Operational State | no owning spec yet |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
@@ -82,7 +82,8 @@ None.
 - **P1.2B** can start now: a deterministic parser and fixture path for one small
   engineering corpus that emits P1.2A `SourceFragmentRef`s, with the corpus authoring
   provenance that context-compiler-v0 §Benchmark use requires. P1.2C (model-assisted
-  extraction and grounding) and P1.2D (review workflow and revision demo) follow
+  extraction and grounding) and P1.2D (review workflow, the repository publication
+  transaction that commits a P1.2A `StagedPublication`, and the revision demo) follow
   (context-compiler-v0 §Recommended implementation split).
 - **P1.1C** can start now. The owning contract is frozen; write a short implementation note
   with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
