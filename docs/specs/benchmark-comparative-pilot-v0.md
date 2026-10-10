@@ -1,6 +1,6 @@
 # Comparative Benchmark Pilot v0 (D0.2C)
 
-Status: **FROZEN FOR D0.2C PILOT IMPLEMENTATION**
+Status: accepted
 
 Owner repo: `tep-agent-lab`
 
@@ -417,16 +417,14 @@ Two kinds of reachability decide the roles. They are different and must not be m
 
 Auxiliary fields never make primary correctness unreachable.
 
-**Known conflict, not blocking D0.2C.** The current structural leakage audit treats the
+**Known conflict, resolved in D0.2C1.** The current structural leakage audit treats the
 truth mechanism value as a hidden label (`_truth_labels`), and its vocabulary screen
 matches `disturbance`. An Agent output schema that lists the full mechanism vocabulary
-would therefore fail leakage policy v0/v1 on every incident case. D0 has no structured
-RcaResult boundary and D0.2C runs no Agent, so the conflict does not block D0.2C1–C3.
-The first milestone that exposes the mechanism vocabulary to a model must resolve it
-first, under a new leakage policy version: the complete public vocabulary offered as an
-output schema is allowed, and any other occurrence of a truth label stays a finding.
-Until then, mechanism-level primary correctness is defined for scoring saved submissions
-only.
+would therefore fail leakage policy v0/v1 on every incident case. D0.2C1 resolves this
+with leakage policy v2 before it freezes pilot fixture bytes (see Leakage, "Mechanism
+vocabulary and leakage policy v2"). D0 still has no structured RcaResult boundary and
+D0.2C runs no Agent, so in D0.2C mechanism-level primary correctness is exercised only by
+scoring saved submissions.
 
 The pilot tool policy is `get_capability_summary` + `get_history`. It has no topology
 tool. Unless D0.2C1 shows that `reactor_cooling_water_in` is identifier-reachable under
@@ -740,10 +738,31 @@ it, and a revised C0 is reported next to it, never in place of it.
 D0.2C distinguishes two kinds of leakage.
 
 **Structural leakage** (an evaluator label, source ref, setup checksum or hidden
-vocabulary on an Agent surface) stays with `LeakageAudit`. Every pilot case is setup/v1,
-so it is audited under leakage policy v1. In addition, each pilot case's Agent surfaces are
+vocabulary on an Agent surface) stays with `LeakageAudit`. Every pilot case is audited
+under leakage policy v2 (below). In addition, each pilot case's Agent surfaces are
 audited against the union of all four classes' labels and all twelve cases' hidden sources,
 as D0.2A did across its family.
+
+### Mechanism vocabulary and leakage policy v2
+
+D0.2C1 adds `tep-agent-lab.benchmark-leakage-policy/v2` before it freezes pilot fixture
+bytes. Leakage policy is owned by `benchmark-case-v0.md`; the D0.2C1 PR updates that spec
+explicitly.
+
+- v2 is leakage policy v1 plus one rule: the complete value set of the frozen
+  `CausalMechanism` vocabulary, offered as a whole as an Agent output schema, is not a
+  finding.
+- Any other occurrence of a truth label on an Agent surface stays a finding: a single
+  mechanism value, any proper subset of the vocabulary, or a value outside that complete
+  block.
+- The hidden-vocabulary screen (for example `disturbance`) still applies everywhere
+  outside the complete block.
+- v2 applies to setup/v1 cases whose scoring schema is
+  `tep-agent-lab.benchmark-scoring/v1`, that is, the pilot cases. Every other case keeps
+  the policy its setup schema maps to. Leakage policy v0/v1 behavior and every historical
+  audit result are unchanged.
+- D0.2C1 tests both directions: the complete vocabulary block passes, and a single
+  mechanism value or a proper subset on an Agent surface fails.
 
 **Semantic nuisance proxy** (class inferable from a property that is not itself a hidden
 label) is a separate comparative check. Class must not be inferable from:
@@ -793,7 +812,7 @@ D0.2C3  Identifiability/separability pilot report
 
 **D0.2C1** — viability check; twelve pilot case/truth pairs under
 `tep-rca-benchmark/v1-pilot`; per-fixture benchmark/scorer versions in the registry;
-scorer-v1 and scoring schema v1; field-role reachability test; projection invariants
+scorer-v1 and scoring schema v1; leakage policy v2; field-role reachability test; projection invariants
 A–C plus the projection-only check; nuisance-proxy check; structural and cross-case
 leakage audits; historical fixtures and their tests unchanged.
 
@@ -813,7 +832,8 @@ D0.2C is complete when:
 1. twelve paired pilot cases exist under a new benchmark version, and `rca-dev-001..004`
    are byte-identical to `83a96c19675eed03831f7106834904b667959fbd`;
 2. projection invariants A–C, the projection-only check and the nuisance-proxy check pass;
-3. structural leakage audits pass for every pilot case, including the cross-case audit;
+3. structural leakage audits pass for every pilot case under leakage policy v2, including
+   the cross-case audit, and historical audits under v0/v1 are unchanged;
 4. scorer-v1 scores and re-scores saved synthetic submissions byte-identically, and
    scorer-v0 output for historical cases is unchanged;
 5. C0 runs on every pilot case under a frozen, versioned feature contract and healthy

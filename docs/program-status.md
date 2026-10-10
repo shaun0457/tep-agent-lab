@@ -32,7 +32,7 @@ and the test constants. A NumPy bump edits only the JSON.
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
 | Current product milestone | P1.2A Context Compiler contracts: not started, unblocked (spec accepted in PR #24) |
 | Parallel product milestone | P1.1C canonical telemetry integration: not started, unblocked |
-| Current research milestone | D0.2C C0 + identifiability pilot: D0.2C0 design in PR #20 |
+| Current research milestone | D0.2C1 comparable pilot fixtures, scorer-v1 and leakage policy v2: not started, unblocked (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
 
 ## Tracks
@@ -62,8 +62,8 @@ Research track:
 | Milestone | State |
 |---|---|
 | D0.0 contract freeze, D0.1, D0.2A, D0.2B | merged (PR #15–#18) |
-| D0.2C0 comparative pilot design | PR #20 |
-| D0.2C1 comparable pilot fixtures + scorer-v1 | next, after PR #20 |
+| D0.2C0 comparative pilot design | merged (PR #20) |
+| D0.2C1 comparable pilot fixtures + scorer-v1 + leakage policy v2 | next; unblocked |
 | D0.2C2 deterministic C0 | pending |
 | D0.2C3 identifiability report | pending |
 | D0 freeze | pending; needs C0, identifiability, data-informed difficulty, one non-local case |
@@ -75,9 +75,7 @@ claims need C0 and D1 evidence. B5 is shared by the MVP and D1.
 
 ## Open PRs at last update
 
-| PR | Head | Base | Track | Review state | Blocks |
-|---|---|---|---|---|---|
-| #20 D0.2C0 comparative pilot design | `4c824ba` | `243a5ba` (behind main) | research | Round-1 BLOCKER resolved at `4c824ba`; needs owner re-review and rebase | D0.2C1 |
+None.
 
 ## Next implementation gates
 
@@ -87,14 +85,15 @@ claims need C0 and D1 evidence. B5 is shared by the MVP and D1.
 - **P1.1C** can start now. The owning contract is frozen; write a short implementation note
   with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
 - **B5** can start now in `industrial-agent-runtime`.
-- **D0.2C1** starts when PR #20 is merged.
+- **D0.2C1** can start now. It adds leakage policy v2 before it freezes pilot fixtures
+  (benchmark-comparative-pilot-v0 §Leakage).
 
 ## SPEC_CONFLICTs
 
 | Conflict | State |
 |---|---|
 | P1 milestone numbering: ADR-003 / plant-telemetry vs North Star / maturity guardrail | resolved by ADR-004 |
-| Leakage policy v0/v1 treats the truth mechanism as a hidden label vs scorer-v1's public mechanism vocabulary | open; disclosed in PR #20 (its proposed OQ-15); non-blocking until a milestone exposes the mechanism vocabulary to a model (D1 or P1.5) |
+| Leakage policy v0/v1 treats the truth mechanism as a hidden label vs scorer-v1's public mechanism vocabulary | scheduled: D0.2C1 adds leakage policy v2 before it freezes pilot fixtures (benchmark-comparative-pilot-v0 §Leakage; owner decision 2026-10-10) |
 
 ## Known drift (not SPEC_CONFLICT)
 

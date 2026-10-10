@@ -230,8 +230,8 @@ threshold.
 
 #### D0.2C1 — comparable pilot variants — next
 
-Viability check, twelve paired pilot fixtures, scorer-v1, nuisance-proxy and leakage
-checks.
+Viability check, twelve paired pilot fixtures, scorer-v1, leakage policy v2,
+nuisance-proxy and leakage checks.
 
 #### D0.2C2 — deterministic C0 — pending
 
