@@ -62,6 +62,16 @@ def visible_in(visibility: Visibility, scope: ProjectionScope) -> bool:
     return Visibility(visibility) in _SCOPE_VISIBILITY[ProjectionScope(scope)]
 
 
+_RESTRICTIVENESS = {Visibility.AGENT: 0, Visibility.EVALUATOR: 1, Visibility.INTERNAL: 2}
+
+
+def most_restrictive(*visibilities: Visibility) -> Visibility:
+    """Derivation taint: a derived output takes the most restrictive input visibility."""
+    if not visibilities:
+        raise ValueError("at least one visibility is required")
+    return max((Visibility(item) for item in visibilities), key=_RESTRICTIVENESS.__getitem__)
+
+
 class ContextSourceError(ValueError):
     """Trusted-side registration/attestation failure (revision, checksum, freeze)."""
 
