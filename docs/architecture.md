@@ -427,7 +427,7 @@ Plant Context Plane        ProcessGraph (tep-sim) -> Canonical Plant Context rev
 Engineering Knowledge      DocumentRef / KnowledgeRef scoped to plant semantics;
                            structured claims stay in RuleRegistry / RuleRef;
                            P1.2 Context Compiler output is defined by
-                           context-compiler-v0 (PR #24, not yet accepted)
+                           context-compiler-v0
 Telemetry Plane            TelemetrySource -> TelemetryIngestor -> TimeSeriesStore
                            -> TimeSeriesReader, pinned by TelemetryReadSnapshot (T, K)
         |

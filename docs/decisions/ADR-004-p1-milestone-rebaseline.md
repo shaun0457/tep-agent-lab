@@ -62,7 +62,7 @@ milestone numbers; where older text does, Decision 3 maps it.
 | P1.1A | Generic telemetry core: samples, append store, T/K snapshots, bounded reader | plant-telemetry-contract-v0 | yes |
 | P1.1B | TEPSimulationSource adapter | plant-telemetry-contract-v0 | yes |
 | P1.1C | Canonical telemetry integration: event-time-bounded scans; P0 run ingestion of reference-world records through TEPSimulationSource into a run-scoped store; snapshot-bound current/history through the public P0/application query boundary | plant-telemetry-contract-v0 §Existing architecture consistency and migration obligations; playground-backend-v0; ADR-002 | yes |
-| P1.2 | Engineering Knowledge Context Compiler (sources, fragments, typed extraction, grounding, Candidate Context, validation, review, immutable EngineeringContextRevision) | context-compiler-v0 (PR #24, not yet accepted); knowledge-rule-registry-v0 for any Rule-source extension | yes |
+| P1.2 | Engineering Knowledge Context Compiler (sources, fragments, typed extraction, grounding, Candidate Context, validation, review, immutable EngineeringContextRevision) | context-compiler-v0; knowledge-rule-registry-v0 §Rule-set source revision | yes |
 | P1.3 | Canonical Context composition (Decision 4) | plant-telemetry-contract-v0 §Canonical Plant Context and §Engineering Context; owning spec to be written | yes |
 | P1.4 | Context serving + deterministic Operational State for one subsystem | plant-telemetry-contract-v0 (reads, ContextSnapshot semantics); owning spec to be written | yes |
 | P1.5 | ContextSnapshot + Investigation Context integration: InvestigationContextView, Agent ContextProjection integration, Agent telemetry/knowledge tool migration, evidence provenance bridge | plant-telemetry-contract-v0 §ContextSnapshot, §Investigation Context composition; investigation-state-v0; tool-surface-v0 | yes |
@@ -142,7 +142,7 @@ Naming. New types are not named `CanonicalContext*`:
 | Term | Meaning |
 |---|---|
 | `CanonicalContextRegistry` (P0, code) | run-scoped, attested source inventory frozen at READY |
-| `EngineeringContextRevision` | immutable reviewed compiler publication; defined by context-compiler-v0 once accepted |
+| `EngineeringContextRevision` | immutable reviewed compiler publication; defined by context-compiler-v0 |
 | `PlantContextRevision` | the plant-telemetry "Canonical Plant Context" revision (semantics owned there); first implemented in P1.3 |
 | "Canonical Context" (North Star, maturity guardrail) | product phrase for reviewed, pinned revisions; not a type |
 
