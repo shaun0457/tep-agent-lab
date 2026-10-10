@@ -37,6 +37,7 @@ Also canonical:
 - `docs/decisions/ADR-002-ui-application-boundary.md`
 - `docs/decisions/ADR-003-industrial-environment-boundary.md`
 - `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (P1 sequencing; milestone numbers never own semantics)
+- `docs/decisions/ADR-005-context-layer-product-positioning.md` (product = domain-neutral industrial context layer; domain semantics stay in domain packs; the Agent is its first consumer; D1 measures context value; D2 parked)
 
 Product direction guardrails (non-normative): `docs/industrial-context-platform-north-star.md`, `docs/product-maturity-and-mvp.md`. Current state, open PRs and next gate: `docs/program-status.md`.
 

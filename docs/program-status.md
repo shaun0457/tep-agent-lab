@@ -34,6 +34,7 @@ and the test constants. A NumPy bump edits only the JSON.
 | Parallel product milestone | P1.1C canonical telemetry integration: not started, unblocked |
 | Current research milestone | D0.2C1 comparable pilot fixtures, scorer-v1 and leakage policy v2: not started, unblocked (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
+| Product positioning | the domain-neutral industrial context layer is the product; domain semantics live in domain packs; the Agent is its first consumer; L1 stays on the process pack through TEP; second domain not chosen ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md)) |
 
 ## Tracks
 
@@ -48,6 +49,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.1A telemetry core | merged (PR #22) |
 | P1.1B TEP simulation source | merged (PR #23) |
 | ADR-004 P1 re-baseline | merged (adds this file) |
+| ADR-005 context-layer product positioning | merged (accepted) |
 | P1.1C canonical telemetry integration | not started; write the implementation note first |
 | P1.2 Context Compiler | spec accepted (PR #24); P1.2A not started |
 | P1.3 Canonical Context composition | no owning spec yet |
@@ -67,11 +69,12 @@ Research track:
 | D0.2C2 deterministic C0 | pending |
 | D0.2C3 identifiability report | pending |
 | D0 freeze | pending; needs C0, identifiability, data-informed difficulty, one non-local case |
-| D1 capability ladder | blocked on D0 freeze and B5 |
-| D2 orchestration ablation | blocked on D1 and B4 |
+| D1 context-value study (redirected by ADR-005) | blocked on D0 freeze and B5; the C6 arm also needs P1.2, P1.3 and P1.5; arm set open (OQ-16) |
+| D2 orchestration ablation | parked (ADR-005) |
 
 Cross-track rules (ADR-004 Decision 7): D0 does not block P1.1C–P1.5. Agent capability
-claims need C0 and D1 evidence. B5 is shared by the MVP and D1.
+claims need C0 and D1 evidence. B5 is shared by the MVP and D1. D1 measures context value
+with a fixed Agent (ADR-005 Decision 3).
 
 ## Open PRs at last update
 
@@ -108,8 +111,8 @@ None.
 
 - dirty-stream replay harness (old P1.5): before any non-simulated source;
 - first external connector (old P1.6): Level 2;
-- P1.6 write-back, P1.7 second domain;
-- B4 subagents, D2 / O5;
+- P1.6 write-back; P1.7 second domain (domain not chosen; owner question in ADR-005);
+- B4 subagents; D2 / O5 (parked by ADR-005);
 - HAZOP, Recovery, AutoProcessResearch;
 - durable telemetry, retention, cross-clock mapping, multi-source resolution, quarantine store;
 - macOS/Linux desktop packaging;

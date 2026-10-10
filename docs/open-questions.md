@@ -112,3 +112,15 @@ Open empirical checks, answered only by D0.2C1–C3 evidence:
 - whether `IDV(4)` produces supported, differing dynamics under the common 0.1 h + 0.5 h pilot window (checked so far only under 0.1 h + 0.2 h); a failure is `SPEC_CONFLICT` or an explicit timeline revision for all classes;
 - which candidates are separable across seeds under the frozen C0 features, and which must be excluded or relabeled as not identifiable under this evidence window;
 - the benchmark size needed for statistical inference, set from pilot within-class and between-class variation.
+
+## OQ-16 — D1 context-value arm set
+
+Owning decision: [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) Decision 3. Owning spec: the D1 spec, to be written.
+
+D1 holds the Agent fixed and varies only the context: C0 floor, C2 telemetry, C3 + topology, C6 + reviewed engineering context. evaluation-v0 defines C6 cumulatively (C5 + validated knowledge) and changes one factor per comparison; ADR-004 Decision 6 requires a C6 leakage-audit extension and clean C1–C5 baselines before a C6 claim.
+
+Open:
+
+- whether D1 includes the intermediate rows (C1, C4, C5) and measures engineering-context value as C5 -> C6, or an evaluation-v0 amendment first defines a context-only arm on top of C3;
+- how the C6 leakage-audit extension detects answer-bearing content in an authored engineering corpus;
+- the repeat count per arm, set from pilot variance.

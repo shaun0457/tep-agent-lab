@@ -3,7 +3,9 @@
 Two tracks share this repository ([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) Decision 7):
 
 - **Product track** — Industrial Context Platform: P0/P1 milestones, E-series clients and MVP integration. P1 sequencing is owned by ADR-004.
-- **Research track** — benchmark and evaluation: D0, D1, D2.
+- **Research track** — benchmark and evaluation: D0, D1 (context-value study) and D2 (parked), per [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) Decision 3.
+
+Product positioning: the industrial context layer is the product and the Agent is its first consumer ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md); domain semantics live in domain packs, and Level 1 uses the process pack through TEP).
 
 Current state, open PRs and the next gate: [`program-status.md`](program-status.md). This roadmap points to owning specs; it never defines semantics.
 
@@ -236,6 +238,31 @@ nuisance-proxy and leakage checks.
 #### D0.2C2 — deterministic C0 — pending
 
 #### D0.2C3 — identifiability pilot — pending
+
+## D1 — Context-value study — after D0 freeze and B5
+
+Positioning and scope: [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) Decision 3. Owning spec to be written.
+
+D1 measures the value of context, not a ranking of Agent capability levels. The same Agent
+(model, settings, prompt template, one orchestration condition), the same cases and seeds and
+the same budgets are held fixed; only the context provided varies:
+
+```text
+C0  deterministic floor
+C2  telemetry only
+C3  + ProcessGraph topology
+C6  + compiled, reviewed engineering context
+```
+
+Reported per arm: accuracy, evidence quality, query waste and traceability, with C0 accuracy
+and cost for every case. The arm set must satisfy evaluation-v0 (cumulative C-levels, one
+factor per comparison) and ADR-004 Decision 6 (C6 leakage-audit extension, clean C1–C5
+baselines); see OQ-16. The C6 arm needs P1.2, P1.3 and P1.5.
+
+## D2 — Orchestration ablation — parked
+
+Parked by ADR-005 Decision 3: not scheduled. The evaluation-v0 orchestration axis (O0–O5) keeps
+its meaning; un-parking needs an owner decision.
 
 ## Phase 0 — Reproducible lab / benchmark shell
 

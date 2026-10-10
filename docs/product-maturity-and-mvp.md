@@ -305,7 +305,10 @@ The Portfolio MVP does **not** require:
 
 ### Portfolio MVP exit criterion
 
-Level 1 is achieved only when one visible demo proves:
+> Product positioning: [ADR-005](decisions/ADR-005-context-layer-product-positioning.md). The product is the context
+> layer; the Agent is its first consumer. The criteria below keep their substance.
+
+Level 1 is achieved only when one visible demo proves that the context layer makes one investigation possible and traceable:
 
 1. source material becomes typed Candidate Context;
 2. at least one ambiguous mapping requires human verification;
@@ -314,8 +317,8 @@ Level 1 is achieved only when one visible demo proves:
 5. deterministic operational-state interpretation answers Q2;
 6. plant + telemetry + engineering knowledge assemble into a time-consistent ContextSnapshot;
 7. the system answers Q3: "what is happening now in this subsystem?";
-8. a real Agent performs evidence-backed investigation for Q4;
-9. every important claim can be traced to exact source/snapshot refs;
+8. a real Agent, as the first consumer of that context, performs evidence-backed investigation for Q4;
+9. every important investigation claim can be traced back through the context layer to exact source/snapshot refs;
 10. TEP-specific semantics remain below the generic context boundary.
 
 ## Level 2 — Pilot-grade Product
@@ -419,7 +422,7 @@ It is not the MVP gate.
 | Level | Name | Core proof |
 |---|---|---|
 | L0 | Research Foundation | deterministic Agent/runtime/evaluation works |
-| L1 | Portfolio MVP | one subsystem: context compilation + live state + ContextSnapshot + real investigation |
+| L1 | Portfolio MVP | one subsystem: context compilation + live state + ContextSnapshot that make a real investigation possible and traceable |
 | L2 | Pilot-grade Product | same architecture works with a non-TEP source and durable/reviewable operation |
 | L3 | Production-grade Product | secure, reliable, observable, governed real deployment |
 | L4 | Industrial Context Platform | multiple domains/sources/use cases on reusable context infrastructure |
@@ -454,8 +457,8 @@ context serving + deterministic operational state
 P1.5
 ContextSnapshot + Investigation Context integration
 
-D1 / investigation capability
-real model + evidence-backed RCA
+B5 + one real-model investigation over the P1.5 path
+first context consumer; no capability claim
 
 MVP integration
 portfolio UI and end-to-end demonstration
