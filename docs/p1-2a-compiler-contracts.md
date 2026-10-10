@@ -58,8 +58,15 @@ RuleRegistry  -> RuleSetRevision(registry, visibility, parent?)
   depth and NaN/Infinity are rejected (`persistence.strict_json_loads`). It also
   rejects non-canonical order. Identity is a `ContextSourceRef`, and the same ref
   always loads an equal immutable registry.
-- `derive` and `check_extends` keep every parent rule and conflict unchanged, refuse
-  to re-publish an existing `(rule_id, version)` and never widen visibility.
+- `derive` and `check_extends` keep every parent rule and conflict unchanged and
+  refuse to re-publish an existing `(rule_id, version)`. The constructor and
+  `check_extends` both refuse a child less restricted than its parent.
+- A parent ref is data inside the child, so its declared visibility proves nothing.
+  `load_rule_set_source(..., resolve_parent=...)` (`verify_rule_set_lineage`) loads
+  every ancestor by content checksum and checks each link, visibility included. A
+  parent that cannot be resolved fails closed. `CompileSession.prepare` resolves
+  ancestors through the session's materializers, so it rejects an input rule set that
+  widens its parent.
 - `RuleRegistry` gained read-only `rules()` / `conflicts()` accessors.
   `canonical_context.most_restrictive(...)` is the shared derivation-taint helper.
 
@@ -81,7 +88,8 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   cannot skip them. The registry must be frozen. The session needs exactly one
   AGENT-visible `PROCESS_GRAPH` (the plant context until P1.3) and exactly one R0, and
   no input may be more restrictive than the session. The plant index is rebuilt from
-  the source with the supplied ProcessGraph loader. `session_id` hashes the
+  the source with the supplied ProcessGraph loader; any loader failure becomes a
+  `CompilerError`. `session_id` hashes the
   compatibility tuple (inventory, plant context, R0, policies including
   `acceptance_policies`, visibility). The verifier recomputes it from the revision.
 - **SourceFragmentRef**: an exact source ref, a location, the SHA-256 of the
@@ -124,12 +132,19 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   an input with no resolver fails. Candidate-local failures become `Exclusion`s.
   Revision-level failures raise `PublicationError` and produce no bundle: an unknown
   candidate, a changed source, an unresolved derived input, a duplicate RuleRef
-  across candidates, an invalid R1 or a hidden-tainted selection. Targets and scopes
+  across candidates, an invalid R1 or a hidden-tainted selection. A failure also
+  occurs when the parent revision cannot be resolved through `parent_resolver`, does
+  not hash to its ref, belongs to another lineage, or is more restricted than the
+  staging (its ref or its content). Targets and scopes
   come from the effective review (REMAP) or the reviewed candidate version (APPROVE).
   Every list is sorted by `CandidateRef`, so the selection order never changes the
-  bytes. `StagedPublication` validates its own bundle: paths under the publication
-  roots, every referenced artifact present with a matching checksum, and a head
-  record built from the revision ref and kept out of the files.
+  bytes. `StagedPublication` is self-consistent by construction. It checks paths
+  under the publication roots and that every referenced artifact is present with a
+  matching checksum. It parses the revision strictly; lineage, review-log ref and
+  position, candidates ref, rule-set ref, expected head (from `parent_revision`) and
+  exclusions must agree with it, and `document` is derived from those bytes. The head
+  record is built from the revision ref and kept out of the files. Full dependency
+  verification is `verify_publication`.
 - **Bundle layout** (canonical JSON; same-commit refs are `ArtifactPathRef`):
 
   ```text
@@ -140,15 +155,24 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   context/engineering-context/<lineage>/HEAD.json                   head record (P1.2D writes it)
   ```
 
-- **`verify_publication(files, revision, input_rule_set)`** recomputes everything
-  from bundle content. It checks:
+- **`verify_publication(files, revision, session, parent_resolver=...)`** recomputes
+  everything from bundle content plus the exact dependencies. `session` is a compile
+  session over the revision's own inventory (the pinned PROCESS_GRAPH and R0), and its
+  id must equal the revision's. It checks:
   - strict revision, review-log and candidate schemas, with duplicate keys rejected;
   - the revision id and the `compile_session_id` tuple;
   - review supersession, the compatibility tuple and principals against the recorded
     `acceptance_policies`;
   - candidate hashes and visibility;
   - effective review ids and decisions against each item;
-  - APPROVE target and scope against the stored candidate, REMAP against the review;
+  - every approved item: the candidate is rebuilt from its stored record (it must
+    re-serialize identically) and re-validated with `validate_candidate`. Fragments
+    are re-attested against the sources and targets against the pinned PROCESS_GRAPH
+    index, so a REMAP to a nonexistent target fails. Validation must pass, and the
+    item must equal the record rebuilt from candidate, review and validation:
+    fragments, `KnowledgeRef.content`, extraction kind, target, scope, provenance and
+    validation record;
+  - the parent revision, resolved like staging does;
   - exclusion reasons against the recomputed status;
   - R1: parent = R0, every R0 rule and conflict unchanged, no rules beyond the pinned
     ones, each pinned rule equal to its reviewed candidate rule with literature axes.
@@ -175,16 +199,16 @@ review findings they cover.
 | Criterion | P1.2A state |
 |---|---|
 | 4, 5, 6, 7, 8, 9, 12, 15, 19, 22, 23, 24, 25 | covered at the contract level |
-| 11 | covered: complete candidate and derivation records are staged and verified (H5) |
-| 13, 18 | covered after the workspace-visibility fix (H4) |
+| 11 | covered: complete records are staged; the verifier rebuilds and re-validates every approved item (H5, round-2 item 1) |
+| 13, 18 | covered: workspace visibility (H4), parent-revision visibility and rule-set lineage taint (round-2 items 2 and 3) |
 | 16 | covered, including a staging test where two terminal reviews block publication |
-| 17 | covered: REMAP target, scope and conflict revalidation; units/values are immutable content |
+| 17 | covered: REMAP target, scope and conflict revalidation at staging and again in the verifier; units/values are immutable content |
 | 1, 2 | partial: hand-built fragments over registered fixture sources; parser corpus in P1.2B |
 | 3 | partial: immutable candidate contracts; model-assisted extraction in P1.2C |
 | 14 | partial: contract level; end-to-end demo in P1.2D |
 | 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
 | 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
-| 21 | partial: dependency failures produce no bundle; commit atomicity and crash safety are P1.2D |
+| 21 | partial: the full dependency closure (sources, R0 lineage, derived inputs, parent revision) fails closed with no bundle; commit atomicity and crash safety are P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
