@@ -21,6 +21,9 @@ from industrial_agent_runtime import FakeProvider, to_jsonable
 from tep_sim import ControlMode, MVIntervention
 
 from tep_agent_lab import playground, playground_views, run_telemetry
+from tep_agent_lab.application_transport import (ApplicationTransport, ErrorCode,
+                                                 PROTOCOL_VERSION)
+from tep_agent_lab.application_views import ApplicationViewService
 from tep_agent_lab.canonical_context import ContextSourceRef, ProjectionScope
 from tep_agent_lab.playground import PrepareError, RunManager, RunStatus, WorldSpec
 from tep_agent_lab.playground_views import ViewUnavailable
@@ -98,17 +101,54 @@ class LiveTelemetryCase(PlaygroundCase):
         batch = telemetry.translate(record)
         return batch, telemetry.deliver(batch)
 
-    # Reads through every public boundary that exposes them (extended by the v1 app layer).
+    # Reads through both public boundaries: P0 RunQueries and the v1 application service.
+    def app(self):
+        return ApplicationViewService(self.manager.queries)
+
+    def app_snapshot(self, snapshot):
+        model = self.app().open_telemetry_snapshot(
+            self.run_id, event_horizon_ticks=snapshot["event_horizon"]["ticks"],
+            ingest_sequence=snapshot["ingest_sequence"])
+        self.assertEqual(snapshot["snapshot_ref"], model.snapshot_ref)
+        return model
+
     def current(self, snapshot, signal_id=TEMPERATURE):
-        return plain(self.queries().telemetry_current(signal_id, snapshot=snapshot))
+        view = plain(self.queries().telemetry_current(signal_id, snapshot=snapshot))
+        signal = plain(self.app().get_signal(self.run_id, signal_id,
+                                             snapshot=self.app_snapshot(snapshot)))
+        sample = view["sample"]
+        self.assertEqual((signal["source_id"], signal["signal_id"], signal["status"],
+                          signal["eligible_count"]),
+                         (view["source_id"], view["signal_id"], view["status"],
+                          view["eligible_count"]))
+        self.assertEqual(signal["current"], None if sample is None else {
+            "event_ticks": sample["event_ticks"], "sequence": sample["sequence"],
+            "value": sample["value"], "quality": sample["quality"]})
+        return {**view, "application": signal}
 
     def window(self, snapshot, signal_id=TEMPERATURE, start=None, end=None, max_points=100):
-        return plain(self.queries().telemetry_history(
+        view = plain(self.queries().telemetry_history(
             signal_id, snapshot=snapshot, event_start_ticks=start, event_end_ticks=end,
             max_points=max_points))
+        history = plain(self.app().get_signal_history(
+            self.run_id, signal_id, snapshot=self.app_snapshot(snapshot),
+            event_start_ticks=start, event_end_ticks=end, max_points=max_points))
+        self.assertEqual([(s["source_id"], s["signal_id"], s["sequence"], s["event_ticks"],
+                           s["value"], s["quality"]) for s in view["samples"]],
+                         [(history["source_id"], history["signal_id"], p["sequence"],
+                           p["event_ticks"], p["value"], p["quality"])
+                          for p in history["points"]])
+        for key in ("event_start_ticks", "event_end_ticks", "eligible_count", "returned_count",
+                    "reduced", "reduction_policy", "coverage"):
+            self.assertEqual(view[key], history[key], key)
+        return {**view, "application": history}
 
     def last_event(self, snapshot):
-        return plain(self.queries().telemetry_last_event(snapshot=snapshot))
+        view = plain(self.queries().telemetry_last_event(snapshot=snapshot))
+        run = plain(self.app().get_run(self.run_id, snapshot=self.app_snapshot(snapshot)))
+        self.assertEqual((view["event_ticks"], view["snapshot"]["snapshot_ref"]),
+                         (run["telemetry_event_ticks"], run["snapshot_ref"]))
+        return {**view, "application": run}
 
 
 class IngestionTests(LiveTelemetryCase):
@@ -193,13 +233,25 @@ class IngestionTests(LiveTelemetryCase):
 
     def test_snapshot_survives_run_and_is_unavailable_after_reopen(self):
         snapshot = self.snapshot()
-        before = (self.current(snapshot), self.window(snapshot), self.last_event(snapshot))
+
+        def telemetry_reads():   # run status may change; pinned telemetry may not
+            last = self.last_event(snapshot)
+            return (self.current(snapshot), self.window(snapshot),
+                    {k: v for k, v in last.items() if k != "application"},
+                    last["application"]["telemetry_event_ticks"])
+
+        before = telemetry_reads()
         outcome = self.manager.start(self.run_id)
         self.assertEqual(RunStatus.COMPLETED, outcome.terminal_status)
-        self.assertEqual(before, (self.current(snapshot), self.window(snapshot),
-                                  self.last_event(snapshot)))
+        self.assertEqual(before, telemetry_reads())
         self.assertEqual(snapshot, self.snapshot())   # nothing is ingested while RUNNING
-        reopened = self.make_manager().queries(self.run_id)
+        reopened_manager = self.make_manager()
+        reopened = reopened_manager.queries(self.run_id)
+        transport = ApplicationTransport(ApplicationViewService(reopened_manager.queries))
+        response = transport.dispatch({
+            "protocol_version": PROTOCOL_VERSION, "request_id": "req",
+            "method": "open_telemetry_snapshot", "params": {"run_id": self.run_id}})
+        self.assertEqual(ErrorCode.VIEW_UNAVAILABLE, response.error.code)
         with self.assertRaises(ViewUnavailable):
             reopened.telemetry_snapshot()
         with self.assertRaises(ViewUnavailable):
@@ -326,6 +378,7 @@ class DeliveryTests(LiveTelemetryCase):
             with self.assertRaises((ResourceLimitExceeded, TelemetryError)) as raised:
                 call()
             failures[name] = (type(raised.exception), raised.exception.args)
+        app_failures = self._app_failures(run_id, snapshot, a)
         telemetry = self.telemetry(run_id)
         for _ in range(6):                                  # post-K, inside the ok window
             telemetry.deliver(telemetry.translate(self.shifted(history[2])))
@@ -337,10 +390,36 @@ class DeliveryTests(LiveTelemetryCase):
                 with self.assertRaises((ResourceLimitExceeded, TelemetryError)) as raised:
                     call()
                 self.assertEqual(failures[name], (type(raised.exception), raised.exception.args))
+        self.assertEqual(app_failures, self._app_failures(run_id, snapshot, a))
+        self.assertEqual({"scan": ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                          "beyond-horizon": ErrorCode.INVALID_REQUEST},
+                         {name: codes[2] for name, codes in app_failures.items()})
         self.assertIs(failures["scan"][0], ResourceLimitExceeded)
         with self.assertRaises(ResourceLimitExceeded):     # a new snapshot sees them
             queries.telemetry_history(TEMPERATURE, snapshot=self.snapshot(run_id),
                                       event_start_ticks=a, event_end_ticks=b, max_points=10)
+
+    def _app_failures(self, run_id, snapshot, start):
+        """(exception type, args, transport code) of the failing reads at the app boundary."""
+        service = ApplicationViewService(self.manager.queries)
+        model = service.open_telemetry_snapshot(
+            run_id, event_horizon_ticks=snapshot["event_horizon"]["ticks"],
+            ingest_sequence=snapshot["ingest_sequence"])
+        transport = ApplicationTransport(service)
+        end = snapshot["event_horizon"]["ticks"]
+        found = {}
+        for name, last in (("scan", end), ("beyond-horizon", end + 1)):
+            with self.assertRaises((ResourceLimitExceeded, TelemetryError)) as raised:
+                service.get_signal_history(run_id, TEMPERATURE, snapshot=model,
+                                           event_start_ticks=start, event_end_ticks=last,
+                                           max_points=10)
+            response = transport.dispatch({
+                "protocol_version": PROTOCOL_VERSION, "request_id": "req", "method":
+                "get_signal_history", "params": {
+                    "run_id": run_id, "signal_id": TEMPERATURE, "snapshot": plain(model),
+                    "event_start_ticks": start, "event_end_ticks": last, "max_points": 10}})
+            found[name] = (type(raised.exception), raised.exception.args, response.error.code)
+        return found
 
     def make_manager_with_policy(self, **policy):
         return RunManager(self.root / "runs-policy", revisions=REVISIONS, dependency_pins=PINS,
@@ -357,6 +436,26 @@ class DeliveryTests(LiveTelemetryCase):
                 "beyond-horizon": lambda: queries.telemetry_history(
                     TEMPERATURE, snapshot=snapshot, event_start_ticks=start,
                     event_end_ticks=end + 1, max_points=10)}
+
+    def test_v1_history_replaces_recent_window(self):
+        """Windows older than the former 1000-record TelemetryView projection are served."""
+        history = self.history()
+        frontier = self.ticks(history[-1])
+        telemetry = self.telemetry()
+        for step in range(1, 1101):
+            telemetry.deliver(telemetry.translate(
+                self.shifted(history[-1], ticks=frontier + step, offset=step)))
+        snapshot = self.snapshot()
+        total = len(history) + 1100
+        result = self.window(snapshot, start=0, max_points=1000)
+        self.assertEqual((total, 1000, True, 0), (result["eligible_count"],
+                                                   result["returned_count"], result["reduced"],
+                                                   result["samples"][0]["sequence"]))
+        oldest = self.window(snapshot, start=0, end=self.ticks(history[1]))
+        self.assertEqual([0, 1], [s["sequence"] for s in oldest["samples"]])
+        self.assertEqual(1000, len(self.app().get_signal_history(
+            self.run_id, TEMPERATURE, snapshot=self.app_snapshot(snapshot),
+            max_points=1000).points))
 
     def test_live_late_and_out_of_order_delivery(self):
         history = self.history()
@@ -451,6 +550,31 @@ class BoundaryTests(LiveTelemetryCase):
                 self.assertIsNone(re.search(r"IDV|XMEAS|XMV|prepare-|active_disturbances",
                                             text, re.IGNORECASE))
                 self.assertNotIn(str(self.root), text)
+
+    def test_application_and_transport_payloads_hide_hidden_state(self):
+        service = self.app()
+        snapshot = service.open_telemetry_snapshot(self.run_id)
+        transport = ApplicationTransport(service)
+        payloads = [plain(snapshot), plain(service.get_run(self.run_id, snapshot=snapshot)),
+                    plain(service.get_entity(self.run_id, "reactor")),
+                    plain(service.get_signal(self.run_id, TEMPERATURE, snapshot=snapshot)),
+                    plain(service.get_signal_history(self.run_id, TEMPERATURE,
+                                                     snapshot=snapshot))]
+        payloads.append(plain(transport.dispatch({
+            "protocol_version": PROTOCOL_VERSION, "request_id": "req", "method": "get_signal",
+            "params": {"run_id": self.run_id, "signal_id": TEMPERATURE,
+                       "snapshot": plain(snapshot)}})))
+        text = json.dumps(payloads)
+        self.assertEqual([], leakage_findings(payloads))
+        self.assertIsNone(re.search(r"IDV|prepare-|active_disturbances", text, re.IGNORECASE))
+        # Runtime ids appear only as opaque source_locator labels.
+        locators = re.findall(r'"source_locator": "([^"]+)"', text)
+        self.assertTrue(locators)
+        self.assertEqual(len(re.findall(r"XMEAS|XMV", text)), len(locators))
+        evaluator = ApplicationViewService(
+            lambda run_id: self.manager.queries(run_id, ProjectionScope.EVALUATOR))
+        with self.assertRaises(playground_views.VisibilityViolation):
+            evaluator.get_signal(self.run_id, TEMPERATURE, snapshot=snapshot)
 
     def test_no_public_ingestion_path(self):
         for module in ("playground_views", "application_views", "application_transport",

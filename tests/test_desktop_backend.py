@@ -27,10 +27,8 @@ def request(method="get_run", **params):
                            "method": method, "params": {"run_id": "e0-observatory", **params}}).encode("utf-8")
 
 
-def four_requests():
-    return [request(), request("get_entity", entity_id="reactor"),
-            request("get_signal", signal_id="XMEAS(9)"),
-            request("get_signal_history", signal_id="XMEAS(7)")]
+TEMPERATURE = "reactor.temperature_measurement"
+PRESSURE = "reactor.pressure_measurement"
 
 
 class BoundedSource(io.BytesIO):
@@ -165,21 +163,43 @@ class DemoCompatibilityTests(unittest.TestCase):
             self.assertIn('id="agent-payload"', html)
             self.assertIn('id="developer-setup"', html)
 
-    def test_subprocess_multiple_reads_same_real_session_and_clean_eof(self):
+    def test_desktop_backend_v1_session(self):
+        """One real host process: snapshot first, then reads pinned to it, then clean EOF."""
         with TemporaryDirectory() as directory:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [sys.executable, "-m", "tep_agent_lab.desktop_backend", "--output-root", directory],
-                input=b"\n".join(four_requests()) + b"\n", capture_output=True, timeout=90)
-            self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
-            replies = [json.loads(line) for line in result.stdout.splitlines()]
-            self.assertEqual(4, len(replies))
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                def exchange(frame):
+                    process.stdin.write(frame + b"\n")
+                    process.stdin.flush()
+                    return json.loads(process.stdout.readline())
+
+                opened = exchange(request("open_telemetry_snapshot"))
+                self.assertTrue(opened["ok"], opened)
+                snapshot = opened["result"]
+                replies = [opened] + [exchange(frame) for frame in (
+                    request(snapshot=snapshot), request("get_entity", entity_id="reactor"),
+                    request("get_signal", signal_id=TEMPERATURE, snapshot=snapshot),
+                    request("get_signal_history", signal_id=PRESSURE, snapshot=snapshot))]
+                process.stdin.close()
+                self.assertEqual(0, process.wait(timeout=90), process.stderr.read().decode())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.stdout.close()
+                process.stderr.close()
             self.assertTrue(all(row["ok"] for row in replies), replies)
-            self.assertEqual("COMPLETED", replies[0]["result"]["run_status"])
+            self.assertEqual("COMPLETED", replies[1]["result"]["run_status"])
+            self.assertEqual(snapshot["snapshot_ref"], replies[1]["result"]["snapshot_ref"])
+            self.assertEqual("XMEAS(9)", replies[3]["result"]["source_locator"])
             self.assertTrue(replies[-1]["result"]["points"])
             self.assertEqual([], leakage_findings(replies))
+            text = json.dumps(replies).lower()
             for hidden in ("IDV", "active_disturbances", "evaluator", "known_injected_cause",
-                           "developer_setup", "candidate_cause", "lab-artifacts", directory):
-                self.assertNotIn(hidden.lower(), result.stdout.decode("utf-8").lower())
+                           "developer_setup", "candidate_cause", "lab-artifacts", "prepare-",
+                           directory):
+                self.assertNotIn(hidden.lower(), text)
             # One creation/start, not a new session per request; no report is produced.
             events = (Path(directory) / "p0-runs" / e0_demo.DEFAULT_RUN_ID /
                       "lifecycle" / "events.jsonl").read_text(encoding="utf-8")
