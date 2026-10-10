@@ -252,6 +252,7 @@ class CompilerTestCase(unittest.TestCase):
 
     def verify(self, files, revision, session=None):
         return verify_publication(files, revision, session or self.session,
+                                  derived_input_resolver=resolver,
                                   parent_resolver=self.resolve_parent)
 
 
@@ -1122,6 +1123,111 @@ class RoundTwoStagingTests(CompilerTestCase):
                             content_checksum=child.checksum)
         with self.assertRaises(CompilerError):
             self.c.prepare([GRAPH, self.c.sop_ref, child_ref])
+
+
+class RoundThreeTests(CompilerTestCase):
+    """Round-3 review: the verifier re-runs the whole dependency closure."""
+
+    def reseal_candidates(self, files, document, edit) -> ArtifactPathRef:
+        artifact = json.loads(files[document["candidates"]["path"]])
+        edit(artifact, document)
+        data = canonical_json(artifact)
+        ref = ArtifactPathRef.of(
+            f"context/engineering-context/x/candidates/{hashlib.sha256(data).hexdigest()}.json",
+            data)
+        files[ref.path] = data
+        document["candidates"] = ref.record()
+        return reseal(files, document)
+
+    def test_r3_1a_verifier_reattests_r0(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref)
+        staged = self.stage([ref])
+        (self.c.root / R0_PATH).write_bytes(b"{}")
+        with self.assertRaises(PublicationError):
+            self.verify(dict(staged.files), staged.revision)
+
+    def test_r3_1b_verifier_resolves_derived_inputs(self) -> None:
+        forged_input = DerivedInput("model-call:1", "model_context", Visibility.AGENT, "0" * 64)
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                      provenance=self.c.provenance(
+                                          derived_inputs=(forged_input,))))
+        self.review(ref)
+        with mock.patch.object(context_compiler, "_resolve_derived_inputs",
+                               lambda *args, **kwargs: None):  # a forger's toolchain
+            staged = self.stage([ref])
+        with self.assertRaises(PublicationError):
+            self.verify(dict(staged.files), staged.revision)
+        with self.assertRaises(PublicationError):  # and no resolver at all fails closed
+            verify_publication(dict(staged.files), staged.revision, self.session,
+                               parent_resolver=self.resolve_parent)
+
+    def test_r3_2_conflict_dependencies_are_stored_and_required(self) -> None:
+        claim = self.add(self.c.knowledge("claim", conflicting_candidate_ids=("ghost",)))
+        self.review(claim)
+        excluded = self.stage([claim])
+        self.assertEqual("CONFLICT_UNRESOLVED", excluded.exclusions[0].detail)
+        ghost = self.add(self.c.binding("ghost", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        staged = self.stage([claim])  # ghost is not selected
+        self.assertEqual(1, len(committed(staged)["approved_knowledge"]))
+        artifact = json.loads(dict(staged.files)[staged.candidates.path])
+        stored = [record for records in artifact.values() if isinstance(records, list)
+                  for record in records]
+        self.assertIn(ghost, [CandidateRef(record["candidate_id"],
+                                           record["candidate_version"]) for record in stored])
+        self.assertNotIn(ghost, [CandidateRef.from_record(item) for item in committed(
+            staged)["considered_candidate_refs"]])
+
+        def drop_ghost(artifact, document):
+            for key, records in artifact.items():
+                if isinstance(records, list):
+                    artifact[key] = [item for item in records
+                                     if item["candidate_id"] != "ghost"]
+            if "dependency_candidate_refs" in document:
+                document["dependency_candidate_refs"] = []
+
+        files = dict(staged.files)
+        forged = self.reseal_candidates(files, committed(staged), drop_ghost)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
+
+    def test_r3_2_conflict_summary_is_rederived(self) -> None:
+        refs = PublicationTests.vertical_slice(self)
+        staged = self.stage(refs.values())
+        document = committed(staged)
+        self.assertTrue(document["conflicts"])
+        document["conflicts"] = []
+        files = dict(staged.files)
+        forged = reseal(files, document)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
+
+    def test_verifier_rejects_duplicate_pinned_rule_refs(self) -> None:
+        refs = PublicationTests.vertical_slice(self)
+        staged = self.stage(refs.values())
+        document = committed(staged)
+        document["pinned_rule_refs"] = document["pinned_rule_refs"] * 2
+        document["rule_scope_bindings"] = document["rule_scope_bindings"] * 2
+        files = dict(staged.files)
+        forged = reseal(files, document)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
+
+    def test_r3_3_rule_set_cannot_be_more_restricted_than_the_revision(self) -> None:
+        refs = PublicationTests.vertical_slice(self)
+        staged = self.stage(refs.values())
+        files = dict(staged.files)
+        r1 = load_rule_set(files[staged.published_rule_set.path],
+                           staged.published_rule_set.content_checksum)
+        hidden = RuleSetRevision(r1.registry, Visibility.EVALUATOR, r1.parent)
+        path = f"context/rule-sets/{hidden.checksum}.json"
+        files[path] = hidden.serialize()
+        document = committed(staged)
+        document["published_rule_set"] = {"revision": "SAME_COMMIT", "path": path,
+                                          "content_checksum": hidden.checksum}
+        forged = reseal(files, document)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
 
 
 class BoundaryTests(unittest.TestCase):
