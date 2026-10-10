@@ -48,10 +48,14 @@ jobs:
           exit $LASTEXITCODE
       - name: Validate frontend
         working-directory: tep-agent-lab/desktop
+        shell: pwsh
         run: |
           npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm test
+          exit $LASTEXITCODE
       - name: Validate Rust and real Python process bridge (no window)
         working-directory: tep-agent-lab/desktop/src-tauri
         shell: pwsh

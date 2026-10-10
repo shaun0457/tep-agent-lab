@@ -16,7 +16,7 @@ use tokio::{
     time::timeout,
 };
 
-pub const PROTOCOL: &str = "tep-agent-lab.application-transport/v0";
+pub const PROTOCOL: &str = "tep-agent-lab.application-transport/v1";
 pub const RUN_ID: &str = "e0-observatory";
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// Includes the LF terminator, so a frame never allocates beyond 1 MiB.
@@ -95,6 +95,8 @@ fn decode_response(bytes: &[u8], request_id: &str) -> Result<ApplicationResponse
             "AMBIGUOUS_SIGNAL" => "ambiguous signal",
             "VIEW_UNAVAILABLE" => "view unavailable",
             "VISIBILITY_VIOLATION" => "visibility violation",
+            "SNAPSHOT_UNAVAILABLE" => "snapshot unavailable",
+            "RESOURCE_LIMIT_EXCEEDED" => "resource limit exceeded",
             "INVALID_REQUEST" => "invalid request",
             "UNSUPPORTED_METHOD" => "unsupported method",
             "UNSUPPORTED_PROTOCOL_VERSION" => "unsupported protocol version",
@@ -267,7 +269,11 @@ impl BackendProcess {
     ) -> Result<ApplicationResponse, BridgeError> {
         if !matches!(
             method,
-            "get_run" | "get_entity" | "get_signal" | "get_signal_history"
+            "open_telemetry_snapshot"
+                | "get_run"
+                | "get_entity"
+                | "get_signal"
+                | "get_signal_history"
         ) {
             return Err(BridgeError::UnsupportedMethod);
         }
@@ -279,11 +285,19 @@ impl BackendProcess {
         if params.contains_key("run_id") {
             return Err(BridgeError::InvalidRequest);
         }
+        // `snapshot` is passed through as an opaque JSON value; Python owns its meaning.
         let allowed: &[&str] = match method {
-            "get_run" => &[],
+            "open_telemetry_snapshot" => &["event_horizon_ticks", "ingest_sequence"],
+            "get_run" => &["snapshot"],
             "get_entity" => &["entity_id"],
-            "get_signal" => &["signal_id"],
-            _ => &["signal_id", "start_hours", "end_hours", "max_points"],
+            "get_signal" => &["signal_id", "snapshot"],
+            _ => &[
+                "signal_id",
+                "snapshot",
+                "event_start_ticks",
+                "event_end_ticks",
+                "max_points",
+            ],
         };
         if params.keys().any(|key| !allowed.contains(&key.as_str())) {
             return Err(BridgeError::InvalidRequest);
@@ -425,8 +439,9 @@ mod tests {
         for wire in [
             r#"{}"#,
             r#"{"protocol_version":"bad","request_id":"desktop-1","ok":true,"result":{}}"#,
-            r#"{"protocol_version":"tep-agent-lab.application-transport/v0","request_id":"desktop-2","ok":true,"result":{}}"#,
-            r#"{"protocol_version":"tep-agent-lab.application-transport/v0","request_id":"desktop-1","ok":true,"result":{},"error":null}"#,
+            r#"{"protocol_version":"tep-agent-lab.application-transport/v0","request_id":"desktop-1","ok":true,"result":{}}"#,
+            r#"{"protocol_version":"tep-agent-lab.application-transport/v1","request_id":"desktop-2","ok":true,"result":{}}"#,
+            r#"{"protocol_version":"tep-agent-lab.application-transport/v1","request_id":"desktop-1","ok":true,"result":{},"error":null}"#,
         ] {
             assert_eq!(
                 decode_response(wire.as_bytes(), "desktop-1").unwrap_err(),

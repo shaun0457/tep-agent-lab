@@ -19,9 +19,15 @@ fn fixture(mode: &str) -> BackendProcess {
 async fn one_child_monotonic_ids_canonical_newline_and_allowlist() {
     let backend = fixture("normal");
     let pid = backend.process_id().await.unwrap();
-    for (index, method) in ["get_run", "get_entity", "get_signal", "get_signal_history"]
-        .iter()
-        .enumerate()
+    for (index, method) in [
+        "open_telemetry_snapshot",
+        "get_run",
+        "get_entity",
+        "get_signal",
+        "get_signal_history",
+    ]
+    .iter()
+    .enumerate()
     {
         let response = backend.request(method, json!({})).await.unwrap();
         assert_eq!(response.request_id, format!("desktop-{}", index + 1));
@@ -30,7 +36,14 @@ async fn one_child_monotonic_ids_canonical_newline_and_allowlist() {
         assert_eq!(result["count"], index + 1);
         assert_eq!(result["params"]["run_id"], RUN_ID);
     }
-    for method in ["start", "get_evaluator", "run_shell", "send_raw_stdin"] {
+    for method in [
+        "start",
+        "get_evaluator",
+        "run_shell",
+        "send_raw_stdin",
+        "deliver",
+        "telemetry_snapshot",
+    ] {
         assert_eq!(
             backend.request(method, json!({})).await.unwrap_err(),
             BridgeError::UnsupportedMethod
@@ -42,6 +55,8 @@ async fn one_child_monotonic_ids_canonical_newline_and_allowlist() {
         json!({"executable":"bad"}),
         json!([]),
         json!({"signal_id":"x".repeat(65536)}),
+        json!({"signal_id":"s","start_hours":0}),
+        json!({"signal_id":"s","snapshot":{},"ingest_sequence":0}),
     ] {
         assert_eq!(
             backend.request("get_signal", params).await.unwrap_err(),
@@ -54,7 +69,7 @@ async fn one_child_monotonic_ids_canonical_newline_and_allowlist() {
             .await
             .unwrap()
             .request_id,
-        "desktop-5"
+        "desktop-6"
     );
     backend.shutdown().await;
     assert_eq!(backend.process_id().await, None);
@@ -130,38 +145,51 @@ async fn shutdown_cancels_hung_request_and_reaps_child() {
 
 // Deliberately not ignored: CI must prove the real process boundary, without a GUI.
 #[tokio::test]
-async fn real_python_four_reads_same_process_session() {
+async fn real_python_v1_reads_same_process_session() {
     let backend = BackendProcess::development().unwrap();
     let pid = backend.process_id().await.unwrap();
+    let opened = backend
+        .request("open_telemetry_snapshot", json!({}))
+        .await
+        .unwrap();
+    assert!(opened.ok, "{opened:?}");
+    assert_eq!(opened.request_id, "desktop-1");
+    // The snapshot is opaque to Rust: passed back verbatim, never interpreted here.
+    let snapshot = Value::Object(opened.result.unwrap());
     let reads = [
-        ("get_run", json!({})),
+        ("get_run", json!({"snapshot": snapshot.clone()})),
         ("get_entity", json!({"entity_id":"reactor"})),
-        ("get_signal", json!({"signal_id":"XMEAS(9)"})),
+        (
+            "get_signal",
+            json!({"signal_id":"reactor.temperature_measurement","snapshot":snapshot.clone()}),
+        ),
         (
             "get_signal_history",
-            json!({"signal_id":"XMEAS(7)","max_points":30}),
+            json!({"signal_id":"reactor.pressure_measurement","snapshot":snapshot.clone(),"max_points":30}),
         ),
     ];
     for (index, (method, params)) in reads.into_iter().enumerate() {
         let response = backend.request(method, params).await.unwrap();
         assert!(response.ok, "{response:?}");
         assert_eq!(response.protocol_version, PROTOCOL);
-        assert_eq!(response.request_id, format!("desktop-{}", index + 1));
+        assert_eq!(response.request_id, format!("desktop-{}", index + 2));
         assert_eq!(backend.process_id().await, Some(pid));
         let result = response.result.unwrap();
         match method {
             "get_run" => {
                 assert_eq!(result["run_id"], RUN_ID);
                 assert_eq!(result["run_status"], "COMPLETED");
+                assert_eq!(result["snapshot_ref"], snapshot["snapshot_ref"]);
             }
             "get_entity" => assert_eq!(result["entity_id"], "reactor"),
             "get_signal" => {
-                assert_eq!(result["signal_id"], "XMEAS(9)");
-                assert_eq!(result["telemetry_available"], true);
+                assert_eq!(result["signal_id"], "reactor.temperature_measurement");
+                assert_eq!(result["source_locator"], "XMEAS(9)");
+                assert_eq!(result["status"], "DATA");
             }
             _ => {
                 assert_eq!(result["run_id"], RUN_ID);
-                assert_eq!(result["signal_id"], "XMEAS(7)");
+                assert_eq!(result["signal_id"], "reactor.pressure_measurement");
                 let points = result["points"].as_array().unwrap();
                 assert!(!points.is_empty() && points.len() <= 30);
             }
@@ -174,6 +202,7 @@ async fn real_python_four_reads_same_process_session() {
             "evaluator",
             "known_injected_cause",
             "developer_setup",
+            "prepare-",
         ] {
             assert!(!wire.contains(hidden));
         }

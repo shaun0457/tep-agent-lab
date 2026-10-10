@@ -8,7 +8,9 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 
-PROTOCOL = "tep-agent-lab.application-transport/v0"
+PROTOCOL = "tep-agent-lab.application-transport/v1"
+TEMPERATURE = "reactor.temperature_measurement"
+PRESSURE = "reactor.pressure_measurement"
 FILENAME = "tep-agent-backend-x86_64-pc-windows-msvc.exe"
 
 
@@ -18,37 +20,63 @@ def smoke(binary: Path, build_manifest: dict) -> None:
         isolated = root / "installed-backend.exe"
         shutil.copyfile(binary, isolated)
         output = root / "sessions" / "fresh"
-        reads = [("get_run", {}), ("get_entity", {"entity_id": "reactor"}),
-                 ("get_signal", {"signal_id": "XMEAS(9)"}),
-                 ("get_signal_history", {"signal_id": "XMEAS(7)", "max_points": 30})]
-        wire = b"".join((json.dumps({"protocol_version": PROTOCOL,
-                                     "request_id": f"smoke-{i}", "method": method,
-                                     "params": {"run_id": "frozen-smoke", **params}})
-                          + "\n").encode() for i, (method, params) in enumerate(reads, 1))
         env = {key: value for key, value in os.environ.items()
                if not key.upper().startswith(("PYTHON", "TEP_AGENT", "TEP_SIDECAR"))}
         env["PATH"] = ""  # Neither Python nor Git nor the dependency sources can be found.
-        result = subprocess.run([str(isolated), "--run-id", "frozen-smoke",
-                                 "--output-root", str(output)], input=wire, cwd=root,
-                                env=env, capture_output=True, timeout=120)
-        assert result.returncode == 0, result.stderr.decode(errors="replace")
-        replies = [json.loads(line) for line in result.stdout.splitlines()]
-        assert len(replies) == 4, replies
+        # v1 reads need the snapshot from the first reply: one frame, one reply.
+        process = subprocess.Popen([str(isolated), "--run-id", "frozen-smoke",
+                                    "--output-root", str(output)], cwd=root, env=env,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        lines: list[bytes] = []
+
+        def exchange(index: int, method: str, params: dict) -> dict:
+            frame = json.dumps({"protocol_version": PROTOCOL, "request_id": f"smoke-{index}",
+                                "method": method,
+                                "params": {"run_id": "frozen-smoke", **params}})
+            process.stdin.write((frame + "\n").encode())
+            process.stdin.flush()
+            line = process.stdout.readline()
+            lines.append(line)
+            return json.loads(line)
+
+        try:
+            replies = [exchange(1, "open_telemetry_snapshot", {})]
+            assert replies[0]["ok"], replies
+            snapshot = replies[0]["result"]
+            reads = [("get_run", {"snapshot": snapshot}), ("get_entity", {"entity_id": "reactor"}),
+                     ("get_signal", {"signal_id": TEMPERATURE, "snapshot": snapshot}),
+                     ("get_signal_history", {"signal_id": PRESSURE, "snapshot": snapshot,
+                                             "max_points": 30})]
+            replies += [exchange(i, method, params)
+                        for i, (method, params) in enumerate(reads, 2)]
+            process.stdin.close()
+            returncode = process.wait(timeout=120)
+            stderr = process.stderr.read()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.stdout.close()
+            process.stderr.close()
+        assert returncode == 0, stderr.decode(errors="replace")
+        assert len(replies) == 5, replies
         for i, reply in enumerate(replies, 1):
             assert reply["ok"] and reply["request_id"] == f"smoke-{i}", reply
             assert reply["protocol_version"] == PROTOCOL
-        assert replies[0]["result"]["run_id"] == "frozen-smoke"
-        assert replies[3]["result"]["run_id"] == "frozen-smoke"
-        assert replies[0]["result"]["run_status"] == "COMPLETED"
-        assert replies[1]["result"]["entity_id"] == "reactor"
-        assert replies[2]["result"]["signal_id"] == "XMEAS(9)"
-        assert replies[2]["result"]["telemetry_available"] is True
-        history = replies[3]["result"]
-        assert history["signal_id"] == "XMEAS(7)"
+        assert replies[1]["result"]["run_id"] == "frozen-smoke"
+        assert replies[4]["result"]["run_id"] == "frozen-smoke"
+        assert replies[1]["result"]["run_status"] == "COMPLETED"
+        assert replies[1]["result"]["snapshot_ref"] == snapshot["snapshot_ref"]
+        assert replies[2]["result"]["entity_id"] == "reactor"
+        assert replies[3]["result"]["signal_id"] == TEMPERATURE
+        assert replies[3]["result"]["source_locator"] == "XMEAS(9)"
+        assert replies[3]["result"]["status"] == "DATA"
+        history = replies[4]["result"]
+        assert history["signal_id"] == PRESSURE
         assert 0 < len(history["points"]) <= 30
-        text = result.stdout.decode().lower()
+        text = b"".join(lines).decode().lower()
         for hidden in ("idv", "evaluator", "known_injected_cause", "developer_setup",
-                       "active_disturbances", "candidate_cause", "lab-artifacts",
+                       "active_disturbances", "candidate_cause", "lab-artifacts", "prepare-",
                        str(root).lower(), str(binary.parent).lower()):
             assert hidden not in text, hidden
         run = output / "p0-runs/frozen-smoke"
@@ -64,7 +92,8 @@ def smoke(binary: Path, build_manifest: dict) -> None:
             "tep_sim_git_revision": pins["tep-sim"],
         }, manifest["source_revisions"]
         assert manifest["numerical_stack"]["numpy"] == pins["numpy"]
-        print("Frozen EXE four-read smoke: PASS; one session; clean EOF; PATH empty")
+        print("Frozen EXE v1 snapshot + four-read smoke: PASS; one session; clean EOF; "
+              "PATH empty")
         print("Run provenance:", json.dumps(manifest.get("source_revisions", {}), sort_keys=True))
 
 

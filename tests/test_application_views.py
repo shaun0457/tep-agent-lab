@@ -304,6 +304,19 @@ class ApplicationViewsTests(unittest.TestCase):
         service.get_signal_history(self.run_id, TEMPERATURE, snapshot=self.snapshot)
         queries.telemetry.assert_not_called()
 
+    def test_desktop_probe_ids_match_process_graph(self):
+        import re
+        probes = (Path(__file__).resolve().parents[1] / "desktop/src/lib/probes.ts").read_text(
+            encoding="utf-8")
+        constants = dict(re.findall(r'export const (\w+_SIGNAL) = "([^"]+)";', probes))
+        bindings = {b["runtime_variable_id"]: b["semantic_entity_id"]
+                    for node in self.graph()["nodes"] + self.graph()["edges"]
+                    for b in node["bindings"]}
+        self.assertEqual({"TEMPERATURE_SIGNAL": bindings["XMEAS(9)"],
+                          "PRESSURE_SIGNAL": bindings["XMEAS(7)"]}, constants)
+        self.assertEqual((TEMPERATURE, PRESSURE), (constants["TEMPERATURE_SIGNAL"],
+                                                   constants["PRESSURE_SIGNAL"]))
+
     def test_no_private_or_transport_dependencies(self):
         import tep_agent_lab.application_views as module
         source = inspect.getsource(module)

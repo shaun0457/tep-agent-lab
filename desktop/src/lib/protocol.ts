@@ -1,4 +1,4 @@
-export const PROTOCOL = "tep-agent-lab.application-transport/v0";
+export const PROTOCOL = "tep-agent-lab.application-transport/v1";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
 export type Envelope =
@@ -8,7 +8,8 @@ export type Envelope =
 const messages: Record<string, string> = {
   UNKNOWN_ENTITY: "unknown entity", UNKNOWN_SIGNAL: "unknown signal",
   AMBIGUOUS_SIGNAL: "ambiguous signal", VIEW_UNAVAILABLE: "view unavailable",
-  VISIBILITY_VIOLATION: "visibility violation", INVALID_REQUEST: "invalid request",
+  VISIBILITY_VIOLATION: "visibility violation", SNAPSHOT_UNAVAILABLE: "snapshot unavailable",
+  RESOURCE_LIMIT_EXCEEDED: "resource limit exceeded", INVALID_REQUEST: "invalid request",
   UNSUPPORTED_METHOD: "unsupported method", UNSUPPORTED_PROTOCOL_VERSION: "unsupported protocol version",
   INTERNAL_ERROR: "internal error",
 };
