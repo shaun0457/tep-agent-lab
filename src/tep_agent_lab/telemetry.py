@@ -1,6 +1,7 @@
 """Generic telemetry core: canonical samples, append store and snapshot-bound reads.
 
-Implements the P1.1A subset of ``docs/specs/plant-telemetry-contract-v0.md``::
+Implements the P1.1A subset of ``docs/specs/plant-telemetry-contract-v0.md``, with the
+P1.1C event-time index (``docs/p1-1c-canonical-telemetry-integration.md``)::
 
     SourceObservation -> TelemetryIngestor (assigns ingest_time)
       -> InMemoryTimeSeriesStore (immutable records, store-wide commit revision K)
@@ -10,7 +11,8 @@ Implements the P1.1A subset of ``docs/specs/plant-telemetry-contract-v0.md``::
 Hard invariant: a read pinned to (T, K) never observes a record whose commit
 revision exceeds K or whose event time exceeds T. Both cutoffs are applied before
 ordering, reduction or any count is computed, so late arrivals never rewrite an
-earlier snapshot.
+earlier snapshot. Read outcomes, including resource-limit failures, depend only on the
+binding, K, T and the requested window; records committed after K never contribute.
 
 This module is source-independent application/domain infrastructure. It imports
 the standard library only; simulator adapters translate into these contracts, never
@@ -20,7 +22,7 @@ store revisions are unrelated to simulator snapshots or investigation-state revi
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -37,6 +39,8 @@ TELEMETRY_CONTRACT_VERSION = "tep-agent-lab.telemetry/v0"
 REDUCTION_POLICY = "telemetry.reduction.endpoint-index/v0"
 
 _MAX_ID_LENGTH = 256
+# Records per sorted index block (see ``_EventIndex``); a tuning constant, not contract.
+_INDEX_BLOCK = 128
 
 Scalar = bool | int | float | str | None
 
@@ -381,8 +385,12 @@ class InMemoryTimeSeriesStore:
         self._lock = threading.Lock()
         self._revision = 0
         self._by_identity: dict[SampleIdentity, AcceptedRecord] = {}
-        # Per binding, in commit order; commit revisions are therefore nondecreasing.
-        self._streams: dict[tuple[str, str], list[AcceptedRecord]] = {}
+        # Per binding, plus one store-wide index; both in commit order.
+        self._block = _INDEX_BLOCK
+        self._streams: dict[tuple[str, str], _EventIndex] = {}
+        self._all = _EventIndex(self._block)
+        # _frontier[r - 1]: maximum event tick committed at or before revision r.
+        self._frontier: list[int] = []
 
     @property
     def bindings(self) -> Mapping[str, frozenset[str]]:
@@ -446,8 +454,12 @@ class InMemoryTimeSeriesStore:
             if pending:
                 for identity, record in pending.items():
                     self._by_identity[identity] = record
-                    self._streams.setdefault(
-                        (identity.source_id, identity.signal_id), []).append(record)
+                    self._streams.setdefault((identity.source_id, identity.signal_id),
+                                             _EventIndex(self._block)).append(record)
+                    self._all.append(record)
+                latest = max(record.sample.event_time.ticks for record in pending.values())
+                self._frontier.append(latest if not self._frontier
+                                      else max(latest, self._frontier[-1]))
                 self._revision = revision
             return AppendResult(self._revision, tuple(records), len(pending))
 
@@ -477,37 +489,116 @@ class InMemoryTimeSeriesStore:
                 raise SnapshotUnavailable("snapshot ingest_sequence is not yet committed")
         return snapshot
 
-    def _eligible(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot,
-                  start_ticks: int | None, end_ticks: int,
-                  max_scan_records: int) -> list[SignalSample]:
+    def event_frontier(self, ingest_sequence: int) -> TimePoint | None:
+        """Maximum event time committed at or before revision K; None for an empty prefix."""
+        _checked_int("ingest_sequence", ingest_sequence, minimum=0)
+        with self._lock:
+            if ingest_sequence > self._revision:
+                raise SnapshotUnavailable("ingest_sequence is not yet committed")
+            if ingest_sequence == 0:
+                return None
+            return TimePoint(self.event_clock.clock_id, self._frontier[ingest_sequence - 1])
+
+    def _window(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot,
+                start_ticks: int, end_ticks: int,
+                max_scan_records: int) -> list[SignalSample]:
         """Records with commit <= K and start <= event <= end (<= T), unordered.
 
         Reader-internal: the reader resolves the snapshot and validates bounds and
-        limits first. Both cutoffs apply here, before any sort, reduction or count.
-
-        The candidate set is the binding's K-committed prefix, sized by bisection
-        before any record is read. If it exceeds ``max_scan_records`` the read fails
-        without scanning anything. The prefix is fixed by (binding, K), so a given
-        snapshot passes or fails deterministically regardless of later appends.
+        limits first. The candidate count is taken from the event-time index before
+        any record is read. Only records committed at or before K and inside the window
+        count, so a snapshot passes or fails the same way regardless of later appends.
         """
         self.require_binding(source_id, signal_id)
         with self._lock:
-            stream = self._streams.get((source_id, signal_id), [])
-            # Commit order makes the K-visible records an exact prefix.
-            visible = bisect_right(stream, snapshot.ingest_sequence,
-                                   key=lambda record: record.commit_revision)
-            if visible > max_scan_records:
+            index = self._streams.get((source_id, signal_id))
+            if index is None:
+                return []
+            if index.count(snapshot.ingest_sequence, start_ticks, end_ticks) > max_scan_records:
                 # No counts or values in the message: nothing about the candidates leaks.
                 raise ResourceLimitExceeded("candidate scan exceeds the reader limit")
-            prefix = stream[:visible]
-        return [record.sample for record in prefix
-                if record.sample.event_time.ticks <= end_ticks
-                and (start_ticks is None or record.sample.event_time.ticks >= start_ticks)]
+            return [record.sample for record in
+                    index.window(snapshot.ingest_sequence, start_ticks, end_ticks)]
+
+    def _last(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot
+              ) -> tuple[int, SignalSample | None]:
+        """(eligible count, last sample in read order) at or before T under K."""
+        self.require_binding(source_id, signal_id)
+        with self._lock:
+            index = self._streams.get((source_id, signal_id))
+            if index is None:
+                return 0, None
+            count, record = index.last(snapshot.ingest_sequence, snapshot.event_horizon.ticks)
+        return count, None if record is None else record.sample
+
+    def _last_event(self, snapshot: TelemetryReadSnapshot) -> TimePoint | None:
+        with self._lock:
+            _, record = self._all.last(snapshot.ingest_sequence, snapshot.event_horizon.ticks)
+        return None if record is None else record.sample.event_time
 
 
 def read_order(sample: SignalSample) -> tuple[int, str, int]:
     """Total read order within one clock; independent of ingest arrival order."""
     return (sample.event_time.ticks, sample.source_id, sample.sequence)
+
+
+class _EventIndex:
+    """Commit-ordered records, cut into fixed blocks that are also sorted by read order.
+
+    Commit order makes the K-visible records an exact prefix. Every block lying wholly
+    inside that prefix answers window counts, window slices and the last sample at or
+    before T by bisection; only the partial tail block (fewer than ``block`` records)
+    is filtered linearly. No query reads a record committed after K, and the cost no
+    longer grows linearly with the whole prefix.
+    """
+
+    def __init__(self, block: int) -> None:
+        self._block = block
+        self._records: list[AcceptedRecord] = []
+        self._sorted: list[tuple[list[int], list[AcceptedRecord]]] = []
+
+    def append(self, record: AcceptedRecord) -> None:
+        self._records.append(record)
+        if len(self._records) % self._block == 0:
+            chunk = sorted(self._records[-self._block:],
+                           key=lambda item: read_order(item.sample))
+            self._sorted.append(([item.sample.event_time.ticks for item in chunk], chunk))
+
+    def _split(self, revision: int):
+        visible = bisect_right(self._records, revision,
+                               key=lambda record: record.commit_revision)
+        full = visible // self._block
+        return self._sorted[:full], self._records[full * self._block:visible]
+
+    def count(self, revision: int, start: int, end: int) -> int:
+        blocks, tail = self._split(revision)
+        total = sum(bisect_right(ticks, end) - bisect_left(ticks, start)
+                    for ticks, _ in blocks)
+        return total + sum(1 for record in tail
+                           if start <= record.sample.event_time.ticks <= end)
+
+    def window(self, revision: int, start: int, end: int) -> list[AcceptedRecord]:
+        blocks, tail = self._split(revision)
+        found: list[AcceptedRecord] = []
+        for ticks, records in blocks:
+            found += records[bisect_left(ticks, start):bisect_right(ticks, end)]
+        return found + [record for record in tail
+                        if start <= record.sample.event_time.ticks <= end]
+
+    def last(self, revision: int, end: int) -> tuple[int, AcceptedRecord | None]:
+        blocks, tail = self._split(revision)
+        count, candidates = 0, []
+        for ticks, records in blocks:
+            position = bisect_right(ticks, end)
+            count += position
+            if position:
+                candidates.append(records[position - 1])
+        for record in tail:
+            if record.sample.event_time.ticks <= end:
+                count += 1
+                candidates.append(record)
+        best = max(candidates, key=lambda record: read_order(record.sample), default=None)
+        return count, best
 
 
 class TelemetryIngestor:
@@ -610,9 +701,11 @@ def reduce_indices(n: int, m: int) -> tuple[int, ...]:
 class TimeSeriesReader:
     """Bounded deterministic reads; every request pins one snapshot and one binding.
 
-    Service-policy bounds: returned points, event interval and candidate records
-    scanned (``max_scan_records``). Exceeding any of them raises
-    ResourceLimitExceeded; there is no partial scan or silent truncation.
+    Service-policy bounds: returned points, event interval and history window
+    candidates (``max_scan_records``: records committed at or before K inside the
+    requested window). Exceeding any of them raises ResourceLimitExceeded; there is
+    no partial scan or silent truncation. ``current`` and ``last_event_time`` use the
+    event-time index and read at most one record per index block.
     """
 
     def __init__(self, store: InMemoryTimeSeriesStore, *, max_interval_ticks: int,
@@ -628,11 +721,13 @@ class TimeSeriesReader:
                 snapshot: TelemetryReadSnapshot) -> CurrentResult:
         """Last eligible sample at or before T, whatever its quality, or NO_DATA."""
         self._store.resolve(snapshot)
-        samples = self._store._eligible(source_id, signal_id, snapshot, None,
-                                        snapshot.event_horizon.ticks,
-                                        self.max_scan_records)
-        return CurrentResult(snapshot, source_id, signal_id, len(samples),
-                             max(samples, key=read_order) if samples else None)
+        count, sample = self._store._last(source_id, signal_id, snapshot)
+        return CurrentResult(snapshot, source_id, signal_id, count, sample)
+
+    def last_event_time(self, snapshot: TelemetryReadSnapshot) -> TimePoint | None:
+        """Latest eligible event time at or before T under K, across all bindings."""
+        self._store.resolve(snapshot)
+        return self._store._last_event(snapshot)
 
     def history(self, *, source_id: str, signal_id: str, event_start: TimePoint,
                 event_end: TimePoint, max_points: int,
@@ -650,9 +745,9 @@ class TimeSeriesReader:
             raise ResourceLimitExceeded("max_points exceeds the reader limit")
         if event_end.ticks - event_start.ticks > self.max_interval_ticks:
             raise ResourceLimitExceeded("event interval exceeds the reader limit")
-        eligible = sorted(self._store._eligible(source_id, signal_id, snapshot,
-                                                event_start.ticks, event_end.ticks,
-                                                self.max_scan_records),
+        eligible = sorted(self._store._window(source_id, signal_id, snapshot,
+                                              event_start.ticks, event_end.ticks,
+                                              self.max_scan_records),
                           key=read_order)
         selected = tuple(eligible[i] for i in reduce_indices(len(eligible), max_points))
         return HistoryResult(snapshot, source_id, signal_id, event_start, event_end,

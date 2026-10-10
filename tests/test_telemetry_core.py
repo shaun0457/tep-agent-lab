@@ -6,6 +6,7 @@ from fractions import Fraction
 from pathlib import Path
 import re
 import unittest
+from unittest import mock
 
 from tep_agent_lab import telemetry
 from tep_agent_lab.telemetry import (
@@ -389,22 +390,26 @@ class ResourceBoundTests(Fixture):
         self.ingest(*(obs(i, i) for i in range(5)))
         snapshot = self.store.snapshot(at(10))
         reader = self.reader_with(4)
-        with self.assertRaises(ResourceLimitExceeded):
-            reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
-        with self.assertRaises(ResourceLimitExceeded):  # even for a narrow interval
-            reader.history(source_id="src-1", signal_id="sig-a", event_start=at(1),
-                           event_end=at(1), max_points=1, snapshot=snapshot)
+        with self.assertRaises(ResourceLimitExceeded):  # five window candidates
+            reader.history(source_id="src-1", signal_id="sig-a", event_start=at(0),
+                           event_end=at(10), max_points=10, snapshot=snapshot)
+        # P1.1C: a narrow window counts only its own candidates, and current uses the
+        # event-time index instead of scanning the binding prefix.
+        narrow = reader.history(source_id="src-1", signal_id="sig-a", event_start=at(1),
+                                event_end=at(1), max_points=1, snapshot=snapshot)
+        self.assertEqual(narrow.eligible_count, 1)
+        current = reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
+        self.assertEqual((current.sample.sequence, current.eligible_count), (4, 5))
         with self.assertRaises(TelemetryError):
             TimeSeriesReader(self.store, max_interval_ticks=60, max_scan_records=0)
 
     def test_scan_failure_leaks_no_counts_or_values(self) -> None:
-        # Candidates beyond T (excluded) push the binding prefix over the limit.
-        self.ingest(obs(0, 1, value=1.0), *(obs(i, 20 + i, value=1000.0 + i)
-                                            for i in range(1, 7)))
+        self.ingest(*(obs(i, i, value=1000.0 + i) for i in range(7)))
         snapshot = self.store.snapshot(at(10))
         with self.assertRaises(ResourceLimitExceeded) as raised:
-            self.reader_with(3).current(source_id="src-1", signal_id="sig-a",
-                                        snapshot=snapshot)
+            self.reader_with(3).history(source_id="src-1", signal_id="sig-a",
+                                        event_start=at(0), event_end=at(10),
+                                        max_points=10, snapshot=snapshot)
         message = str(raised.exception)
         self.assertEqual(message, "candidate scan exceeds the reader limit")
         self.assertIsNone(re.search(r"\d", message))
@@ -413,20 +418,147 @@ class ResourceBoundTests(Fixture):
     def test_bound_is_deterministic_per_snapshot_and_k_t_unchanged(self) -> None:
         self.ingest(obs(0, 2), obs(1, 4))
         self.ingest(obs(2, 6))
-        snapshot = self.store.snapshot(at(10))   # K=2, three candidates
+        snapshot = self.store.snapshot(at(10))   # K=2, three window candidates
         reader = self.reader_with(3)
         before = self.read_both(reader, snapshot)
-        # Later commits grow the stream past the limit but not this snapshot's prefix.
+        # Later commits put more records into the same window, but not under this K.
         self.ingest(obs(3, 8), obs(4, 15))
-        self.ingest(*(obs(i, i) for i in range(5, 12)))
+        self.ingest(*(obs(i, i - 4.5) for i in range(5, 12)))
         self.assertEqual(self.read_both(reader, snapshot), before)
         self.assertEqual([s.sequence for s in before[1].samples], [0, 1, 2])
         with self.assertRaises(ResourceLimitExceeded):
-            reader.current(source_id="src-1", signal_id="sig-a",
+            reader.history(source_id="src-1", signal_id="sig-a", event_start=at(0),
+                           event_end=at(10), max_points=10,
                            snapshot=self.store.snapshot(at(10)))
         # Other bindings' volume never counts against this binding.
         self.ingest(*(obs(i, 1, source_id="src-2") for i in range(50)))
         self.assertEqual(self.read_both(reader, snapshot), before)
+
+
+class EventIndexTests(Fixture):
+    """P1.1C event-time-bounded scans: outcome depends on (binding, K, T, window) only."""
+
+    def reader_with(self, limit: int, store=None) -> TimeSeriesReader:
+        return TimeSeriesReader(store or self.store, max_interval_ticks=24 * 60 * MINUTE,
+                                max_scan_records=limit, max_points_limit=1000)
+
+    def window(self, reader, snapshot, start, end, max_points=100):
+        return reader.history(source_id="src-1", signal_id="sig-a", event_start=at(start),
+                              event_end=at(end), max_points=max_points, snapshot=snapshot)
+
+    def test_window_scan_bound_counts_only_k_committed_window_candidates(self) -> None:
+        self.ingest(*(obs(i, i) for i in range(300)))
+        snapshot = self.store.snapshot(at(400))
+        self.ingest(*(obs(1000 + i, 11) for i in range(20)))   # after K, inside the window
+        reader = self.reader_with(5)
+        result = self.window(reader, snapshot, 10, 12)
+        self.assertEqual(([s.sequence for s in result.samples], result.eligible_count),
+                         ([10, 11, 12], 3))
+        self.assertEqual(self.window(reader, snapshot, 10, 14).eligible_count, 5)
+        with self.assertRaises(ResourceLimitExceeded):
+            self.window(reader, snapshot, 10, 15)
+
+    def test_scan_outcome_never_depends_on_records_after_k(self) -> None:
+        self.ingest(*(obs(i, i) for i in range(200)))
+        snapshot = self.store.snapshot(at(300))
+        reader = self.reader_with(3)
+        ok = self.window(reader, snapshot, 5, 7)
+        with self.assertRaises(ResourceLimitExceeded) as failed:
+            self.window(reader, snapshot, 5, 8)
+        for i in range(40):                                     # post-K, inside both windows
+            self.ingest(obs(500 + i, 6))
+        self.assertEqual(self.window(reader, snapshot, 5, 7), ok)
+        self.assertEqual(repr(self.window(reader, snapshot, 5, 7)), repr(ok))
+        with self.assertRaises(ResourceLimitExceeded) as again:
+            self.window(reader, snapshot, 5, 8)
+        self.assertEqual((type(again.exception), again.exception.args),
+                         (type(failed.exception), failed.exception.args))
+        with self.assertRaises(ResourceLimitExceeded):          # the new snapshot sees them
+            self.window(reader, self.store.snapshot(at(300)), 5, 7)
+
+    def test_current_on_long_binding_does_not_scan_prefix(self) -> None:
+        self.ingest(*(obs(i, i / 60) for i in range(2000)))     # one record per second
+        self.ingest(obs(5000, 50))                              # beyond T
+        snapshot = self.store.snapshot(TimePoint(SIM.clock_id, 1500))
+        current = self.reader_with(1).current(source_id="src-1", signal_id="sig-a",
+                                              snapshot=snapshot)
+        self.assertEqual((current.sample.sequence, current.eligible_count), (1500, 1501))
+
+    def test_event_frontier_and_last_event_time(self) -> None:
+        self.assertIsNone(self.store.event_frontier(0))
+        self.ingest(obs(0, 5), obs(0, 9, source_id="src-2"))   # K=1, frontier 9 min
+        self.ingest(obs(1, 3))                                 # K=2, late arrival
+        self.ingest(obs(2, 20, signal_id="sig-b"))             # K=3
+        self.assertEqual([self.store.event_frontier(k) for k in range(4)],
+                         [None, at(9), at(9), at(20)])
+        with self.assertRaises(SnapshotUnavailable):
+            self.store.event_frontier(4)
+        for bad in (-1, True, 1.0):
+            with self.subTest(bad=bad), self.assertRaises(TelemetryError):
+                self.store.event_frontier(bad)
+        reader = self.reader_with(1)
+        cases = ((at(30), 3, at(20)), (at(10), 3, at(9)), (at(8), 3, at(5)),
+                 (at(4), 3, at(3)), (at(4), 1, None), (at(2), 3, None), (at(30), 0, None))
+        for horizon, k, expected in cases:
+            with self.subTest(horizon=horizon, k=k):
+                snapshot = self.store.snapshot(horizon, ingest_sequence=k)
+                self.assertEqual(reader.last_event_time(snapshot), expected)
+
+    def test_indexed_reads_match_bruteforce_under_out_of_order_commits(self) -> None:
+        import random
+        rng = random.Random(1110)
+        with mock.patch.object(telemetry, "_INDEX_BLOCK", 7):
+            store = make_store()
+        ingestor = TelemetryIngestor(store)
+        bindings = (("src-1", "sig-a"), ("src-1", "sig-b"), ("src-2", "sig-a"))
+        observations = []
+        for source, signal in bindings:
+            for sequence in range(90):
+                observations.append(SourceObservation(
+                    signal_id=signal, source_id=source,
+                    event_time=TimePoint(SIM.clock_id, rng.randrange(0, 60)),
+                    sequence=sequence, value=float(rng.randrange(1000)), quality=Quality.GOOD))
+        rng.shuffle(observations)
+        committed = []                                         # (commit revision, sample)
+        index = 0
+        while index < len(observations):
+            size = rng.randrange(1, 9)
+            result = ingestor.ingest(observations[index:index + size],
+                                     ingest_time=ingest_at(index))
+            committed += [(r.commit_revision, r.sample) for r in result.records]
+            index += size
+        reader = TimeSeriesReader(store, max_interval_ticks=10_000, max_scan_records=10_000,
+                                  max_points_limit=1000)
+        revision = store.current_ingest_sequence
+        for _ in range(300):
+            k = rng.randrange(0, revision + 1)
+            horizon = rng.randrange(0, 65)
+            start = rng.randrange(0, horizon + 1)
+            end = rng.randrange(start, horizon + 1)
+            m = rng.randrange(1, 6)
+            source, signal = rng.choice(bindings)
+            snapshot = store.snapshot(TimePoint(SIM.clock_id, horizon), ingest_sequence=k)
+            visible = [s for c, s in committed if c <= k]
+            mine = sorted((s for s in visible if (s.source_id, s.signal_id) == (source, signal)),
+                          key=telemetry.read_order)
+            window = [s for s in mine if start <= s.event_time.ticks <= end]
+            expected = tuple(window[i] for i in reduce_indices(len(window), m))
+            history = reader.history(source_id=source, signal_id=signal,
+                                     event_start=TimePoint(SIM.clock_id, start),
+                                     event_end=TimePoint(SIM.clock_id, end),
+                                     max_points=m, snapshot=snapshot)
+            self.assertEqual((history.samples, history.eligible_count),
+                             (expected, len(window)))
+            before = [s for s in mine if s.event_time.ticks <= horizon]
+            current = reader.current(source_id=source, signal_id=signal, snapshot=snapshot)
+            self.assertEqual((current.sample, current.eligible_count),
+                             (before[-1] if before else None, len(before)))
+            ticks = [s.event_time.ticks for s in visible if s.event_time.ticks <= horizon]
+            self.assertEqual(reader.last_event_time(snapshot),
+                             TimePoint(SIM.clock_id, max(ticks)) if ticks else None)
+            frontier = [s.event_time.ticks for s in visible]
+            self.assertEqual(store.event_frontier(k),
+                             TimePoint(SIM.clock_id, max(frontier)) if frontier else None)
 
 
 class ReadSemanticsTests(Fixture):
