@@ -1,8 +1,9 @@
 # P1.1C — Canonical Telemetry Integration (implementation note)
 
-Status: planned (P1.1C); not implemented. Written before code, as
-[ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) Decision 6 requires. Owner
-decisions are recorded in §Decisions. Note and code ship in one PR on
+Status: implemented (P1.1C). Written before code, as
+[ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) Decision 6 requires, then
+implemented on the same branch. Owner decisions are recorded in §Decisions; deviations
+found during implementation are listed in §Implementation notes. Note and code ship in one PR on
 `feat/p1-1c-canonical-telemetry`. Normative contracts:
 [Plant Context + Telemetry v0](specs/plant-telemetry-contract-v0.md) (owner),
 [Playground backend v0](specs/playground-backend-v0.md),
@@ -261,9 +262,9 @@ Migrated application reads, transport and desktop:
 | Test (file) | Proves |
 |---|---|
 | `test_v1_reads_are_snapshot_bound` (`test_application_views.py`) | `get_signal` and `get_signal_history` require a `TelemetrySnapshot`; `get_run` resolves telemetry only with one. Results equal the canonical P0 views at that snapshot, including full sample identities `(source_id, signal_id, sequence)`. `get_entity` bindings carry canonical `signal_id` plus `source_locator`. Plant §Identity, §Bounded reads, §Application boundaries |
-| `test_v1_history_replaces_recent_window` (`test_application_views.py`) | windows older than the former 1000-record projection are served from the store; default start/end are resolved against T and disclosed; `event_end > T`, inverted bounds and policy breaches fail closed |
+| `test_v1_history_replaces_recent_window` (`test_canonical_telemetry_integration.py`), `test_history_window_defaults_and_reduction`, `test_invalid_history_bounds_before_telemetry` (`test_application_views.py`) | windows older than the former 1000-record projection are served from the store; default start/end are resolved against T and disclosed; `event_end > T`, inverted bounds and policy breaches fail closed |
 | `test_application_reads_no_longer_use_telemetry_view` (`test_application_views.py`) | AST/mock check: `ApplicationViewService` never calls `RunQueries.telemetry` |
-| `test_v1_protocol_and_methods` (`test_application_transport.py`) | exact v1 schemas, `snapshot` key set, integer-not-bool checks, v0 request -> `UNSUPPORTED_PROTOCOL_VERSION`, two new fixed error codes, redaction, the 64 KiB bound unchanged, and real E0/P0 equivalence of all five methods |
+| `test_application_transport.py` (`test_protocol_is_v1`, `test_method_and_protocol_allowlist`, `test_method_parameter_schemas`, `test_valid_requests_reach_the_service_with_typed_snapshot`, `test_known_errors_and_unexpected_errors_are_redacted`, `test_all_five_reads_match_application_models`, `test_real_domain_errors_and_visibility`) | exact v1 schemas, `snapshot` key set, integer-not-bool checks, v0 request -> `UNSUPPORTED_PROTOCOL_VERSION`, two new fixed error codes, redaction, the 64 KiB bound unchanged, and real E0/P0 equivalence of all five methods |
 | `test_desktop_backend_v1_session` (`test_desktop_backend.py`) | NDJSON host serves the v1 snapshot-then-read sequence in one process |
 | `desktop/tests/client.test.ts` | five reads use only `application_request` with a host-owned run id; the snapshot passes through verbatim; v1 envelope and message table, including the two new codes; unsafe errors fail closed |
 | `desktop/src-tauri/tests/bridge.rs` (`real_python_v1_reads_same_process_session` + unit tests) | real Python process: snapshot then four reads, same PID, `desktop-1..5`, hidden-term screen; v1 allowlists reject client `run_id` and unknown params; error table |
@@ -335,7 +336,21 @@ tools cannot see them.
 No other conflict was found. If implementation finds that a v1 read cannot meet a
 plant-telemetry clause, it stops with `SPEC_CONFLICT` instead of adding a local bypass.
 
+## Implementation notes
+
+- Index block size `_INDEX_BLOCK = 128` (tuning constant, not contract). `current`
+  and `last_event_time` read at most one record per full block plus the partial tail.
+- `TimeSeriesReader.last_event_time` and `RunQueries.telemetry_last_event` back
+  `Run.telemetry_event_ticks`.
+- `SignalHistory` also carries `status` (`DATA`/`NO_DATA`); Application API v1 lists
+  it.
+- The ingest clock is `p0-ingest-utc` (UTC ms) fed by `RunManager.clock()`. A
+  non-ISO clock value fails ingestion, and therefore `prepare()`, closed.
+- Tests: the core differential test patches `_INDEX_BLOCK` to 7 to cross many blocks.
+  Live tests reach the trusted seam through `RunManager._runs[...].session`, as the
+  existing P0 execution tests do.
+
 ## Next step
 
-Implement against this note and Application API v1, tests first, in the same PR. After merge, P1.4 reads live telemetry through these snapshot-bound reads;
+After merge, P1.4 reads live telemetry through these snapshot-bound reads;
 Agent read migration remains P1.5.

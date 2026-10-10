@@ -440,7 +440,8 @@ Implemented today:
 
 - `telemetry.py` (P1.1A): stdlib-only generic core; T and K apply before any ordering, reduction or count;
 - `tep_telemetry.py` (P1.1B): the only module that knows TEP identifiers on this path; canonical `signal_id` is the ProcessGraph semantic entity id;
-- neither is used by a production path yet. Application and Agent telemetry still read `ReferenceWorld.history()`; P1.1C and P1.5 migrate them.
+- `run_telemetry.py` (P1.1C): each prepared P0 session ingests its reference history through the TEP source into a run-scoped store; event-time-bounded scans in the core;
+- application reads (`ApplicationViewService`, transport v1, desktop) are snapshot-bound canonical reads ([Application API v1](specs/application-api-v1.md)); Agent tools still read `ReferenceWorld.history()` until P1.5.
 
 Invariants kept from the owning contracts:
 

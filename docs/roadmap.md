@@ -21,7 +21,7 @@ Milestone state lives only in [`program-status.md`](program-status.md).
 | P1.0 | ownership, telemetry and snapshot semantics | ADR-003, `plant-telemetry-contract-v0.md` |
 | P1.1A | generic telemetry core | `docs/p1-1a-telemetry-core.md` |
 | P1.1B | TEP simulation source | `docs/p1-1b-tep-simulation-source.md` |
-| P1.1C | canonical telemetry integration: event-time-bounded scans, P0 run ingestion, snapshot-bound public P0/application reads | plant-telemetry migration obligations; `docs/p1-1c-canonical-telemetry-integration.md` (note; not implemented) |
+| P1.1C | canonical telemetry integration: event-time-bounded scans, P0 run ingestion, snapshot-bound public P0/application reads | plant-telemetry migration obligations; `docs/p1-1c-canonical-telemetry-integration.md`, `application-api-v1.md` |
 | P1.2 | Context Compiler | `context-compiler-v0.md` |
 | P1.3 | Canonical Context composition: PlantContextRevision, scope resolution, derived view | ADR-004 Decision 4; spec to be written |
 | P1.4 | context serving + deterministic Operational State | spec to be written |

@@ -97,7 +97,7 @@ All models are frozen dataclasses with tuple collections, serialized with runtim
 | `Binding` | `signal_id` (canonical), `source_locator`, `quantity`, `relation`, `unit` |
 | `Entity` | `entity_id`, `entity_type`, `name`, `kind`, `tag`, `source_entity_id`, `target_entity_id`, `upstream`, `downstream`, `bindings` |
 | `Signal` | `run_id`, `signal_id`, `source_id`, `source_locator`, `bound_entity_ids`, `quantity`, `relation`, `unit`, `snapshot_ref`, `status` (`DATA`/`NO_DATA`), `eligible_count`, `current: CanonicalPoint | None` |
-| `SignalHistory` | `run_id`, `signal_id`, `source_id`, `quantity`, `unit`, `snapshot_ref`, `event_start_ticks`, `event_end_ticks`, `max_points`, `eligible_count`, `returned_count`, `reduced`, `reduction_policy`, `coverage`, `points: tuple[CanonicalPoint, ...]` |
+| `SignalHistory` | `run_id`, `signal_id`, `source_id`, `quantity`, `unit`, `snapshot_ref`, `event_start_ticks`, `event_end_ticks`, `max_points`, `eligible_count`, `returned_count`, `reduced`, `reduction_policy`, `coverage`, `status` (`DATA`/`NO_DATA`), `points: tuple[CanonicalPoint, ...]` |
 
 Sample identity is `(source_id, signal_id, sequence)`: `Signal` and `SignalHistory`
 carry the canonical `source_id` and `signal_id`, and each point carries `sequence`.

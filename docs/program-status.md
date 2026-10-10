@@ -28,10 +28,10 @@ and the test constants. A NumPy bump edits only the JSON.
 
 | Question | Answer |
 |---|---|
-| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B, E0.2 desktop shell). No L1 exit criterion is fully met. |
+| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B/C, E0.2 desktop shell on application transport v1). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
 | Current product milestone | P1.2A Context Compiler contracts: not started, unblocked (spec accepted in PR #24) |
-| Parallel product milestone | P1.1C canonical telemetry integration: not started, unblocked |
+| Parallel product milestone | P1.1C canonical telemetry integration: merged; P1.4 can read live telemetry through snapshot-bound P0/application reads once its owning spec exists |
 | Current research milestone | D0.2C1 comparable pilot fixtures, scorer-v1 and leakage policy v2: not started, unblocked (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
 
@@ -48,7 +48,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.1A telemetry core | merged (PR #22) |
 | P1.1B TEP simulation source | merged (PR #23) |
 | ADR-004 P1 re-baseline | merged (adds this file) |
-| P1.1C canonical telemetry integration | not started; write the implementation note first |
+| P1.1C canonical telemetry integration | merged: event-time-bounded scans, run-scoped P0 ingestion, snapshot-bound P0 views, Application API v1 / transport v1 (desktop, Rust bridge, sidecar); note `docs/p1-1c-canonical-telemetry-integration.md`, spec `docs/specs/application-api-v1.md` |
 | P1.2 Context Compiler | spec accepted (PR #24); P1.2A not started |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4 context serving + Operational State | no owning spec yet |
@@ -82,8 +82,6 @@ None.
 - **P1.2A** can start now. It includes the compiler workspace and the rule-set source
   revision (context-compiler-v0 §Recommended implementation split;
   knowledge-rule-registry-v0 §Rule-set source revision).
-- **P1.1C** can start now. The owning contract is frozen; write a short implementation note
-  with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
 - **B5** can start now in `industrial-agent-runtime`.
 - **D0.2C1** can start now. It adds leakage policy v2 before it freezes pilot fixtures
   (benchmark-comparative-pilot-v0 §Leakage).
@@ -101,8 +99,9 @@ None.
   stale after D-050 and reuse "P1" (Investigation UI) and "E1" (HAZOP). Follow-up belongs in tep-sim.
 - Spec status vocabulary drift: implemented specs still say `proposal`; several use
   `FROZEN` / `DRAFT` wording outside the documentation standard.
-- `RuleRegistry`, `records.py` (InvestigationReport, EngineeringArchive) and the P1.1
-  telemetry modules are implemented but not used by any production path.
+- `RuleRegistry` and `records.py` (InvestigationReport, EngineeringArchive) are implemented
+  but not used by any production path. The P1.1 telemetry modules serve P0 application
+  reads since P1.1C; Agent tools still read `ReferenceWorld.history()` until P1.5.
 
 ## Deferred work
 

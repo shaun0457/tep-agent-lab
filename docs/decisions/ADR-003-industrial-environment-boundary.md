@@ -10,8 +10,9 @@
   milestone numbering in §Implementation boundary and amends one scope statement (P1.2
   engineering-knowledge compilation). Every ownership, telemetry, visibility, authority and
   snapshot semantic in this ADR remains authoritative.
-- Implementation (informative): P1.1A and P1.1B implement the telemetry subset; see
-  `docs/p1-1a-telemetry-core.md` and `docs/p1-1b-tep-simulation-source.md`.
+- Implementation (informative): P1.1A, P1.1B and P1.1C implement the telemetry subset; see
+  `docs/p1-1a-telemetry-core.md`, `docs/p1-1b-tep-simulation-source.md` and
+  `docs/p1-1c-canonical-telemetry-integration.md`.
 
 ## Context
 
