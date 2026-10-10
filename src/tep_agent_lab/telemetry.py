@@ -26,6 +26,7 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+import heapq
 from enum import StrEnum
 from fractions import Fraction
 import hashlib
@@ -502,23 +503,27 @@ class InMemoryTimeSeriesStore:
     def _window(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot,
                 start_ticks: int, end_ticks: int,
                 max_scan_records: int) -> list[SignalSample]:
-        """Records with commit <= K and start <= event <= end (<= T), unordered.
+        """Records with commit <= K and start <= event <= end (<= T), in read order.
 
         Reader-internal: the reader resolves the snapshot and validates bounds and
-        limits first. The candidate count is taken from the event-time index before
-        any record is read. Only records committed at or before K and inside the window
-        count, so a snapshot passes or fails the same way regardless of later appends.
+        limits first. The K-visible blocks are captured under the lock in one split;
+        counting and slicing then run outside it on immutable sorted blocks and a copied
+        tail. The candidate count is taken before any record is read, and only records
+        committed at or before K inside the window count, so a snapshot passes or fails
+        the same way regardless of later appends.
         """
         self.require_binding(source_id, signal_id)
         with self._lock:
             index = self._streams.get((source_id, signal_id))
             if index is None:
                 return []
-            if index.count(snapshot.ingest_sequence, start_ticks, end_ticks) > max_scan_records:
-                # No counts or values in the message: nothing about the candidates leaks.
-                raise ResourceLimitExceeded("candidate scan exceeds the reader limit")
-            return [record.sample for record in
-                    index.window(snapshot.ingest_sequence, start_ticks, end_ticks)]
+            blocks, tail = index.visible(snapshot.ingest_sequence)
+        if _count(blocks, tail, start_ticks, end_ticks) > max_scan_records:
+            # No counts or values in the message: nothing about the candidates leaks.
+            raise ResourceLimitExceeded("candidate scan exceeds the reader limit")
+        runs = _window_runs(blocks, tail, start_ticks, end_ticks)
+        return [record.sample for record in
+                heapq.merge(*runs, key=lambda record: read_order(record.sample))]
 
     def _last(self, source_id: str, signal_id: str, snapshot: TelemetryReadSnapshot
               ) -> tuple[int, SignalSample | None]:
@@ -528,12 +533,25 @@ class InMemoryTimeSeriesStore:
             index = self._streams.get((source_id, signal_id))
             if index is None:
                 return 0, None
-            count, record = index.last(snapshot.ingest_sequence, snapshot.event_horizon.ticks)
+            blocks, tail = index.visible(snapshot.ingest_sequence)
+        count, record = _last_at_or_before(blocks, tail, snapshot.event_horizon.ticks)
         return count, None if record is None else record.sample
 
     def _last_event(self, snapshot: TelemetryReadSnapshot) -> TimePoint | None:
+        """Latest committed event at or before T under K, store-wide.
+
+        The common case (T at or after the K frontier) is answered from the frontier;
+        otherwise the store-wide index is consulted outside the lock.
+        """
+        revision, horizon = snapshot.ingest_sequence, snapshot.event_horizon.ticks
         with self._lock:
-            _, record = self._all.last(snapshot.ingest_sequence, snapshot.event_horizon.ticks)
+            if revision == 0:
+                return None
+            frontier = self._frontier[revision - 1]
+            if horizon >= frontier:
+                return TimePoint(self.event_clock.clock_id, frontier)
+            blocks, tail = self._all.visible(revision)
+        _, record = _last_at_or_before(blocks, tail, horizon)
         return None if record is None else record.sample.event_time
 
 
@@ -549,7 +567,8 @@ class _EventIndex:
     inside that prefix answers window counts, window slices and the last sample at or
     before T by bisection; only the partial tail block (fewer than ``block`` records)
     is filtered linearly. No query reads a record committed after K, and the cost no
-    longer grows linearly with the whole prefix.
+    longer grows linearly with the whole prefix. Full blocks are never mutated after
+    they are built, so readers may use them outside the store lock.
     """
 
     def __init__(self, block: int) -> None:
@@ -564,41 +583,46 @@ class _EventIndex:
                            key=lambda item: read_order(item.sample))
             self._sorted.append(([item.sample.event_time.ticks for item in chunk], chunk))
 
-    def _split(self, revision: int):
+    def visible(self, revision: int
+                ) -> tuple[list[tuple[list[int], list[AcceptedRecord]]], list[AcceptedRecord]]:
+        """(immutable full blocks, copied partial tail) committed at or before K.
+
+        Caller holds the store lock; the returned lists are private copies.
+        """
         visible = bisect_right(self._records, revision,
                                key=lambda record: record.commit_revision)
         full = visible // self._block
         return self._sorted[:full], self._records[full * self._block:visible]
 
-    def count(self, revision: int, start: int, end: int) -> int:
-        blocks, tail = self._split(revision)
-        total = sum(bisect_right(ticks, end) - bisect_left(ticks, start)
-                    for ticks, _ in blocks)
-        return total + sum(1 for record in tail
-                           if start <= record.sample.event_time.ticks <= end)
 
-    def window(self, revision: int, start: int, end: int) -> list[AcceptedRecord]:
-        blocks, tail = self._split(revision)
-        found: list[AcceptedRecord] = []
-        for ticks, records in blocks:
-            found += records[bisect_left(ticks, start):bisect_right(ticks, end)]
-        return found + [record for record in tail
-                        if start <= record.sample.event_time.ticks <= end]
+def _count(blocks, tail, start: int, end: int) -> int:
+    total = sum(bisect_right(ticks, end) - bisect_left(ticks, start) for ticks, _ in blocks)
+    return total + sum(1 for record in tail if start <= record.sample.event_time.ticks <= end)
 
-    def last(self, revision: int, end: int) -> tuple[int, AcceptedRecord | None]:
-        blocks, tail = self._split(revision)
-        count, candidates = 0, []
-        for ticks, records in blocks:
-            position = bisect_right(ticks, end)
-            count += position
-            if position:
-                candidates.append(records[position - 1])
-        for record in tail:
-            if record.sample.event_time.ticks <= end:
-                count += 1
-                candidates.append(record)
-        best = max(candidates, key=lambda record: read_order(record.sample), default=None)
-        return count, best
+
+def _window_runs(blocks, tail, start: int, end: int) -> list[list[AcceptedRecord]]:
+    """Read-ordered runs of the window: one slice per full block plus the sorted tail."""
+    runs = [records[bisect_left(ticks, start):bisect_right(ticks, end)]
+            for ticks, records in blocks]
+    runs.append(sorted((record for record in tail
+                        if start <= record.sample.event_time.ticks <= end),
+                       key=lambda record: read_order(record.sample)))
+    return [run for run in runs if run]
+
+
+def _last_at_or_before(blocks, tail, end: int) -> tuple[int, AcceptedRecord | None]:
+    count, candidates = 0, []
+    for ticks, records in blocks:
+        position = bisect_right(ticks, end)
+        count += position
+        if position:
+            candidates.append(records[position - 1])
+    for record in tail:
+        if record.sample.event_time.ticks <= end:
+            count += 1
+            candidates.append(record)
+    best = max(candidates, key=lambda record: read_order(record.sample), default=None)
+    return count, best
 
 
 class TelemetryIngestor:
@@ -711,11 +735,23 @@ class TimeSeriesReader:
     def __init__(self, store: InMemoryTimeSeriesStore, *, max_interval_ticks: int,
                  max_scan_records: int, max_points_limit: int = 1000) -> None:
         self._store = store
-        self.max_interval_ticks = _checked_int("max_interval_ticks", max_interval_ticks,
-                                               minimum=0)
-        self.max_scan_records = _checked_int("max_scan_records", max_scan_records,
-                                             minimum=1)
-        self.max_points_limit = _checked_int("max_points_limit", max_points_limit, minimum=1)
+        self._max_interval_ticks = _checked_int("max_interval_ticks", max_interval_ticks,
+                                                minimum=0)
+        self._max_scan_records = _checked_int("max_scan_records", max_scan_records,
+                                              minimum=1)
+        self._max_points_limit = _checked_int("max_points_limit", max_points_limit, minimum=1)
+
+    @property
+    def max_interval_ticks(self) -> int:
+        return self._max_interval_ticks
+
+    @property
+    def max_scan_records(self) -> int:
+        return self._max_scan_records
+
+    @property
+    def max_points_limit(self) -> int:
+        return self._max_points_limit
 
     def current(self, *, source_id: str, signal_id: str,
                 snapshot: TelemetryReadSnapshot) -> CurrentResult:
@@ -745,10 +781,8 @@ class TimeSeriesReader:
             raise ResourceLimitExceeded("max_points exceeds the reader limit")
         if event_end.ticks - event_start.ticks > self.max_interval_ticks:
             raise ResourceLimitExceeded("event interval exceeds the reader limit")
-        eligible = sorted(self._store._window(source_id, signal_id, snapshot,
-                                              event_start.ticks, event_end.ticks,
-                                              self.max_scan_records),
-                          key=read_order)
+        eligible = self._store._window(source_id, signal_id, snapshot, event_start.ticks,
+                                       event_end.ticks, self.max_scan_records)
         selected = tuple(eligible[i] for i in reduce_indices(len(eligible), max_points))
         return HistoryResult(snapshot, source_id, signal_id, event_start, event_end,
                              max_points, len(eligible), selected)

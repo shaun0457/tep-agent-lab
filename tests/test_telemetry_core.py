@@ -480,9 +480,23 @@ class EventIndexTests(Fixture):
         self.ingest(*(obs(i, i / 60) for i in range(2000)))     # one record per second
         self.ingest(obs(5000, 50))                              # beyond T
         snapshot = self.store.snapshot(TimePoint(SIM.clock_id, 1500))
-        current = self.reader_with(1).current(source_id="src-1", signal_id="sig-a",
-                                              snapshot=snapshot)
+        reader = self.reader_with(1)
+        with mock.patch.object(telemetry, "read_order", wraps=telemetry.read_order) as read:
+            current = reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
+            last = reader.last_event_time(snapshot)
         self.assertEqual((current.sample.sequence, current.eligible_count), (1500, 1501))
+        self.assertEqual(last, TimePoint(SIM.clock_id, 1500))
+        # Records actually compared: at most one per full block plus the partial tail.
+        block = telemetry._INDEX_BLOCK
+        self.assertLessEqual(read.call_count, 2 * (2001 // block + block))
+        self.assertLess(read.call_count, 2001 // 4)
+
+    def test_reader_limits_are_read_only(self) -> None:
+        reader = self.reader_with(5)
+        for name in ("max_scan_records", "max_interval_ticks", "max_points_limit"):
+            with self.subTest(name=name), self.assertRaises(AttributeError):
+                setattr(reader, name, 10**9)
+        self.assertEqual(5, reader.max_scan_records)
 
     def test_event_frontier_and_last_event_time(self) -> None:
         self.assertIsNone(self.store.event_frontier(0))
@@ -520,13 +534,22 @@ class EventIndexTests(Fixture):
                     sequence=sequence, value=float(rng.randrange(1000)), quality=Quality.GOOD))
         rng.shuffle(observations)
         committed = []                                         # (commit revision, sample)
+        delivered = []
         index = 0
         while index < len(observations):
             size = rng.randrange(1, 9)
-            result = ingestor.ingest(observations[index:index + size],
-                                     ingest_time=ingest_at(index))
+            batch = observations[index:index + size]
+            result = ingestor.ingest(batch, ingest_time=ingest_at(index))
             committed += [(r.commit_revision, r.sample) for r in result.records]
+            delivered.append((batch, result))
             index += size
+            if rng.random() < 0.2:                             # idempotent redelivery
+                old_batch, old_result = rng.choice(delivered)
+                before = store.current_ingest_sequence
+                again = ingestor.ingest(old_batch, ingest_time=ingest_at(10_000 + index))
+                self.assertEqual((0, before, old_result.records),
+                                 (again.new_count, store.current_ingest_sequence,
+                                  again.records))
         reader = TimeSeriesReader(store, max_interval_ticks=10_000, max_scan_records=10_000,
                                   max_points_limit=1000)
         revision = store.current_ingest_sequence
@@ -549,6 +572,19 @@ class EventIndexTests(Fixture):
                                      max_points=m, snapshot=snapshot)
             self.assertEqual((history.samples, history.eligible_count),
                              (expected, len(window)))
+            # The scan limit trips exactly at the brute-force window count.
+            limit = rng.randrange(1, 30)
+            limited = TimeSeriesReader(store, max_interval_ticks=10_000,
+                                       max_scan_records=limit, max_points_limit=1000)
+            window_args = dict(source_id=source, signal_id=signal,
+                               event_start=TimePoint(SIM.clock_id, start),
+                               event_end=TimePoint(SIM.clock_id, end),
+                               max_points=m, snapshot=snapshot)
+            if len(window) > limit:
+                with self.assertRaises(ResourceLimitExceeded):
+                    limited.history(**window_args)
+            else:
+                self.assertEqual(limited.history(**window_args).samples, expected)
             before = [s for s in mine if s.event_time.ticks <= horizon]
             current = reader.current(source_id=source, signal_id=signal, snapshot=snapshot)
             self.assertEqual((current.sample, current.eligible_count),
@@ -730,7 +766,7 @@ class ReadSemanticsTests(Fixture):
 class BoundaryTests(unittest.TestCase):
     SOURCE = Path(telemetry.__file__).read_text(encoding="utf-8")
     ALLOWED_IMPORTS = {"__future__", "bisect", "collections.abc", "dataclasses", "enum",
-                       "fractions", "functools", "hashlib", "json", "math", "secrets",
+                       "fractions", "functools", "hashlib", "heapq", "json", "math", "secrets",
                        "threading", "typing"}
 
     def test_generic_module_imports_stdlib_only(self) -> None:
