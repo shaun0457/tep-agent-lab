@@ -193,19 +193,27 @@ def committed(staged) -> dict:
     return json.loads(dict(staged.files)[staged.revision.path])
 
 
+def root_of(document: dict) -> str:
+    """Canonical artifact root of a (possibly forged) revision's lineage."""
+    lineage = document["lineage_id"]
+    safe = isinstance(lineage, str) and lineage.replace("-", "").replace(".", "").isalnum()
+    return f"context/engineering-context/{lineage if safe else 'forged'}"
+
+
 def reseal(files: dict, document: dict, log: dict | None = None) -> ArtifactPathRef:
     """Re-package an edited revision (and optionally log) with valid checksums."""
     if log is not None:
         data = canonical_json(log)
-        path = f"context/engineering-context/x/review-logs/{hashlib.sha256(data).hexdigest()}"
+        path = f"{root_of(document)}/review-logs/{hashlib.sha256(data).hexdigest()}.json"
         files[path] = data
-        document["review_log"] = {"review_log_position": log["review_log_position"],
+        document["review_log"] = {**document["review_log"],
+                                  "review_log_position": log["review_log_position"],
                                   "path": path,
                                   "content_checksum": hashlib.sha256(data).hexdigest()}
     document.pop("revision_id", None)
     document["revision_id"] = "ecr-" + context_compiler._digest(document)
     data = canonical_json(document)
-    ref = ArtifactPathRef.of(f"context/engineering-context/x/revisions/"
+    ref = ArtifactPathRef.of(f"{root_of(document)}/revisions/"
                              f"{document['revision_id']}.json", data)
     files[ref.path] = data
     return ref
@@ -252,6 +260,7 @@ class CompilerTestCase(unittest.TestCase):
 
     def verify(self, files, revision, session=None):
         return verify_publication(files, revision, session or self.session,
+                                  anchor=self.workspace.anchor(),
                                   derived_input_resolver=resolver,
                                   parent_resolver=self.resolve_parent)
 
@@ -1133,7 +1142,7 @@ class RoundThreeTests(CompilerTestCase):
         edit(artifact, document)
         data = canonical_json(artifact)
         ref = ArtifactPathRef.of(
-            f"context/engineering-context/x/candidates/{hashlib.sha256(data).hexdigest()}.json",
+            f"{root_of(document)}/candidates/{hashlib.sha256(data).hexdigest()}.json",
             data)
         files[ref.path] = data
         document["candidates"] = ref.record()
@@ -1160,6 +1169,7 @@ class RoundThreeTests(CompilerTestCase):
             self.verify(dict(staged.files), staged.revision)
         with self.assertRaises(PublicationError):  # and no resolver at all fails closed
             verify_publication(dict(staged.files), staged.revision, self.session,
+                               anchor=self.workspace.anchor(),
                                parent_resolver=self.resolve_parent)
 
     def test_r3_2_conflict_dependencies_are_stored_and_required(self) -> None:
@@ -1228,6 +1238,295 @@ class RoundThreeTests(CompilerTestCase):
         forged = reseal(files, document)
         with self.assertRaises(PublicationError):
             self.verify(files, forged)
+
+
+class RoundFourTests(CompilerTestCase):
+    """Round-4 review reproductions."""
+
+    def forge(self, staged, edit_document=None, edit_log=None):
+        files = dict(staged.files)
+        document = committed(staged)
+        log = json.loads(files[staged.review_log.path])
+        if edit_log:
+            edit_log(log)
+        if edit_document:
+            edit_document(document)
+        return files, reseal(files, document, log if edit_log else None)
+
+    def test_r4_1_review_log_is_anchored_to_the_trusted_tail(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref, review_id="r1")
+        approved = self.stage([ref])
+        self.review(ref, ReviewDecision.REJECT, review_id="r2", supersedes=("r1",))
+
+        def claim_tail(log):  # drop nothing, just claim the REJECT-free prefix is the tail
+            log["review_log_position"] = 2
+
+        files, forged = self.forge(approved, lambda doc: None, claim_tail)
+        document = json.loads(files[forged.path])
+        document["review_log"]["review_log_position"] = 2
+        forged = reseal(files, document)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
+
+    def test_r4_2_hidden_refs_inside_a_remap_taint_the_review(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "condenser"))
+        hidden_graph = replace(GRAPH, visibility=Visibility.EVALUATOR)
+        with self.assertRaises(WorkspaceAppendError):
+            self.review(ref, ReviewDecision.REMAP,
+                        selected_target=PlantTargetRef(hidden_graph, TargetKind.ENTITY,
+                                                       "reactor"),
+                        selected_scope_refs=(REACTOR,))
+        self.assertEqual(0, self.workspace.review_log_tail)
+
+    def test_r4_3_dependency_sources_and_fragments_are_attested(self) -> None:
+        outside = source_ref("lab.unknown", "docs/unknown.sop", SOP, Visibility.AGENT)
+        ghost = self.c.binding("ghost", 2, "reactor", TargetKind.ENTITY, "reactor")
+        ghost = replace(ghost, mention_fragment=self.c.fragment(2, ref=outside))
+        self.add(ghost)
+        claim = self.add(self.c.knowledge("claim", conflicting_candidate_ids=("ghost",)))
+        self.review(claim)
+        with self.assertRaises(PublicationError):
+            self.stage([claim])
+
+    def test_r4_4_metadata_forgeries_fail(self) -> None:
+        refs = PublicationTests.vertical_slice(self)
+        staged = self.stage(refs.values())
+
+        def set_field(path, value):
+            def edit(document):
+                node = document
+                for key in path[:-1]:
+                    node = node[key]
+                node[path[-1]] = value
+            return edit
+
+        def fake_exclusion(document):
+            document["exclusions"][0]["reason"] = "VALIDATION_FAILED"
+            document["exclusions"][0]["detail"] = "fabricated"
+
+        for edit in (set_field(("routing_policy",), "nonexistent@99"),
+                     set_field(("extraction_methods",), ["forged@1"]),
+                     set_field(("grounding_methods",), ["forged@1"]),
+                     set_field(("lineage_id",), "../outside"),
+                     set_field(("provenance", "published_by"), ""),
+                     set_field(("provenance", "published_at"), "yesterday"),
+                     fake_exclusion):
+            with self.subTest(edit=edit):
+                files, forged = self.forge(staged, edit)
+                with self.assertRaises(PublicationError):
+                    self.verify(files, forged)
+
+    def test_r4_low_duplicate_candidate_rows_fail(self) -> None:
+        claim = self.add(self.c.knowledge("claim", conflicting_candidate_ids=("ghost",)))
+        self.add(self.c.binding("ghost", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(claim)
+        staged = self.stage([claim])
+        files = dict(staged.files)
+        document = committed(staged)
+        artifact = json.loads(files[staged.candidates.path])
+        artifact["dependencies"] = artifact["dependencies"] * 2
+        document["dependency_candidate_refs"] = document["dependency_candidate_refs"] * 2
+        data = canonical_json(artifact)
+        path = f"{root_of(document)}/candidates/{hashlib.sha256(data).hexdigest()}.json"
+        files[path] = data
+        document["candidates"] = {"path": path,
+                                  "content_checksum": hashlib.sha256(data).hexdigest()}
+        forged = reseal(files, document)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
+
+    def test_r4_low_unchanged_remap_is_excluded(self) -> None:
+        candidate = self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor")
+        record = ReviewRecord(
+            review_id="r1", candidate_ref=candidate.ref, decision=ReviewDecision.REMAP,
+            principal=HUMAN, reason="no-op", reviewed_at=STAMP,
+            review_policy=self.session.policies.review_policy,
+            validation_policy=self.session.policies.validation_policy,
+            session_id=self.session.session_id, plant_context=GRAPH, review_log_position=1,
+            selected_target=candidate.proposed_target,
+            selected_scope_refs=candidate.scope_refs)
+        outcome = context_compiler._decide(self.session, candidate, (record,), 1, frozenset())
+        self.assertEqual((ExclusionReason.REMAP_INVALID, "REMAP_UNCHANGED"),
+                         (outcome.reason, outcome.detail))
+
+
+def _mutated(value):
+    """A value of the same JSON shape that differs from ``value``."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value + 1
+    if isinstance(value, str):
+        return value + "x"
+    if value is None:
+        return "x"
+    if isinstance(value, list):
+        return value[:-1] if value else ["x"]
+    return {**value, "tampered": 1}
+
+
+# Audit class (C): publisher inputs. A different *valid* value re-stages
+# consistently; no decision, trust or visibility depends on it. Constructor
+# constraints are re-run (test_r4_4_metadata_forgeries_fail, test_m2_lineage_ids_are_strict),
+# and P1.2D binds them to the repository commit (author, time, head CAS).
+UNANCHORED_FIELDS = {("provenance", "published_by"), ("provenance", "published_at"),
+                     ("lineage_id",)}  # lineage: publisher input, see the field audit
+
+
+class TamperEveryFieldTests(CompilerTestCase):
+    """Audit (A)/(B): mutate every field, recompute every hash, expect rejection."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        refs = PublicationTests.vertical_slice(self)
+        self.add(self.c.binding("ghost", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        claim = self.add(self.c.knowledge("claim", conflicting_candidate_ids=("ghost",)))
+        self.review(claim)
+        self.staged = self.stage([*refs.values(), claim])
+        self.files = dict(self.staged.files)
+        self.document = committed(self.staged)
+
+    def artifact(self, ref) -> dict:
+        return json.loads(self.files[ref.path])
+
+    def repackage(self, document, *, log=None, candidates=None, rule_set=None,
+                  keep_id=False):
+        files = dict(self.files)
+        root = root_of(document)
+        for content, folder, key in ((log, "review-logs", "review_log"),
+                                     (candidates, "candidates", "candidates")):
+            if content is not None:
+                data = canonical_json(content)
+                path = f"{root}/{folder}/{hashlib.sha256(data).hexdigest()}.json"
+                files[path] = data
+                document[key] = {**document[key], "path": path,
+                                 "content_checksum": hashlib.sha256(data).hexdigest()}
+        if rule_set is not None:
+            data = canonical_json(rule_set)
+            checksum = hashlib.sha256(data).hexdigest()
+            files[f"context/rule-sets/{checksum}.json"] = data
+            document["published_rule_set"] = {"revision": "SAME_COMMIT",
+                                              "path": f"context/rule-sets/{checksum}.json",
+                                              "content_checksum": checksum}
+        if keep_id:
+            data = canonical_json(document)
+            ref = ArtifactPathRef.of(f"{root}/revisions/{document['revision_id']}.json", data)
+            files[ref.path] = data
+            return files, ref
+        return files, reseal(files, document)
+
+    def assertRejected(self, files, ref, label) -> None:
+        with self.subTest(field=label):
+            with self.assertRaises(PublicationError):
+                self.verify(files, ref)
+
+    def test_unchanged_repackaging_verifies(self) -> None:
+        files, ref = self.repackage(json.loads(json.dumps(self.document)),
+                                    log=self.artifact(self.staged.review_log),
+                                    candidates=self.artifact(self.staged.candidates))
+        self.assertEqual(self.staged.revision, ref)
+        self.verify(files, ref)
+
+    def test_tamper_every_revision_field(self) -> None:
+        paths = [(key,) for key in self.document]
+        for section in ("approved_bindings", "approved_knowledge", "rule_scope_bindings",
+                        "exclusions", "conflicts"):
+            paths += [(section, 0, key) for key in self.document[section][0]]
+        for section in ("review_log", "provenance", "candidates", "published_rule_set"):
+            paths += [(section, key) for key in self.document[section]]
+        paths += [("approved_bindings", 0, "validation", key)
+                  for key in self.document["approved_bindings"][0]["validation"]]
+        paths += [("approved_knowledge", 0, "knowledge_ref", key)
+                  for key in self.document["approved_knowledge"][0]["knowledge_ref"]]
+        for path in paths:
+            if path in UNANCHORED_FIELDS:
+                continue
+            document = json.loads(json.dumps(self.document))
+            node = document
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = _mutated(node[path[-1]])
+            files, ref = self.repackage(document, keep_id=path == ("revision_id",))
+            self.assertRejected(files, ref, "revision." + ".".join(map(str, path)))
+
+    def test_tamper_every_review_log_field(self) -> None:
+        log = self.artifact(self.staged.review_log)
+        paths = [(key,) for key in log] + [("records", 0, key) for key in log["records"][0]]
+        paths += [("records", -1, key) for key in log["records"][-1]]
+        for path in paths:
+            mutated = json.loads(json.dumps(log))
+            node = mutated
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = _mutated(node[path[-1]])
+            files, ref = self.repackage(json.loads(json.dumps(self.document)), log=mutated)
+            self.assertRejected(files, ref, "review_log." + ".".join(map(str, path)))
+
+    def test_tamper_every_candidates_field(self) -> None:
+        artifact = self.artifact(self.staged.candidates)
+        paths = [(key,) for key in artifact]
+        for section in ("candidates", "dependencies"):
+            paths += [(section, 0, key) for key in artifact[section][0]]
+            paths += [(section, 0, "content", key) for key in artifact[section][0]["content"]]
+            paths += [(section, 0, "provenance", key)
+                      for key in artifact[section][0]["provenance"]]
+        for path in paths:
+            mutated = json.loads(json.dumps(artifact))
+            node = mutated
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = _mutated(node[path[-1]])
+            files, ref = self.repackage(json.loads(json.dumps(self.document)),
+                                        candidates=mutated)
+            self.assertRejected(files, ref, "candidates." + ".".join(map(str, path)))
+
+    def test_tamper_every_rule_set_field(self) -> None:
+        rule_set = self.artifact(self.staged.published_rule_set)
+        paths = [(key,) for key in rule_set] + [("rules", -1, key)
+                                                for key in rule_set["rules"][-1]]
+        for path in paths:
+            mutated = json.loads(json.dumps(rule_set))
+            node = mutated
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = _mutated(node[path[-1]])
+            files, ref = self.repackage(json.loads(json.dumps(self.document)),
+                                        rule_set=mutated)
+            self.assertRejected(files, ref, "rule_set." + ".".join(map(str, path)))
+
+    def test_fabricated_dependency_or_selection_outside_the_candidate_log(self) -> None:
+        artifact = self.artifact(self.staged.candidates)
+        fake = self.c.binding("ghost", 3, "reactor temperature", TargetKind.ENTITY,
+                              "reactor")  # a well-formed partner never appended
+        mutated = json.loads(json.dumps(artifact))
+        mutated["dependencies"] = sorted(
+            [*mutated["dependencies"], json.loads(json.dumps(fake.record()))],
+            key=lambda item: (item["candidate_id"], item["candidate_version"]))
+        document = json.loads(json.dumps(self.document))
+        document["dependency_candidate_refs"] = [
+            {"candidate_id": item["candidate_id"],
+             "candidate_version": item["candidate_version"]}
+            for item in mutated["dependencies"]]
+        files, ref = self.repackage(document, candidates=mutated)
+        self.assertRejected(files, ref, "fabricated dependency")
+
+    def test_tamper_the_trusted_anchor_and_head(self) -> None:
+        anchor = self.workspace.anchor()
+        for forged in (replace(anchor, review_log_position=anchor.review_log_position + 1),
+                       replace(anchor, review_tail_hash="7" * 64),
+                       replace(anchor, candidate_count=anchor.candidate_count + 1),
+                       replace(anchor, candidate_tail_hash="9" * 64),
+                       replace(anchor, workspace_id="ws-other"), None):
+            with self.subTest(anchor=forged):
+                with self.assertRaises(PublicationError):
+                    verify_publication(self.files, self.staged.revision, self.session,
+                                       anchor=forged,
+                                       derived_input_resolver=resolver,
+                                       parent_resolver=self.resolve_parent)
+        with self.assertRaises(PublicationError):
+            replace(self.staged, expected_head=ArtifactPathRef(
+                self.staged.revision.path, "8" * 64))
 
 
 class BoundaryTests(unittest.TestCase):
