@@ -2,9 +2,15 @@
 
 Rules for coding agents working on `tep-agent-lab`.
 
-## Product boundary
+## Product, goal and repository boundary
 
-This repository owns TEP-specific Agent tools, domain state/projection, lab policy, experiments, Engineering Records, and evaluation. It also hosts the P0 Playground application plane, the observatory/desktop clients (ADR-002) and the Industrial Context Platform contracts (ADR-003, ADR-004). It does not own TEP physics or generic runtime internals.
+The product is the **domain-neutral industrial context layer**: Context Compiler -> Canonical Context -> Context Server / ContextSnapshot (`docs/decisions/ADR-005-context-layer-product-positioning.md`). The Agent / Investigation Runtime is its first and strictest consumer, not the product. The UI, evaluation harnesses and, later, external systems are other consumers.
+
+- Domain semantics stay in domain packs. TEP is the process pack: TEP identifiers and ProcessGraph stay below the generic context contracts, and generic contracts never import TEP.
+- Current goal: the L1 Portfolio MVP (`docs/product-maturity-and-mvp.md`), sequenced by ADR-004. Live plant mode is MVP-required. Nothing beyond the MVP is scheduled.
+- Context-layer invariants: LLM output is never canonical; consumers read exact pinned revisions and T/K snapshots, never "latest"; the context layer never creates a second investigation state model.
+
+This repository hosts the context-layer contracts (ADR-003, ADR-004, ADR-005), the P0 Playground application plane, the observatory/desktop clients (ADR-002) and the investigation consumer: TEP-specific Agent tools, domain state/projection, lab policy, experiments, Engineering Records and evaluation. It does not own TEP physics or generic runtime internals.
 
 ## Canonical specs
 
@@ -52,6 +58,8 @@ If implementation discovers an architecture/spec contradiction, emit `SPEC_CONFL
 - evaluator-only truth/candidate sets never become registered Agent tools.
 
 ## Hard rules
+
+These rules bind the investigation consumer and the benchmarks. They are accepted semantics and ADR-005 does not change them.
 
 1. Preserve hidden truth/candidate-answer isolation in blind experiments.
 2. Every successful agent-visible ToolResult is deterministically registered as an immutable `ObservationRecord` during result ingestion.
@@ -108,9 +116,11 @@ successful SubtaskResult
 
 Observation registration is automatic. The model must explicitly link observations as evidence later.
 
-## Research-track order (v0)
+## Research track (benchmark and evaluation)
 
-Product-track (P1) sequencing is owned by `docs/decisions/ADR-004-p1-milestone-rebaseline.md`; current state is in `docs/program-status.md`.
+Product-track (P1) sequencing is owned by `docs/decisions/ADR-004-p1-milestone-rebaseline.md` and product positioning by `docs/decisions/ADR-005-context-layer-product-positioning.md`; current state is in `docs/program-status.md`.
+
+ADR-005 Decision 3 redirects this track: finish D0.2C (C0 + identifiability); D1 is a context-value study on the existing evaluation-v0 ladder (C0 floor, C2 -> C3 topology, C5 -> C6 engineering context; OQ-16); D2 orchestration ablation (O0-O5) is parked. The block below is the original v0 research order, kept as dependency history:
 
 ```text
 RcaState / run-log / ContextProjection
