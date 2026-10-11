@@ -384,8 +384,8 @@ resolves the owner question):
 | §Portfolio MVP exit criterion, item 9 | "every important claim can be traced to exact source/snapshot refs;" | "every important claim remains traceable to exact source/snapshot refs, including context-layer provenance where applicable;" |
 | §Product maturity summary, L1 row | "one subsystem: context compilation + live state + ContextSnapshot + real investigation" | "one subsystem: context compilation + live state + ContextSnapshot that make a real investigation possible and traceable" |
 | §MVP implementation priority, step after P1.5 | "D1 / investigation capability" / "real model + evidence-backed RCA" | "B5 + one real-model investigation over the P1.5 path" / "first context consumer; no capability claim" |
-| §MVP implementation priority, new entry after P1.4 | (none) | "live plant mode" / "MVP-required; owning milestone (P1.4 or a new P1.x) decided by the owner" |
-| §Required MVP capabilities, C. Live operational state, new note after the first sentence | (none) | "Clarification (ADR-005 §Live plant mode): 'continuously' means a long-lived simulated plant whose live data keeps entering the canonical telemetry path. It is MVP-required and not yet scheduled. Injecting an incident mid-stream is one possible demonstration, not an acceptance condition." |
+| §MVP implementation priority, new entry after P1.4 | (none) | "live plant mode" / "MVP-required; owned by P1.4B (owner decision 2026-10-11, ADR-005)" |
+| §Required MVP capabilities, C. Live operational state, new note after the first sentence | (none) | "Clarification (ADR-005 §Live plant mode): 'continuously' means a long-lived simulated plant whose live data keeps entering the canonical telemetry path. It is MVP-required and owned by P1.4 (P1.4B; owner decision 2026-10-11). Injecting an incident mid-stream is one possible demonstration, not an acceptance condition." |
 
 The B5 row also corrects existing drift: ADR-004 Decision 2 already puts B5 and one
 real-model investigation without a capability claim on the Level-1 path, not D1. A

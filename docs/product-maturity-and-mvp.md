@@ -203,7 +203,7 @@ Telemetry is delivered continuously through the canonical telemetry path.
 
 > Clarification ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md) §Live plant mode): "continuously" means
 > a long-lived simulated plant whose live data keeps entering the canonical telemetry path.
-> It is MVP-required and not yet scheduled. Injecting an incident mid-stream is one possible
+> It is MVP-required and owned by P1.4 (P1.4B; owner decision 2026-10-11). Injecting an incident mid-stream is one possible
 > demonstration, not an acceptance condition.
 
 At minimum the system can derive deterministic state features such as:
@@ -460,7 +460,7 @@ context serving + deterministic operational state
 "What is happening now?"
 
 live plant mode
-MVP-required; owning milestone (P1.4 or a new P1.x) decided by the owner (ADR-005)
+MVP-required; owned by P1.4B (owner decision 2026-10-11, ADR-005)
 
 P1.5
 ContextSnapshot + Investigation Context integration
