@@ -7,6 +7,22 @@ export type ApplicationRead = { requestId: string; result: JsonObject };
 // The snapshot is opaque here: it is passed back verbatim and never interpreted (ADR-002).
 export type TelemetrySnapshot = JsonObject;
 export type SnapshotOptions = { event_horizon_ticks?: number; ingest_sequence?: number };
+const SNAPSHOT_STRINGS = ["run_id", "snapshot_ref", "contract", "store_id", "incarnation", "namespace",
+  "event_clock_id", "event_clock_kind", "event_resolution", "event_clock_origin", "context_ref",
+  "visibility_policy_ref"] as const;
+const SNAPSHOT_INTEGERS = ["ingest_sequence", "event_horizon_ticks"] as const;
+
+// Read-only shape guard (Application API v1 §Telemetry snapshot): exactly 14 keys with
+// their JSON types. It never copies or alters the object, which is passed back verbatim.
+export function isSnapshot(value: unknown): value is TelemetrySnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== SNAPSHOT_STRINGS.length + SNAPSHOT_INTEGERS.length) return false;
+  return SNAPSHOT_STRINGS.every((key) => typeof record[key] === "string")
+    && SNAPSHOT_INTEGERS.every((key) => Number.isSafeInteger(record[key]) && (record[key] as number) >= 0);
+}
+
 export type HistoryOptions = { event_start_ticks?: number | null; event_end_ticks?: number | null; max_points?: number };
 type InvokeRead = (command: string, args: { method: Method; params: JsonObject }) => Promise<unknown>;
 
@@ -21,7 +37,11 @@ export function createApplicationClient(invokeRead: InvokeRead = invoke) {
     return { requestId: response.request_id, result: response.result };
   }
   return {
-    openTelemetrySnapshot: (options: SnapshotOptions = {}) => request("open_telemetry_snapshot", { ...options }),
+    openTelemetrySnapshot: async (options: SnapshotOptions = {}) => {
+      const read = await request("open_telemetry_snapshot", { ...options });
+      if (!isSnapshot(read.result)) throw new ClientError("BACKEND_PROTOCOL_ERROR", "Invalid application response");
+      return read;
+    },
     getRun: (snapshot?: TelemetrySnapshot) => request("get_run", snapshot ? { snapshot } : {}),
     getEntity: (entityId: string) => request("get_entity", { entity_id: entityId }),
     getSignal: (signalId: string, snapshot: TelemetrySnapshot) =>

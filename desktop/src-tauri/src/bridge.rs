@@ -87,7 +87,8 @@ fn decode_response(bytes: &[u8], request_id: &str) -> Result<ApplicationResponse
     {
         return Err(BridgeError::BackendProtocolError);
     }
-    // Only fixed E0.2B public failures may cross the native boundary.
+    // Only the fixed public failures of docs/specs/application-api-v1.md may cross the
+    // native boundary.
     if let Some(error) = &response.error {
         let message = match error.code.as_str() {
             "UNKNOWN_ENTITY" => "unknown entity",
@@ -331,6 +332,8 @@ impl BackendProcess {
         // serde_json's default Map is sorted: compact canonical object JSON, no concatenation.
         let canonical = serde_json::to_value(&request).map_err(|_| BridgeError::InvalidRequest)?;
         let mut bytes = serde_json::to_vec(&canonical).map_err(|_| BridgeError::InvalidRequest)?;
+        // Same bound as desktop_backend.serve: the JSON payload, excluding the LF frame
+        // terminator appended below, may be exactly MAX_REQUEST_BYTES.
         if bytes.len() > MAX_REQUEST_BYTES {
             return Err(BridgeError::InvalidRequest);
         }
@@ -432,6 +435,32 @@ mod tests {
                 .unwrap_err(),
             BridgeError::BackendProtocolError
         );
+    }
+
+    #[test]
+    fn v1_telemetry_errors_cross_only_with_fixed_messages() {
+        for (code, message) in [
+            ("SNAPSHOT_UNAVAILABLE", "snapshot unavailable"),
+            ("RESOURCE_LIMIT_EXCEEDED", "resource limit exceeded"),
+        ] {
+            let wire = format!(
+                r#"{{"protocol_version":"{PROTOCOL}","request_id":"desktop-1","ok":false,"error":{{"code":"{code}","message":"{message}"}}}}"#
+            );
+            let response = decode_response(wire.as_bytes(), "desktop-1").unwrap();
+            assert!(!response.ok);
+            let error = response.error.unwrap();
+            assert_eq!(
+                (error.code.as_str(), error.message.as_str()),
+                (code, message)
+            );
+            let wrong = format!(
+                r#"{{"protocol_version":"{PROTOCOL}","request_id":"desktop-1","ok":false,"error":{{"code":"{code}","message":"K=19 T=1080"}}}}"#
+            );
+            assert_eq!(
+                decode_response(wrong.as_bytes(), "desktop-1").unwrap_err(),
+                BridgeError::BackendProtocolError
+            );
+        }
     }
 
     #[test]

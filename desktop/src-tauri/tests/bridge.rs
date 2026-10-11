@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::{path::Path, sync::Arc, time::Duration};
-use tep_desktop::bridge::{BackendProcess, BridgeError, PROTOCOL, RUN_ID};
+use tep_desktop::bridge::{BackendProcess, BridgeError, MAX_REQUEST_BYTES, PROTOCOL, RUN_ID};
 use tokio::process::Command;
 
 fn python() -> std::ffi::OsString {
@@ -141,6 +141,43 @@ async fn shutdown_cancels_hung_request_and_reaps_child() {
         BridgeError::BackendNotRunning
     );
     assert_eq!(backend.process_id().await, None);
+}
+
+#[tokio::test]
+async fn snapshot_reaches_the_child_verbatim_and_request_bound_excludes_newline() {
+    let backend = fixture("normal");
+    let snapshot = json!({
+        "run_id": "e0-observatory", "snapshot_ref": "telemetry-snapshot:sha256:abc",
+        "contract": "tep-agent-lab.telemetry/v0", "ingest_sequence": 19,
+        "event_horizon_ticks": 1080, "event_resolution": "1/1", "nested": {"kept": [1, 2]}
+    });
+    let response = backend
+        .request(
+            "get_signal",
+            json!({"signal_id":"reactor.temperature_measurement","snapshot":snapshot.clone()}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.result.unwrap()["params"]["snapshot"], snapshot);
+    // The JSON payload may be exactly MAX_REQUEST_BYTES; the LF terminator is extra.
+    let base = json!({
+        "method": "get_signal", "params": {"run_id": RUN_ID, "signal_id": ""},
+        "protocol_version": PROTOCOL, "request_id": "desktop-2"
+    });
+    let room = MAX_REQUEST_BYTES - serde_json::to_vec(&base).unwrap().len();
+    let exact = backend
+        .request("get_signal", json!({"signal_id": "x".repeat(room)}))
+        .await
+        .unwrap();
+    assert_eq!(exact.request_id, "desktop-2");
+    assert_eq!(
+        backend
+            .request("get_signal", json!({"signal_id": "x".repeat(room + 1)}))
+            .await
+            .unwrap_err(),
+        BridgeError::InvalidRequest
+    );
+    backend.shutdown().await;
 }
 
 // Deliberately not ignored: CI must prove the real process boundary, without a GUI.

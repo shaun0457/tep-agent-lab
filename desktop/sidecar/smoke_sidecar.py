@@ -4,14 +4,99 @@ import argparse
 import json
 import os
 from pathlib import Path
+import queue
 import shutil
 import subprocess
+import tempfile
 from tempfile import TemporaryDirectory
+import threading
+import time
 
 PROTOCOL = "tep-agent-lab.application-transport/v1"
 TEMPERATURE = "reactor.temperature_measurement"
 PRESSURE = "reactor.pressure_measurement"
 FILENAME = "tep-agent-backend-x86_64-pc-windows-msvc.exe"
+SMOKE_TIMEOUT_SECONDS = 120
+
+
+class SmokeFailure(AssertionError):
+    """The backend did not answer correctly within the smoke deadline."""
+
+
+class FrameSession:
+    """One child process, one NDJSON frame and one reply at a time, under a deadline.
+
+    stdout is read by a daemon thread into a queue, so every exchange waits with a
+    timeout; stderr goes to an unbounded temporary file, so a chatty child can never
+    block on a full pipe. On exit stdin is always closed, and a child that is still
+    running when the deadline passes is killed and reaped.
+    """
+
+    def __init__(self, argv: list[str], *, cwd: Path, env: dict[str, str],
+                 timeout: float = SMOKE_TIMEOUT_SECONDS) -> None:
+        self.deadline = time.monotonic() + timeout
+        self.lines: list[bytes] = []
+        self._stderr = tempfile.TemporaryFile()
+        self._replies: queue.Queue[bytes] = queue.Queue()
+        self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=self._stderr)
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def _read(self) -> None:
+        for line in iter(self.process.stdout.readline, b""):
+            self._replies.put(line)
+        self._replies.put(b"")                              # EOF marker
+
+    def _remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def stderr_text(self) -> str:
+        self._stderr.flush()
+        self._stderr.seek(0)
+        return self._stderr.read()[-8192:].decode(errors="replace")
+
+    def exchange(self, frame: dict) -> dict:
+        try:
+            self.process.stdin.write((json.dumps(frame) + "\n").encode())
+            self.process.stdin.flush()
+        except OSError:
+            raise SmokeFailure("backend stdin closed; stderr:\n" + self.stderr_text()) from None
+        remaining = self._remaining()
+        if remaining <= 0:
+            raise SmokeFailure("smoke deadline passed before a reply")
+        try:
+            line = self._replies.get(timeout=remaining)
+        except queue.Empty:
+            raise SmokeFailure("no backend reply before the deadline") from None
+        if not line:
+            raise SmokeFailure("backend closed stdout; stderr:\n" + self.stderr_text())
+        self.lines.append(line)
+        return json.loads(line)
+
+    def finish(self) -> int:
+        """Close stdin and wait for a clean exit within the remaining deadline."""
+        self.process.stdin.close()
+        try:
+            return self.process.wait(timeout=max(self._remaining(), 0.001))
+        except subprocess.TimeoutExpired:
+            raise SmokeFailure("backend did not exit before the deadline") from None
+
+    def __enter__(self) -> "FrameSession":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        try:
+            if not self.process.stdin.closed:
+                self.process.stdin.close()
+        except OSError:
+            pass
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait()
+        self._reader.join(timeout=5)
+        self.process.stdout.close()
+        self._stderr.close()
 
 
 def smoke(binary: Path, build_manifest: dict) -> None:
@@ -24,23 +109,13 @@ def smoke(binary: Path, build_manifest: dict) -> None:
                if not key.upper().startswith(("PYTHON", "TEP_AGENT", "TEP_SIDECAR"))}
         env["PATH"] = ""  # Neither Python nor Git nor the dependency sources can be found.
         # v1 reads need the snapshot from the first reply: one frame, one reply.
-        process = subprocess.Popen([str(isolated), "--run-id", "frozen-smoke",
-                                    "--output-root", str(output)], cwd=root, env=env,
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
-        lines: list[bytes] = []
+        with FrameSession([str(isolated), "--run-id", "frozen-smoke",
+                           "--output-root", str(output)], cwd=root, env=env) as session:
+            def exchange(index: int, method: str, params: dict) -> dict:
+                return session.exchange({"protocol_version": PROTOCOL,
+                                         "request_id": f"smoke-{index}", "method": method,
+                                         "params": {"run_id": "frozen-smoke", **params}})
 
-        def exchange(index: int, method: str, params: dict) -> dict:
-            frame = json.dumps({"protocol_version": PROTOCOL, "request_id": f"smoke-{index}",
-                                "method": method,
-                                "params": {"run_id": "frozen-smoke", **params}})
-            process.stdin.write((frame + "\n").encode())
-            process.stdin.flush()
-            line = process.stdout.readline()
-            lines.append(line)
-            return json.loads(line)
-
-        try:
             replies = [exchange(1, "open_telemetry_snapshot", {})]
             assert replies[0]["ok"], replies
             snapshot = replies[0]["result"]
@@ -50,15 +125,10 @@ def smoke(binary: Path, build_manifest: dict) -> None:
                                              "max_points": 30})]
             replies += [exchange(i, method, params)
                         for i, (method, params) in enumerate(reads, 2)]
-            process.stdin.close()
-            returncode = process.wait(timeout=120)
-            stderr = process.stderr.read()
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.stdout.close()
-            process.stderr.close()
-        assert returncode == 0, stderr.decode(errors="replace")
+            returncode = session.finish()
+            stderr = session.stderr_text()
+            lines = list(session.lines)
+        assert returncode == 0, stderr
         assert len(replies) == 5, replies
         for i, reply in enumerate(replies, 1):
             assert reply["ok"] and reply["request_id"] == f"smoke-{i}", reply

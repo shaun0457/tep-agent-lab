@@ -1,10 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createApplicationClient } from "../src/lib/applicationClient.ts";
+import { createApplicationClient, isSnapshot } from "../src/lib/applicationClient.ts";
 import { PRESSURE_SIGNAL, TEMPERATURE_SIGNAL } from "../src/lib/probes.ts";
 import { PROTOCOL, validateEnvelope, safeHostError } from "../src/lib/protocol.ts";
 
-const snapshot = { snapshot_ref: "telemetry-snapshot:sha256:abc", ingest_sequence: 19, event_horizon_ticks: 1080 };
+const snapshot = {
+  run_id: "e0-observatory", snapshot_ref: "telemetry-snapshot:sha256:abc", contract: "tep-agent-lab.telemetry/v0",
+  store_id: "p0-reference-telemetry", incarnation: "inc-a", namespace: "p0-run:e0-observatory:a",
+  ingest_sequence: 19, event_horizon_ticks: 1080, event_clock_id: "tep-sim:e0-observatory:a",
+  event_clock_kind: "SIMULATION", event_resolution: "1/1", event_clock_origin: "tep-reset:e0-observatory:a",
+  context_ref: "context-source:tep-sim.process-graph:sha256:b",
+  visibility_policy_ref: "tep-agent-lab.playground-visibility/v0#AGENT",
+};
+
+test("snapshot guard is exact and read-only", async () => {
+  assert.equal(isSnapshot(snapshot), true);
+  const frozen = Object.freeze({ ...snapshot });
+  assert.equal(isSnapshot(frozen), true);                       // never mutates its input
+  for (const bad of [null, [], {}, { ...snapshot, extra: 1 }, { ...snapshot, ingest_sequence: -1 },
+    { ...snapshot, ingest_sequence: 1.5 }, { ...snapshot, event_clock_origin: null },
+    Object.fromEntries(Object.entries(snapshot).filter(([key]) => key !== "context_ref"))]) {
+    assert.equal(isSnapshot(bad), false);
+  }
+  const reply = (result: unknown) => createApplicationClient(async () => (
+    { protocol_version: PROTOCOL, request_id: "desktop-1", ok: true, result }));
+  const opened = await reply(snapshot).openTelemetrySnapshot();
+  assert.equal(opened.result.snapshot_ref, snapshot.snapshot_ref);
+  await assert.rejects(reply({ ...snapshot, event_clock_origin: null }).openTelemetrySnapshot(),
+    { code: "BACKEND_PROTOCOL_ERROR" });
+});
 
 test("protocol is application transport v1", () => {
   assert.equal(PROTOCOL, "tep-agent-lab.application-transport/v1");
@@ -14,7 +38,8 @@ test("five reads use only the narrow command, host-owned run identity and a verb
   const calls: unknown[] = [];
   const client = createApplicationClient(async (command, args) => {
     calls.push([command, args]);
-    return { protocol_version: PROTOCOL, request_id: `desktop-${calls.length}`, ok: true, result: {} };
+    const result = args.method === "open_telemetry_snapshot" ? snapshot : {};
+    return { protocol_version: PROTOCOL, request_id: `desktop-${calls.length}`, ok: true, result };
   });
   await client.openTelemetrySnapshot(); await client.getRun(snapshot); await client.getRun();
   await client.getEntity("reactor"); await client.getSignal(TEMPERATURE_SIGNAL, snapshot);

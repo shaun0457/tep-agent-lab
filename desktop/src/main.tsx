@@ -17,11 +17,12 @@ const probes: Probe[] = [
 ];
 
 // Presentation only: ticks times the snapshot clock's exact seconds-per-tick, as hours.
+const RESOLUTION = /^([1-9][0-9]{0,8})\/([1-9][0-9]{0,8})$/;
 function hours(ticks: unknown, resolution: unknown): string {
-  if (typeof ticks !== "number" || typeof resolution !== "string") return "Unavailable";
-  const [numerator, denominator] = resolution.split("/").map(Number);
-  if (!numerator || !denominator) return "Unavailable";
-  return (ticks * numerator / denominator / 3600).toFixed(4);
+  if (!Number.isSafeInteger(ticks) || typeof resolution !== "string") return "Unavailable";
+  const match = RESOLUTION.exec(resolution);
+  if (!match) return "Unavailable";
+  return ((ticks as number) * Number(match[1]) / Number(match[2]) / 3600).toFixed(4);
 }
 
 function App() {
@@ -50,10 +51,13 @@ function App() {
   }
 
   // The only place that chooses (T, K): every probe then reads under this exact snapshot.
+  // On success, results read under the old snapshot are cleared before the new one is
+  // shown; on failure, the old snapshot (and what was read under it) stays.
   async function pin() {
     setLoading(true); setError(null); setStatus("Pinning telemetry snapshot…");
     try {
       const opened = await openTelemetrySnapshot();
+      setRun(null); setResponse(null); setSelected(0);
       setSnapshot(opened.result);
       setLoading(false);
       await query(0, opened.result);
