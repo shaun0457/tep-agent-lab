@@ -56,6 +56,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.4 context serving + Operational State | no owning spec yet |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
 | B5 first real provider (runtime repo) | not started; unblocked (D-049) |
+| Live plant mode (long-lived simulated plant, mid-stream incident, T/K over a growing stream) | MVP-required, unscheduled; no owning spec ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md)) |
 | MVP integration (E1 substrate + context panels) | not started |
 | P1.6 write-back, P1.7 second domain | post-L1 |
 
@@ -88,6 +89,8 @@ None.
 - **P1.1C** can start now. The owning contract is frozen; write a short implementation note
   with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
 - **B5** can start now in `industrial-agent-runtime`.
+- **Live plant mode** (ADR-005): MVP-required, unscheduled. It needs an owning spec; the
+  owner decides between P1.4 and a new P1.x under the ADR-004 rules.
 - **D0.2C1** can start now. It adds leakage policy v2 before it freezes pilot fixtures
   (benchmark-comparative-pilot-v0 §Leakage).
 

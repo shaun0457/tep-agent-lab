@@ -5,7 +5,7 @@
 - Scope: product positioning (what the product is and who consumes it); a three-layer
   target profile (domain-neutral context core, domain packs, workflows) and its mapping
   onto existing milestones; the research-track redirect of D1 and D2; MVP exit-criteria
-  wording
+  wording; live plant mode as an MVP-required, unscheduled item; post-MVP candidates
 - Constrains: the future P1.3, P1.4 and P1.5 owning specs (Decisions 1 and 2); the
   future D1 owning spec (Decision 3)
 - Amends (wording only): `docs/product-maturity-and-mvp.md` §Portfolio MVP exit
@@ -293,6 +293,47 @@ The Level-1 MVP stays on the process pack through TEP, because the existing asse
 choose a second domain. The Level-2 requirement "at least one non-TEP source/domain"
 and P1.7 are unchanged; which domain fills them is an open question for the owner.
 
+### Live plant mode is MVP-required (unscheduled)
+
+MVP capability C requires telemetry "delivered continuously through the canonical
+telemetry path", and exit criterion 4 requires live telemetry to enter through the
+canonical SignalSample/store/reader contracts. ADR-004 Decision 2 scopes P1.1C as P0 run
+ingestion of reference-world records into a run-scoped store, with snapshot-bound reads.
+No accepted spec yet requires a plant that keeps running and streaming after READY, so
+this part of capability C has no owner. This is not a new requirement; it gives an
+existing one a name.
+
+**Live plant mode** is MVP-required:
+
+- TEP runs as a long-lived simulated plant and streams samples continuously through
+  TEPSimulationSource into the canonical telemetry store.
+- The evaluator or harness injects an incident mid-stream. Injection is harness
+  authority, never an Agent tool, and its identity and timing stay EVALUATOR-only (hard
+  rules 1, 9 and 11; ADR-001).
+- Every read and every ContextSnapshot pins T and K over the growing stream. Samples
+  committed later never enter an earlier snapshot (plant-telemetry §Hard temporal leakage
+  invariant).
+
+Scheduling. This ADR assigns no milestone number. Live plant mode must be scheduled into
+an owning spec. Whether it belongs to P1.4 or to a new P1.x is decided by the owner under
+the ADR-004 rules (Decision 1: milestone numbers never own semantics; Decision 2: the
+sequence table).
+
+Constraints the owning spec must keep:
+
+- P0 lifecycle: the source inventory and RunManifest stay frozen at READY. Streamed
+  samples are run data read through pinned TelemetryReadSnapshots, not new canonical
+  sources (playground-backend-v0).
+- Delivery modes (DETERMINISTIC, ACCELERATED, REAL_TIME) change pacing only, never
+  physics, values, identities or event order (plant-telemetry §Delivery and dirty
+  streams).
+- ADR-004 Decision 6: the plant is still a simulated source, so the injected dirty-stream
+  replay harness is not triggered. That harness stays required before any non-simulated
+  source, and until then MVP materials state that live data is a clean deterministic
+  simulated stream.
+- ADR-004 Decision 6: Agent tools keep their current behavior until P1.5, and frozen D0
+  fixtures stay byte-identical. Live plant mode changes no benchmark case.
+
 ### MVP exit-criteria wording
 
 The exit criteria keep their substance. Their wording now centres on "the context layer
@@ -340,8 +381,14 @@ conflicts with ADR-003 §Positioning or ADR-004 Decision 5, a new ADR.
 | HAZOP assistance, MOC impact analysis | process-pack workflows | hazop-v0 is a research proposal, deferred; no MOC spec |
 | Discrete-manufacturing pack (hierarchy, PLC tags, MES work orders and routing, BOM and material genealogy, possibly Asset Administration Shell import) | discrete pack | candidate second domain; not chosen |
 | Discrete workflows (downtime/OEE RCA, quality traceability, multi-site rollout) | discrete-pack workflows | depend on the discrete pack |
+| OPC UA / MQTT gateway in front of a simulated plant (brownfield-connectivity proof) | pack adapters | equivalent to the deferred first external connector: Level 2, after dirty-stream robustness (ADR-004 Decision 3) |
+| MES-like IT source, e.g. production orders driving TEP operating-mode changes (OT + IT unification) | pack adapters | not specified; TEP operating modes stay in the process pack; Level 4 lists MES/ERP/CMMS adapters |
+| Outward Context API with event streams, plus an MCP server as an agent-facing interface | core serving contracts | transport deferred (ADR-003); read-only context, no execution authority, evaluator-only content never exposed (ADR-002, Decision 1) |
 
 HAZOP, MOC and DEXPI are process-pack candidates, not core features.
+
+Owner priority: this is a portfolio project, so Level-1 MVP scope wins. Every candidate
+above stays unscheduled and post-MVP, and nothing beyond the MVP is scheduled now.
 
 ### TEP limitation and honest claims
 
@@ -391,6 +438,7 @@ the demo. Consequences for claims:
   - an adjacent batch or process domain: lower risk and more reuse of the process pack, but
     a weaker generality proof.
   The choice is not needed for Level 1.
+- **Live plant mode owner**: P1.4 or a new P1.x, decided under the ADR-004 rules.
 - **D1 arm set** (OQ-16): the default full ladder with single-factor context steps
   (recommended), or the SPEC_CONFLICT alternative of a C3-based context-only arm, which
   needs amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0.
