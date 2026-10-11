@@ -1,0 +1,459 @@
+{
+  "policy": "markdown.sections-paragraphs-tables-steps@1",
+  "sources": {
+    "tep-reactor-cooling.operating-procedure": [
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 0,
+          "end": 1030,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "6f897a85441c96130ad58fa971781f6c6a6e85ddff5501d94f2d8334eac245db",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-bcb56a60c9a43bf3b4519b47c6bc0ef05b04cb737f58cbb42451700f6c33d1ff"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 36,
+          "end": 205,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "purpose"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "bafe95eeb18612bb8b69a46fda91fa45ebc21195ee11adb5b9a5baa3f2eb4520",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-5dbf58474991b93736b428b89bb97ab0196f133da8266ee4f1c2ea056f69713a"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 48,
+          "end": 204,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "purpose"
+          ],
+          "paragraph_index": 1
+        },
+        "content_checksum": "865ae988c447aba3beb2890200afee61b1c61312048d36d0d4bfddcf1cfda835",
+        "fragment_kind": "PARAGRAPH",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-b91be4d4ffcd9b312c8e67f4130c15094f0fc76153c42f7863659cedeca445c4"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 205,
+          "end": 770,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "review-steps"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "6a19e5564e4d622464b174cbfe45287f46616a5060c08ccef4cba4576afb162b",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-39d5f531bd779bb3fc090f40a0f2d824c4b6ffd0c92c452834a2e6e78bdc8ff9"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 222,
+          "end": 306,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "review-steps"
+          ],
+          "paragraph_index": null,
+          "list_index": 1,
+          "step_index": 1
+        },
+        "content_checksum": "70b3546a79c4cc593353894342bb069197573708036ff3d2d2dd88f6d61e4a5d",
+        "fragment_kind": "PROCEDURE_STEP",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-2122e97b43bc3e0343b09a82cb1b479ec58e354bfb19d79494f85bcc2d87c7d9"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 306,
+          "end": 454,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "review-steps"
+          ],
+          "paragraph_index": null,
+          "list_index": 1,
+          "step_index": 2
+        },
+        "content_checksum": "e228feed0d08804d87403f1860c4e5ccc1af3e563eb32b15c04bdc21aea41b7a",
+        "fragment_kind": "PROCEDURE_STEP",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-7a852894f6bb82b0ca06f8e9768dc5f51f0bf18facc2e9c2067c80cfedb6723b"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 454,
+          "end": 614,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "review-steps"
+          ],
+          "paragraph_index": null,
+          "list_index": 1,
+          "step_index": 3
+        },
+        "content_checksum": "e0c9fbc0a7176987790e284456502e5c6c96b2bf44657fb5c0fe79259188a23a",
+        "fragment_kind": "PROCEDURE_STEP",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-f6fb75ca3169415fc53a8c9f2f80df86972604ff3155c3c8978baaab311b8043"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 614,
+          "end": 689,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "review-steps"
+          ],
+          "paragraph_index": null,
+          "list_index": 1,
+          "step_index": 4
+        },
+        "content_checksum": "a2cb2926a0c22e545bed2734a3972e19998fbccc3016e1fd255b1cda6c9a26ea",
+        "fragment_kind": "PROCEDURE_STEP",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-edfadfad61028a364cb03c63088721997668b1dee757faf3b4bd56897a9ca365"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 689,
+          "end": 769,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "review-steps"
+          ],
+          "paragraph_index": null,
+          "list_index": 1,
+          "step_index": 5
+        },
+        "content_checksum": "06059cf00c7fae2e757e9ae0a24e0022ca1ed19ffa862aa35baa9f022182da36",
+        "fragment_kind": "PROCEDURE_STEP",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-97fd59fab77f8fa846f012732aa3004f032a279f6d9c21849c45093971a14c80"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 770,
+          "end": 1030,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "ambiguous-wording-in-step-4"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "202134920418e0bf4e73e0e7b61c673d83dcced688e559a3ba1ed3cd8769eb5d",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-ff66cccfe8e818621e8e2e6b1262834ce4739e6bef763d20b3f5082f62dd9b40"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 802,
+          "end": 1030,
+          "pointer": null,
+          "section_path": [
+            "reactor-cooling-review-procedure",
+            "ambiguous-wording-in-step-4"
+          ],
+          "paragraph_index": 1
+        },
+        "content_checksum": "0ceb895a953e9c3d8eba7f142ce8ef5c121423927cdd620151ee0b86a0a2dddf",
+        "fragment_kind": "PARAGRAPH",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-5c654749b341e755fe83bf33278fcc46d8ad2a8e4978742c2017d0cb63a5a2df"
+      }
+    ],
+    "tep-reactor-cooling.tags-and-limits": [
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 0,
+          "end": 1405,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "26e6dfa34ac01eb2b011b9b704161eb4b66bcca5736a1cc18f1611482965c0fc",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-5a27410da114ed39f44a92a1ddd7084e15a4f7a676eda11215ac08bddcc94557"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 31,
+          "end": 349,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "basis"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "887a989038004e754497b4f6c2a5235f89d04511e87cc4bacc958a1fc975a507",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-03b948bdf83ea8277b7c6c4ca715a37408573e9e091e37c25c3078eab1901f8d"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 41,
+          "end": 348,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "basis"
+          ],
+          "paragraph_index": 1
+        },
+        "content_checksum": "b06d9be4d0386fea3950728f1e36bef5a6f6522829a5ccc8989e14d70d078ec0",
+        "fragment_kind": "PARAGRAPH",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-b2522f83fec8b9f93718a6f760bd65a23f25ab69d912202422f29f44a8989889"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 349,
+          "end": 983,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "tags-and-constraints"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "afdaa919f30596facb9db5f7f59bd3edfc9928b3668b23224b315ce6279289ea",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-a6b405b168fd9d0d135627b94fe425943378512706c7638a994b53bfec691db6"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 374,
+          "end": 982,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "tags-and-constraints"
+          ],
+          "paragraph_index": null,
+          "table_index": 1,
+          "row_index": null
+        },
+        "content_checksum": "08bbc1ce99bf4fd1229fdbb720861cc6381abd21546fd16010180c5ed50f03ff",
+        "fragment_kind": "TABLE",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-4608bac3513d7b777cc3fe623cae05f3e4eafc87919f76b4af817dc770f3a580"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 480,
+          "end": 603,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "tags-and-constraints"
+          ],
+          "paragraph_index": null,
+          "table_index": 1,
+          "row_index": 1
+        },
+        "content_checksum": "da9a5e8b8348630b449a101e821c9cb5c06e1393d957f361af571552009866d1",
+        "fragment_kind": "TABLE_ROW",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-6624bab8a264bc2f1a6546ec33c488b4ab3a7406e2e915102a9825ac63d78403"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 603,
+          "end": 730,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "tags-and-constraints"
+          ],
+          "paragraph_index": null,
+          "table_index": 1,
+          "row_index": 2
+        },
+        "content_checksum": "5e0f9e663e08da55df97b74931c0f2e3eaddb347e2823f18227a2690fbaa29f7",
+        "fragment_kind": "TABLE_ROW",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-75b5e1a23b28e19f5b027526702157458bc705738b45cb6f3278eed03b071fe1"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 730,
+          "end": 841,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "tags-and-constraints"
+          ],
+          "paragraph_index": null,
+          "table_index": 1,
+          "row_index": 3
+        },
+        "content_checksum": "71055fd61d1ac2291f5e38c340341a86fef1919969da4eb874835c8a1c32f231",
+        "fragment_kind": "TABLE_ROW",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-675c9bb508cd9c2e7a57c47bd8a867319acf8e866b12aa894a0f925274cfff2c"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 841,
+          "end": 982,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "tags-and-constraints"
+          ],
+          "paragraph_index": null,
+          "table_index": 1,
+          "row_index": 4
+        },
+        "content_checksum": "c295541d9d5118d483455c94a337a43848d8f47c08bb07e01df0edc28e70238d",
+        "fragment_kind": "TABLE_ROW",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-04990362575061cfe1453de49592ab13d030bedbb226829f9f20f37d17c284bf"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 983,
+          "end": 1135,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "flow-units"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "a4239ac64efcaa07d1b9cf3341291ec1fb176ea5723240dd3aa1f49a9f9db210",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-ac03cd04868e07183271e0f8435d5745b98ba849f10200febe6fc96aa9943cbe"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 998,
+          "end": 1134,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "flow-units"
+          ],
+          "paragraph_index": 1
+        },
+        "content_checksum": "2f82fdcd3238bf11ec05d75d44725245c7e2f84f10dffe4f6a7b366b628fb7d5",
+        "fragment_kind": "PARAGRAPH",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-e8ee998d454bab5546e23e9700edd1fcc28f7d93ffbbc84a3432075da943f377"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 1135,
+          "end": 1405,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "cross-document-conflict"
+          ],
+          "paragraph_index": null
+        },
+        "content_checksum": "2e08126a7a9983271efafe75d41e74f5c08b61e034366592bd3191faeffa524d",
+        "fragment_kind": "SECTION",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-50d94c69b59e6c2f54f549da4cd672443ab6a215b5b29f8495d4a4bd6830ad52"
+      },
+      {
+        "location": {
+          "kind": "MARKDOWN",
+          "start": 1163,
+          "end": 1405,
+          "pointer": null,
+          "section_path": [
+            "reactor-tag-and-limit-table",
+            "cross-document-conflict"
+          ],
+          "paragraph_index": 1
+        },
+        "content_checksum": "b07d29b1e090a074f426ff44cf1f39fdd20e5daab5735d2fbef237f01f5b7cd6",
+        "fragment_kind": "PARAGRAPH",
+        "fragmentation_policy": "markdown.sections-paragraphs-tables-steps@1",
+        "label": null,
+        "fragment_id": "frag-8abecbb93c4ed8b467c5fab0d9223df1d202b38471104d990d29f69a8747d91b"
+      }
+    ]
+  }
+}

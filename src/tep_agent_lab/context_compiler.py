@@ -168,7 +168,7 @@ def _json(data: bytes, what: str) -> Any:
 class LocationKind(StrEnum):
     BYTE_RANGE = "BYTE_RANGE"      # exact bytes [start, end); BYTES_SHA256 sources only
     JSON_POINTER = "JSON_POINTER"  # RFC 6901 subtree of a JSON source, canonical JSON
-    MARKDOWN = "MARKDOWN"          # policy-v1 semantic locator AND exact byte anchor
+    MARKDOWN = "MARKDOWN"          # versioned semantic locator AND exact byte anchor
 
 
 @dataclass(frozen=True)
@@ -179,6 +179,10 @@ class FragmentLocation:
     pointer: str | None = None
     section_path: tuple[str, ...] | None = None
     paragraph_index: int | None = None
+    table_index: int | None = None
+    row_index: int | None = None
+    list_index: int | None = None
+    step_index: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", _enum(LocationKind, self.kind, "location kind"))
@@ -197,7 +201,22 @@ class FragmentLocation:
                     or (self.paragraph_index is not None
                         and (type(self.paragraph_index) is not int or self.paragraph_index < 1))):
                 raise CompilerError("MARKDOWN needs a section path and optional positive paragraph index")
-        elif self.section_path is not None or self.paragraph_index is not None:
+            for value in (self.table_index, self.row_index, self.list_index, self.step_index):
+                if value is not None and (type(value) is not int or value < 1):
+                    raise CompilerError("MARKDOWN indices must be positive non-boolean integers")
+            if self.table_index is not None:
+                if any(value is not None for value in
+                       (self.paragraph_index, self.list_index, self.step_index)):
+                    raise CompilerError("table locators cannot mix paragraph/list fields")
+            elif self.row_index is not None:
+                raise CompilerError("row_index requires table_index")
+            if self.list_index is not None or self.step_index is not None:
+                if (self.list_index is None or self.step_index is None
+                        or self.paragraph_index is not None):
+                    raise CompilerError("procedure locators need both list_index and step_index")
+        elif any(value is not None for value in (self.section_path, self.paragraph_index,
+                                                self.table_index, self.row_index,
+                                                self.list_index, self.step_index)):
             raise CompilerError("semantic fields belong only to MARKDOWN locations")
 
     @classmethod
@@ -210,24 +229,42 @@ class FragmentLocation:
 
     @classmethod
     def markdown(cls, start: int, end: int, section_path: tuple[str, ...],
-                 paragraph_index: int | None = None) -> "FragmentLocation":
+                 paragraph_index: int | None = None, *, table_index: int | None = None,
+                 row_index: int | None = None, list_index: int | None = None,
+                 step_index: int | None = None) -> "FragmentLocation":
         return cls(LocationKind.MARKDOWN, start, end, section_path=section_path,
-                   paragraph_index=paragraph_index)
+                   paragraph_index=paragraph_index, table_index=table_index, row_index=row_index,
+                   list_index=list_index, step_index=step_index)
+
+    @property
+    def markdown_kind(self) -> str:
+        if self.kind is not LocationKind.MARKDOWN:
+            raise CompilerError("only MARKDOWN has a Markdown fragment kind")
+        if self.table_index is not None:
+            return "TABLE" if self.row_index is None else "TABLE_ROW"
+        if self.list_index is not None:
+            return "PROCEDURE_STEP"
+        return "SECTION" if self.paragraph_index is None else "PARAGRAPH"
 
     @property
     def semantic_locator(self) -> str:
         if self.kind is not LocationKind.MARKDOWN:
             raise CompilerError("only MARKDOWN has a semantic locator")
         path = "/".join(self.section_path or ())
+        if self.table_index is not None:
+            path += f"/table-{self.table_index}"
+            return path if self.row_index is None else f"{path}/row-{self.row_index}"
+        if self.list_index is not None:
+            return f"{path}/list-{self.list_index}/step-{self.step_index}"
         return path if self.paragraph_index is None else f"{path}/paragraph-{self.paragraph_index}"
 
-    def extract(self, content: bytes) -> bytes:
+    def extract(self, content: bytes, *, fragmentation_policy: str | None = None) -> bytes:
         if not isinstance(content, bytes):
             raise CompilerError("fragment content must be bytes")
         if self.kind is LocationKind.MARKDOWN:
             # Lazy import keeps the contracts independent of parser implementation at import time.
             from .markdown_fragments import extract_location
-            return extract_location(content, self)
+            return extract_location(content, self, policy=fragmentation_policy)
         if self.kind is LocationKind.BYTE_RANGE:
             start, end = self.start, self.end
             if start is None or end is None or end > len(content):
@@ -254,6 +291,10 @@ class FragmentLocation:
         if self.kind is LocationKind.MARKDOWN:
             record.update(section_path=list(self.section_path or ()),
                           paragraph_index=self.paragraph_index)
+            if self.table_index is not None:
+                record.update(table_index=self.table_index, row_index=self.row_index)
+            if self.list_index is not None:
+                record.update(list_index=self.list_index, step_index=self.step_index)
         return record
 
     @classmethod
@@ -264,13 +305,19 @@ class FragmentLocation:
         keys = {"kind", "start", "end", "pointer"}
         if kind is LocationKind.MARKDOWN:
             keys |= {"section_path", "paragraph_index"}
+            if record.get("table_index") is not None:
+                keys |= {"table_index", "row_index"}
+            if record.get("list_index") is not None:
+                keys |= {"list_index", "step_index"}
         if set(record) != keys:
             raise CompilerError("location record must have exactly its kind's fields")
         path = record.get("section_path")
         if kind is LocationKind.MARKDOWN and not isinstance(path, (list, tuple)):
             raise CompilerError("section_path record must be an array")
         return cls(kind, record["start"], record["end"], record["pointer"],
-                   None if path is None else tuple(path), record.get("paragraph_index"))
+                   None if path is None else tuple(path), record.get("paragraph_index"),
+                   record.get("table_index"), record.get("row_index"),
+                   record.get("list_index"), record.get("step_index"))
 
 
 def _location_fits(location: FragmentLocation, source: ContextSourceRef) -> bool:
@@ -306,9 +353,11 @@ class SourceFragmentRef:
         _pattern(self.fragmentation_policy, _VERSIONED, "fragmentation_policy")
         _optional_text(self.label, "label")
         if self.location.kind is LocationKind.MARKDOWN:
-            from .markdown_fragments import PARSER_POLICY
-            expected_kind = "SECTION" if self.location.paragraph_index is None else "PARAGRAPH"
-            if self.fragmentation_policy != PARSER_POLICY or self.fragment_kind != expected_kind:
+            from .markdown_fragments import PARSER_POLICY, TABLES_STEPS_POLICY
+            expected_kind = self.location.markdown_kind
+            policies = ((PARSER_POLICY, TABLES_STEPS_POLICY)
+                        if expected_kind in ("SECTION", "PARAGRAPH") else (TABLES_STEPS_POLICY,))
+            if self.fragmentation_policy not in policies or self.fragment_kind != expected_kind:
                 raise CompilerError("MARKDOWN kind/locator needs the supported parser policy")
         object.__setattr__(self, "fragment_id", "frag-" + json_digest(self._identity()))
 
@@ -329,7 +378,8 @@ class SourceFragmentRef:
         if not isinstance(location, FragmentLocation):
             raise CompilerError("location must be a FragmentLocation")
         return cls(source_ref=source_ref, location=location,
-                   content_checksum=_sha256(location.extract(content)),
+                   content_checksum=_sha256(location.extract(
+                       content, fragmentation_policy=fragmentation_policy)),
                    fragment_kind=fragment_kind, fragmentation_policy=fragmentation_policy,
                    label=label)
 
@@ -345,7 +395,8 @@ class SourceFragmentRef:
                     and (not isinstance(content, bytes)
                          or _sha256(content) != self.source_ref.content_checksum)):
                 return False
-            return _sha256(self.location.extract(content)) == self.content_checksum
+            return _sha256(self.location.extract(
+                content, fragmentation_policy=self.fragmentation_policy)) == self.content_checksum
         except CompilerError:
             return False
 

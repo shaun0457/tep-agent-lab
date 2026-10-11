@@ -24,8 +24,10 @@ from .canonical_context import (
     BYTES_SHA256, CanonicalContextRegistry, ContextSourceRef,
     PackageSourceMaterializer, ProjectionScope, SourceMaterializer, checked_relative_path,
 )
-from .persistence import strict_json_loads
-from .markdown_fragments import fragment_markdown, format_fragment_tree
+from .persistence import canonical_json, strict_json_loads
+from .markdown_fragments import (
+    PARSER_POLICY, TABLES_STEPS_POLICY, fragment_markdown, format_fragment_tree, table_row_cells,
+)
 
 DEFAULT_MANIFEST = (
     "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/manifest.json"
@@ -184,13 +186,17 @@ def register_corpus(*, repository: str, git_revision: str,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("list", "fragments"))
-    parser.add_argument("source_id", nargs="?", help="registered source id for fragments")
+    parser.add_argument("command", choices=("list", "fragments", "rows"))
+    parser.add_argument("source_id", nargs="?", help="registered source id for fragments/rows")
+    parser.add_argument("--policy", choices=(PARSER_POLICY, TABLES_STEPS_POLICY),
+                        default=TABLES_STEPS_POLICY)
     parser.add_argument("--repository", default="shaun0457/tep-agent-lab")
     parser.add_argument("--git-revision", help="trusted exact revision (required outside a checkout)")
     args = parser.parse_args(argv)
-    if (args.command == "fragments") != (args.source_id is not None):
-        parser.error("fragments requires one source-id; list takes none")
+    if (args.command in ("fragments", "rows")) != (args.source_id is not None):
+        parser.error("fragments/rows requires one source-id; list takes none")
+    if args.command == "rows" and args.policy != TABLES_STEPS_POLICY:
+        parser.error("rows requires the tables/steps parser policy")
     try:
         revision = args.git_revision
         if revision is None:
@@ -199,10 +205,19 @@ def main(argv: list[str] | None = None) -> int:
                 ["git", "-c", f"safe.directory={root.as_posix()}", "-C", str(root),
                  "rev-parse", "HEAD"], text=True, stderr=subprocess.PIPE).strip()
         registry = register_corpus(repository=args.repository, git_revision=revision)
-        if args.command == "fragments":
+        if args.command in ("fragments", "rows"):
             resolved = registry.resolve(args.source_id, ProjectionScope.AGENT)
-            for row in format_fragment_tree(fragment_markdown(resolved.ref, resolved.content)):
-                print(row)
+            fragments = fragment_markdown(resolved.ref, resolved.content, policy=args.policy)
+            if args.command == "fragments":
+                for row in format_fragment_tree(fragments):
+                    print(row)
+            else:
+                for fragment in fragments:
+                    if fragment.fragment_kind == "TABLE_ROW":
+                        loc = fragment.location
+                        cells = canonical_json(table_row_cells(fragment, resolved.content)).decode()
+                        print(f"TABLE_ROW {loc.semantic_locator} [{loc.start}, {loc.end}) "
+                              f"sha256:{fragment.content_checksum[:12]} cells:{cells}")
         else:
             for ref in registry.inventory(ProjectionScope.AGENT):
                 resolved = registry.resolve(ref.source_id, ProjectionScope.AGENT)
