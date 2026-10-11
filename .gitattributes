@@ -1,0 +1,2 @@
+# Engineering source checksums must survive checkouts on every platform.
+src/tep_agent_lab/engineering_corpus/** text eol=lf

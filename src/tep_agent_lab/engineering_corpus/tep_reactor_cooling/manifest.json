@@ -1,0 +1,44 @@
+{
+  "corpus_id": "tep-reactor-cooling",
+  "version": "1",
+  "subsystem": "TEP reactor + cooling-water loop",
+  "author": "Codex executor (coordinated by Claude Code)",
+  "authored_at": "2026-10-11",
+  "inputs_consulted": [
+    "https://users.abo.fi/~khaggblo/RS/Downs.pdf",
+    "https://doi.org/10.1016/0098-1354(93)80018-I"
+  ],
+  "leakage_statement": "Authored solely from the public Downs and Vogel (1993) process description and general engineering reasoning. No repository benchmark fixtures, candidate sets, scorer mappings or evaluator truth were accessed. The author consulted the specified compiler contracts and source-registration test pattern only for implementation, not as engineering factual inputs. No benchmark or capability claim is made.",
+  "documents": [
+    {
+      "path": "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/subsystem.md",
+      "sha256": "1f6ad99b2cd21bd2ff944a3e801c7ae1b057f0a492acd7de1ee8e56f6b733b20",
+      "purpose": "Subsystem scope, an unambiguous outlet signal mention and a qualitative control relation."
+    },
+    {
+      "path": "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/tags-and-limits.md",
+      "sha256": "26e6dfa34ac01eb2b011b9b704161eb4b66bcca5736a1cc18f1611482965c0fc",
+      "purpose": "Public base-case tag values and distinct normal/shutdown constraints for later typed extraction."
+    },
+    {
+      "path": "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/operating-procedure.md",
+      "sha256": "6f897a85441c96130ad58fa971781f6c6a6e85ddff5501d94f2d8334eac245db",
+      "purpose": "Numbered desk-review steps with one deliberately ambiguous temperature mention."
+    },
+    {
+      "path": "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/troubleshooting.md",
+      "sha256": "2707f2dacfafe5583e5b483e9d0de310e7a7b4ec7dc85c1a714e2f5fda9fa7ed",
+      "purpose": "General review guidance, an intentional conflicting normal limit and an unverified instrument claim."
+    }
+  ],
+  "intentional_conflicts": [
+    {
+      "conflict_id": "normal-reactor-temperature-upper-limit",
+      "documents": [
+        "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/tags-and-limits.md",
+        "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/troubleshooting.md"
+      ],
+      "description": "The same normal upper reactor process-temperature limit is 150 degC in the tag table (public Table 6) and deliberately 145 degC in the troubleshooting note. The latter is an intentional authored discrepancy, not a changed operating or shutdown specification; preserve it for explicit review."
+    }
+  ]
+}
