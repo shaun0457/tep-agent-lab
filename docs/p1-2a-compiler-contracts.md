@@ -137,7 +137,10 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   as `REMAP_UNCHANGED` when publishing.
 - **Workspace anchor**: candidate appends form a second hash chain (ordered
   candidate refs). `CompilerWorkspace.anchor()` returns the `WorkspaceAnchor` that
-  pins both chains and the workspace id.
+  pins both chains and the workspace id. The staged candidate log contains full
+  immutable records in append order. Verification rebuilds their content keys and
+  versions (including session ids) before checking the anchored ref chain, so partner
+  sessions and append order cannot be asserted or filtered by the publisher.
 - **Workspace visibility**: a workspace is bound to one visibility. Sessions,
   candidates and reviews more restrictive than the workspace are refused, so hidden
   activity can never move the log tail or change the checksum of a less restrictive
@@ -145,13 +148,21 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
 - **Staging** (`stage_publication`): the workspace `threading.RLock` is held from
   reading the tail to the end of self-verification. Resolvers run under it and must
   not modify the workspace: the lock is re-entrant, so a misbehaving resolver cannot
-  deadlock, and staging raises `PublicationError` if the review or candidate log
-  moved. The position is always the tail. Staging
-  re-attests every session source and R0. Every approved candidate's `DerivedInput`s
-  must resolve through `derived_input_resolver` to their exact bytes, otherwise
-  staging fails. A cited conflict partner whose inputs do not resolve excludes its
-  citers as `DEPENDENCY_INVALID`, and an excluded candidate that nothing cites needs
-  no resolvable inputs. Candidate-local failures become `Exclusion`s.
+  deadlock. Immediately after the first `_stage_bundle`, before self-verification,
+  the mutation guard compares log lengths and the workspace anchor and raises its
+  own `PublicationError` if either moved. It checks again after verification, so a
+  resolver cannot mutate the workspace on its verification call either.
+  Append-only logs cannot be rolled back:
+  the guard detects a mutation but does not undo it. The position is always the tail.
+  Staging re-attests every session source and R0. Every approved candidate's
+  `DerivedInput`s must resolve through `derived_input_resolver` to their exact bytes.
+  Every canonical conflict partner must pass exact source, fragment,
+  influencing-source and derived-input integrity, regardless of selection or review
+  decision. Any such integrity failure aborts the revision. Any exception from
+  `derived_input_resolver` or `parent_resolver` becomes `PublicationError`, never an
+  exclusion. An excluded candidate that nothing cites needs no resolvable inputs.
+  Candidate-local failures become `Exclusion`s. This implementation follows
+  context-compiler-v0 §Publication atomicity; the accepted spec is unchanged.
   Revision-level failures raise `PublicationError` and produce no bundle: an unknown
   candidate, a changed source, an unresolved derived input, a duplicate RuleRef
   across candidates, an invalid R1 or a hidden-tainted selection. A failure also
@@ -162,8 +173,9 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   Every list is sorted by `CandidateRef`, so the selection order never changes the
   bytes. `StagedPublication` is self-consistent by construction. It checks paths
   under the publication roots and that every referenced artifact is present with a
-  matching checksum. It parses the revision strictly; lineage, review-log ref and
-  position, candidates ref, rule-set ref, expected head (from `parent_revision`) and
+  matching checksum. Every malformed-input path, including invalid lineage, refs,
+  file pairs or paths, raises `PublicationError`. It parses the revision strictly;
+  lineage, review-log ref and position, candidates ref, rule-set ref, expected head (from `parent_revision`) and
   exclusions must agree with it, and `document` is derived from those bytes. The head
   record is built from the revision ref and kept out of the files. Dependency
   verification (the shared closure plus item re-validation) is `verify_publication`.
@@ -181,26 +193,35 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   inputs: the session, the request, the review records, the candidate log, and the
   considered and dependency candidates. `stage_publication` calls it with
   workspace state. Inside it runs:
+  - `_dependency_refs`: compute the canonical partner refs from the anchored full
+    candidate log and the current session. If any selected version of a cited id
+    disagrees with its canonical partner, raise `PublicationError` with
+    `ambiguous partner selection`. Dependencies must exactly equal the unselected
+    canonical partner refs;
   - `_dependency_closure`: re-attest every session source; re-load R0 and its lineage
     from exact bytes, visible at the revision's visibility; resolve the parent; check
-    the effective visibility of every review record and every stored candidate;
-    check the exact source integrity (sources, fragments, influencing sources, derived
-    inputs) of every cited conflict partner, whether selected or a stored dependency
-    and whatever its own decision; and limit the known ids to stored candidates;
-  - `_decide` for every considered candidate. A candidate whose conflict partner fails
-    integrity is excluded as `DEPENDENCY_INVALID`, a candidate-level fail-closed: the
-    revision does not abort;
-  - derived-input resolution for the approved candidates (an unresolved input still
-    fails the whole publication). An excluded candidate that no considered candidate
-    cites needs no resolvable inputs; a cited partner was already checked by the
-    closure;
+    every review and carried candidate's visibility; check canonical partners' exact
+    integrity regardless of their own decisions. Integrity failures abort the whole
+    revision. The closure reuses the canonical partners from `_dependency_refs`
+    without repeating the partner-selection rule;
+  - `_decide` for every considered candidate. A cited id without a current-session
+    partner remains unknown, so the citing candidate receives the existing
+    `CONFLICT_UNRESOLVED` validation reason, exactly as for a ghost partner;
+  - derived-input resolution for approved candidates, skipping canonical partners
+    whose successful integrity results are cached for this `_stage_bundle` call.
+    An uncited excluded candidate needs none. Independent verification gets a fresh
+    cache and resolves again;
   - `_build_bundle`.
 
-  A conflict dependency is, for each candidate id that a selected candidate names in
-  `conflicting_candidate_ids` and that is not itself selected, the latest version of
-  that id in the anchored candidate log. Older versions, for example from an earlier
-  session, are not pulled in. Dependencies are stored as exact records but not
-  approved.
+  For each cited candidate id, the canonical partner is its latest version in anchored
+  candidate-log append order whose session equals the current publication session.
+  This is a pure function of the anchor and current session, independent of the
+  selection and all other sessions. An old-session version is never pulled in or
+  allowed to abort publication merely as a partner. A missing current-session partner
+  stays unresolved even if an old-session version is selected. A current-session
+  canonical partner with broken integrity aborts whether selected or not.
+  Unselected canonical partners are stored as exact dependency records and are not
+  implicitly approved.
 - **`verify_publication(files, revision, session, *, anchor, derived_input_resolver,
   parent_resolver)`**:
   - Trusted inputs: the compile session over the revision's dependencies (its id must
@@ -231,7 +252,7 @@ every hash and expects rejection. It skips only the fields marked C.
 | revision | `lineage_id` | C | publisher input. Constructor constraints are re-run, every artifact path and the head path derive from it, and the parent must be in the same lineage. Renaming it consistently re-stages a revision with identical approved content, so it grants no trust or visibility. Which lineage head it advances is the P1.2D head CAS |
 | revision | `parent_revision` | B | resolved through the trusted parent resolver: exact checksum, strict schema, same lineage, visibility (the head CAS in P1.2D decides which parent is current) |
 | revision | `considered_candidate_refs` | B (membership) / C (subset) | each ref must be in the anchored candidate log (B). Which anchored candidates to consider is the publisher's selection (spec: publication selects candidate versions); every subset re-stages to a fully validated revision, so it cannot add unreviewed, unvalidated or hidden content (C) |
-| revision | `dependency_candidate_refs` | A | recomputed from the anchored candidate log (exact conflict partners) |
+| revision | `dependency_candidate_refs` | A | recomputed by `_dependency_refs` from the anchored full candidate log: latest append per cited id in the current session, minus selected canonical refs; noncanonical partner selections abort |
 | revision | `extraction_methods`, `grounding_methods`, `approved_bindings`, `approved_knowledge`, `rule_scope_bindings`, `review_ids`, `conflicts`, `exclusions` | A | re-staged: `_decide` on anchored reviews and rebuilt candidates, `validate_candidate` against the exact dependencies |
 | revision | `published_rule_set`, `pinned_rule_refs` | A | R1 re-derived from the re-loaded R0 and the approved rules |
 | revision | `candidates` (path, checksum), `review_log.path`, `review_log.content_checksum` | A | re-staged artifact refs |
@@ -240,11 +261,11 @@ every hash and expects rejection. It skips only the fields marked C.
 | revision | `provenance.published_by`, `provenance.published_at` | C | publisher-asserted audit metadata. Constructor constraints are re-run (nonempty, strict UTC); no decision, trust or visibility depends on them; P1.2D binds them to the commit author and time |
 | revision | `revision_id` | A | recomputed digest |
 | review log | `schema_version` | A | constant |
-| review log | `workspace_id`, `review_log_position`, `tail_hash`, `candidate_count`, `candidate_tail_hash`, `candidate_log` | B | the candidate-log hash chain and counts must equal the anchor |
+| review log | `workspace_id`, `review_log_position`, `tail_hash`, `candidate_count`, `candidate_tail_hash`, `candidate_log` | B | full candidate records rebuild exactly, binding session ids into their versions; the ordered candidate-ref hash chain and counts must equal the anchor |
 | review log | `records[*]` (every field, including `previous_hash`) | B | contiguous hash chain whose tail hash equals the anchor; each record is then used as staging input |
 | candidates | `schema_version` | A | constant |
-| candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed). Membership comes from the anchored candidate log; approved items are re-validated against the exact sources and the plant index; exclusions are re-decided. Fragments of an excluded candidate that no considered candidate cites are not attested, which is safe because it contributes nothing to the approved set and no decision depends on it. Exception: a cited partner, selected or not and whatever its own decision (REJECTED, STALE_SESSION and so on), always has its exact sources, fragments, influencing sources and derived inputs checked by `_partner_intact`; a failure excludes its citers as `DEPENDENCY_INVALID` |
-| candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log (latest version per referenced, unselected id). Every cited partner, the selected version when selected and otherwise this dependency, has its sources, fragments, influencing sources and derived inputs attested regardless of its own decision. A failing partner excludes its citers (`DEPENDENCY_INVALID`), so a claim's outcome does not depend on whether its partner is selected |
+| candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed); membership comes from the anchored candidate log. Approved items re-validate against exact sources and the plant index; exclusions re-decide. An uncited excluded candidate contributes no approved content and needs no source attestation. A selected canonical partner always passes exact source, fragment, influencing-source and derived-input integrity, regardless of its decision; failure aborts the revision. Selecting a noncanonical version of a cited id raises `ambiguous partner selection` when a current-session canonical version exists |
+| candidates | `dependencies[*]` (every field) | A + B | rebuilt exactly and bound to anchored candidate versions. The exact set is recomputed by `_dependency_refs`: latest append per cited id in the current session, excluding selected canonical refs. Other sessions never choose a partner. Every canonical partner has exact sources, fragments, influencing sources and derived inputs attested, regardless of selection or decision; failure raises revision-level `PublicationError`. No current-session version means `CONFLICT_UNRESOLVED` for the citing candidate, with no dependency pulled in. Thus a claim's outcome never depends on selection |
 | bundle | set of file paths | A | must equal the re-staged set exactly |
 | all records | text fields used in identity hashes | A | hashed as exact canonical bytes; an NFC/NFD variant changes the hash and fails the anchor and the byte comparison |
 | R1 | every field | A | re-derived from R0 and the approved rules, byte-exact; visibility no more restricted than the revision |
@@ -283,7 +304,7 @@ review findings they cover.
 | 14 | partial: contract level; end-to-end demo in P1.2D |
 | 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
 | 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
-| 21 | partial. The same `_stage_bundle` fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input on an approved candidate, an unresolvable, foreign or hidden parent, a fabricated conflict dependency, and extra or missing bundle files. A conflict partner that fails integrity (for example a fragment outside the inventory, an older session's sources, or an unresolvable derived input) excludes only the claims that cite it, as `DEPENDENCY_INVALID`. This holds whether or not the partner is selected and whatever its own decision (selection-invariance tests cover STALE_SESSION, REJECTED-but-intact and outside-inventory partners). Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
+| 21 | partial. Staging and verification share `_stage_bundle` and follow §Publication atomicity. Changed session sources or R0, corrupted current-session partner sources/fragments/influencing sources/derived inputs, resolver exceptions, bad parents, fabricated dependencies and extra/missing bundle files abort the whole revision. Canonical partners are latest appends in the current session; selections containing another version raise `ambiguous partner selection`. A later-session version cannot change an earlier-session claim. Without a current-session partner, the citer is excluded with `CONFLICT_UNRESOLVED`, as for a ghost; old-session versions are not pulled in. Tests cover both selected and unselected partners, transient resolver failure, the pre-verification mutation guard and every malformed staged metadata path. Ancestor rule sets are attested by checksum only; commit atomicity and crash safety remain P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
@@ -303,8 +324,17 @@ The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.
 - The location kinds are BYTE_RANGE and JSON_POINTER. Semantic locators (section,
   table rows, procedure steps) arrive with the P1.2B parser policy.
 - Derived-input resolvers are caller-supplied until P1.2C defines model-call records.
+  Resolvers must be deterministic and must not mutate the workspace. The staging
+  guard detects append-only mutations before and after verification and cannot undo them.
+  Partner integrity is cached only within each `_stage_bundle` call: an approved
+  partner resolves once in staging and once in independent verification, not four
+  times. There is no cache across publications or verification calls.
+- The full anchored candidate log is carried in each staged review-log artifact to
+  verify current-session partner selection independently. Its size grows with the
+  workspace history; compact authenticated session metadata is a future optimization.
 - Source content is re-read and re-attested on each validation call (`_dependency_closure`
-  and `_decide` do not share a per-call cache). This is fine for the small P1.2 corpus;
+  and `_decide` do not share a source-content cache; only partner integrity results
+  are cached per `_stage_bundle` call). This is fine for the small P1.2 corpus;
   a shared per-call content cache is a follow-up if corpus size makes it matter.
 - Small validation helpers (`_ID`, `_SHA256`, `_exact_keys`-style checks) are
   duplicated across `canonical_context`, `rule_sets` and `context_compiler`;

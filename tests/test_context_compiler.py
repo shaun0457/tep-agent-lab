@@ -37,7 +37,7 @@ from tep_agent_lab.context_compiler import (
     WorkspaceAppendError, effective_review, head_path, validate_candidate,
     verify_publication,
 )
-from tep_agent_lab.persistence import canonical_json
+from tep_agent_lab.persistence import canonical_json, content_checksum as json_digest
 from tep_agent_lab.playground import (LAB_REPOSITORY, TEP_SIM_REPOSITORY,
                                       load_dependency_pins, pinned_tep_sim_sources)
 from tep_agent_lab.rule_sets import (RULE_SET_KIND, RULE_SET_SCHEMA_VERSION, RuleSetError,
@@ -211,7 +211,7 @@ def reseal(files: dict, document: dict, log: dict | None = None) -> ArtifactPath
                                   "path": path,
                                   "content_checksum": hashlib.sha256(data).hexdigest()}
     document.pop("revision_id", None)
-    document["revision_id"] = "ecr-" + context_compiler._digest(document)
+    document["revision_id"] = "ecr-" + json_digest(document)
     data = canonical_json(document)
     ref = ArtifactPathRef.of(f"{root_of(document)}/revisions/"
                              f"{document['revision_id']}.json", data)
@@ -1286,10 +1286,10 @@ class RoundFourTests(CompilerTestCase):
         self.add(ghost)
         claim = self.add(self.c.knowledge("claim", conflicting_candidate_ids=("ghost",)))
         self.review(claim)
-        staged = self.stage([claim])  # the claim fails closed; the revision does not abort
-        self.assertEqual([(claim, ExclusionReason.DEPENDENCY_INVALID, "ghost")],
-                         [(item.candidate_ref, item.reason, item.detail)
-                          for item in staged.exclusions])
+        for selection in ([claim], [claim, ghost.ref]):
+            with self.subTest(selection=len(selection)):
+                with self.assertRaises(PublicationError):
+                    self.stage(selection)
 
     def test_r4_4_metadata_forgeries_fail(self) -> None:
         refs = PublicationTests.vertical_slice(self)
@@ -1456,6 +1456,10 @@ class TamperEveryFieldTests(CompilerTestCase):
         log = self.artifact(self.staged.review_log)
         paths = [(key,) for key in log] + [("records", 0, key) for key in log["records"][0]]
         paths += [("records", -1, key) for key in log["records"][-1]]
+        paths += [("candidate_log", 0, key) for key in log["candidate_log"][0]]
+        paths += [("candidate_log", 0, section, key)
+                  for section in ("content", "provenance", "version_extra")
+                  for key in log["candidate_log"][0][section]]
         for path in paths:
             mutated = json.loads(json.dumps(log))
             node = mutated
@@ -1562,8 +1566,10 @@ class CodeReviewTests(CompilerTestCase):
         self.add(x, session=s2)
         self.review(x.ref)
         staged = self.stage([x.ref], session=s2)  # must not abort the whole revision
-        self.assertEqual([(x.ref, ExclusionReason.DEPENDENCY_INVALID)],
-                         [(item.candidate_ref, item.reason) for item in staged.exclusions])
+        self.assertEqual([(x.ref, ExclusionReason.VALIDATION_FAILED, "CONFLICT_UNRESOLVED")],
+                         [(item.candidate_ref, item.reason, item.detail)
+                          for item in staged.exclusions])
+        self.assertEqual([], committed(staged)["dependency_candidate_refs"])
         y2 = self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor", session=s2)
         y2 = replace(y2, mention_fragment=self.c.fragment(2, ref=sop_b))
         self.add(y2, session=s2)  # the latest y now attests under S2
@@ -1614,10 +1620,15 @@ class CodeReviewTests(CompilerTestCase):
         self.review(ref, review_id="r1")
         workspace = self.workspace
 
+        calls = 0
+
         def reentrant(item):
-            workspace.append_review(ref, ReviewDecision.REJECT, review_id="r2",
-                                    principal=HUMAN, reason="re-entry", reviewed_at=STAMP,
-                                    supersedes=("r1",))
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                workspace.append_review(ref, ReviewDecision.REJECT, review_id="guard-review",
+                                        principal=HUMAN, reason="re-entry", reviewed_at=STAMP,
+                                        supersedes=("r1",))
             return MODEL_CALL
 
         done = threading.Event()
@@ -1635,6 +1646,10 @@ class CodeReviewTests(CompilerTestCase):
         thread.start()
         self.assertTrue(done.wait(10), "staging deadlocked on a re-entrant resolver")
         self.assertIsInstance(outcome.get("error"), PublicationError)
+        self.assertIn("the workspace changed during staging; a resolver must not modify it",
+                      str(outcome["error"]))
+        self.assertEqual(1, calls)  # the guard must run before verification
+        self.assertEqual(2, workspace.review_log_tail)  # append-only: no rollback
 
     def test_cr7_malformed_revision_raises_publication_error(self) -> None:
         ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
@@ -1689,9 +1704,9 @@ class SelectionInvarianceTests(CompilerTestCase):
         return y.ref
 
     def test_r6_partner_integrity_is_selection_invariant(self) -> None:
-        expected = {"stale_session": (ExclusionReason.DEPENDENCY_INVALID, "y"),
-                    "rejected_intact": "APPROVED",
-                    "outside_inventory": (ExclusionReason.DEPENDENCY_INVALID, "y")}
+        expected = {"stale_session": (ExclusionReason.VALIDATION_FAILED,
+                                      "CONFLICT_UNRESOLVED"),
+                    "rejected_intact": "APPROVED"}
         for kind, want in expected.items():
             with self.subTest(partner=kind):
                 self.workspace = CompilerWorkspace(f"ws-{kind.replace('_', '-')}")
@@ -1713,7 +1728,7 @@ class SelectionInvarianceTests(CompilerTestCase):
         staged = self.stage([lone])
         self.assertEqual(ExclusionReason.REJECTED, staged.exclusions[0].reason)
 
-    def test_r6_referenced_partner_with_unresolvable_input_excludes_the_claim(self) -> None:
+    def test_r6_referenced_partner_with_unresolvable_input_aborts(self) -> None:
         phantom = model_input(ref="nonexistent:model-call")
         y = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
                                     provenance=self.c.provenance(derived_inputs=(phantom,))))
@@ -1722,9 +1737,174 @@ class SelectionInvarianceTests(CompilerTestCase):
         self.review(x)
         for selection in ([x], [x, y]):
             with self.subTest(selection=len(selection)):
-                staged = self.stage(selection, lineage=f"input-{len(selection)}")
-                self.assertEqual((ExclusionReason.DEPENDENCY_INVALID, "y"),
-                                 self.outcome(staged, x))
+                with self.assertRaises(PublicationError):
+                    self.stage(selection, lineage=f"input-{len(selection)}")
+
+
+class CoordinatorDecisionTests(CompilerTestCase):
+    """Binding D1-D9 regressions; each finding is reproduced before the fix."""
+
+    revision_b = CodeReviewTests.revision_b
+    claim_in = CodeReviewTests.claim_in
+    outcome = SelectionInvarianceTests.outcome
+
+    def test_f1_canonical_partner_rejects_older_selected_versions(self) -> None:
+        old = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        s2, sop = self.revision_b()
+        latest = replace(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                        session=s2), mention_fragment=self.c.fragment(2, ref=sop))
+        self.add(latest, session=s2)
+        x = self.claim_in(s2, sop)
+        self.add(x, session=s2)
+        self.review(x.ref)
+        for selection in ([x.ref], [x.ref, latest.ref]):
+            self.assertEqual("APPROVED", self.outcome(self.stage(selection, session=s2), x.ref))
+        for selection in ([x.ref, old], [x.ref, old, latest.ref]):
+            with self.subTest(selection=len(selection)):
+                with self.assertRaisesRegex(PublicationError, "ambiguous partner selection"):
+                    self.stage(selection, session=s2)
+
+    def test_f1_same_session_uses_append_order_not_selected_version(self) -> None:
+        old = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        latest = self.add(self.c.binding("y", 3, "temperature", TargetKind.ENTITY, "reactor"))
+        x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+        self.review(x)
+        for selection in ([x, old], [x, old, latest]):
+            with self.subTest(selection=len(selection)):
+                with self.assertRaisesRegex(PublicationError, "ambiguous partner selection"):
+                    self.stage(selection)
+        for selection in ([x], [x, latest]):
+            self.assertEqual("APPROVED", self.outcome(self.stage(selection), x))
+
+    def test_f2_transient_partner_resolver_failure_aborts(self) -> None:
+        y = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                    provenance=self.c.provenance(derived_inputs=(model_input(),))))
+        x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+        self.review(x)
+        for selection in ([x], [x, y]):
+            calls = 0
+
+            def transient(item):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise TimeoutError("temporary resolver failure")
+                return MODEL_CALL
+
+            with self.subTest(selection=len(selection)):
+                with self.assertRaisesRegex(PublicationError, "does not resolve"):
+                    self.workspace.stage_publication(self.session, self.request(selection),
+                                                     derived_input_resolver=transient)
+                self.assertEqual(1, calls)
+        self.assertEqual("APPROVED", self.outcome(self.stage([x]), x))
+
+    def test_f3_later_session_version_cannot_change_current_partner(self) -> None:
+        y = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+        self.review(x)
+        before = self.stage([x])
+        s2, sop = self.revision_b()
+        later = replace(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                       session=s2), mention_fragment=self.c.fragment(2, ref=sop))
+        self.add(later, session=s2)
+        for selection in ([x], [x, y]):
+            staged = self.stage(selection)
+            self.assertEqual("APPROVED", self.outcome(staged, x))
+            self.verify(dict(staged.files), staged.revision)
+        self.assertEqual("APPROVED", self.outcome(before, x))
+
+    def test_d3_missing_current_partner_matches_ghost(self) -> None:
+        old = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        s2, sop = self.revision_b()
+        x = self.claim_in(s2, sop)
+        self.add(x, session=s2)
+        self.review(x.ref)
+        for selection in ([x.ref], [x.ref, old]):
+            staged = self.stage(selection, session=s2)
+            self.assertEqual((ExclusionReason.VALIDATION_FAILED, "CONFLICT_UNRESOLVED"),
+                             self.outcome(staged, x.ref))
+            self.assertEqual([], committed(staged)["dependency_candidate_refs"])
+            self.verify(dict(staged.files), staged.revision, session=s2)
+
+    def test_f4_corrupted_partner_integrity_aborts_for_every_selection(self) -> None:
+        outside = source_ref("lab.unknown", "docs/unknown.sop", SOP, Visibility.AGENT)
+        good = self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor")
+        for kind, y in (
+                ("source", replace(good, mention_fragment=self.c.fragment(2, ref=outside))),
+                ("fragment", replace(good, mention_fragment=replace(
+                    good.mention_fragment, content_checksum="0" * 64))),
+                ("influence", replace(good, provenance=self.c.provenance(
+                    influencing_sources=(outside,)))),
+                ("derived", replace(good, provenance=self.c.provenance(
+                    derived_inputs=(model_input(data=b"different"),))))):
+            with self.subTest(kind=kind):
+                self.workspace = CompilerWorkspace(f"ws-{kind}")
+                self.add(y)
+                self.review(y.ref, ReviewDecision.REJECT)
+                x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+                self.review(x)
+                for selection in ([x], [x, y.ref]):
+                    with self.assertRaises(PublicationError):
+                        self.stage(selection)
+
+    def test_d5_parent_resolver_exception_aborts(self) -> None:
+        ref = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref)
+        staged = self.stage([ref])
+        parent = RoundTwoStagingTests.parent_ref(self, staged)
+        with self.assertRaisesRegex(PublicationError, "parent revision cannot be resolved"):
+            self.workspace.stage_publication(self.session, self.request([ref], parent=parent),
+                                             parent_resolver=mock.Mock(side_effect=TimeoutError))
+
+    def test_d6_mutation_during_verification_also_aborts(self) -> None:
+        ref = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                      provenance=self.c.provenance(derived_inputs=(model_input(),))))
+        self.review(ref, review_id="initial-review")
+        calls = 0
+
+        def reentrant(item):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.review(ref, ReviewDecision.REJECT, review_id="verification-review",
+                            supersedes=("initial-review",))
+            return MODEL_CALL
+
+        with self.assertRaisesRegex(PublicationError, "the workspace changed during staging"):
+            self.workspace.stage_publication(self.session, self.request([ref]),
+                                             derived_input_resolver=reentrant)
+        self.assertEqual(2, calls)
+        self.assertEqual(2, self.workspace.review_log_tail)
+
+    def test_f6_all_malformed_staged_metadata_raises_publication_error(self) -> None:
+        ref = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref)
+        staged = self.stage([ref])
+        for changes in ({"revision": None}, {"expected_head": object()},
+                        {"files": (None,)}, {"files": (("one",),)},
+                        {"files": ((123, b"{}"),)}, {"files": (([], b"{}"),)}, {"lineage_id": "../invalid"}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(PublicationError):
+                    replace(staged, **changes)
+
+    def test_f7_approved_partner_integrity_is_cached_per_stage(self) -> None:
+        y = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                    provenance=self.c.provenance(derived_inputs=(model_input(),))))
+        self.review(y)
+        x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+        self.review(x)
+        counted = mock.Mock(side_effect=resolver)
+        self.workspace.stage_publication(self.session, self.request([x, y]),
+                                         derived_input_resolver=counted)
+        self.assertEqual(2, counted.call_count)  # once staging, once independent verification
+
+    def test_f8_dependency_closure_does_not_repeat_partner_selection(self) -> None:
+        source = inspect.getsource(context_compiler._dependency_closure)
+        self.assertNotIn("selected_ids", source)
+        self.assertNotIn("dependency_ids", source)
+
+    def test_f9_identity_hashes_use_json_digest_directly(self) -> None:
+        self.assertFalse(hasattr(context_compiler, "_digest"))
 
 
 class BoundaryTests(unittest.TestCase):
