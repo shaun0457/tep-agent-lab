@@ -5,7 +5,7 @@
 - Scope: product positioning (what the product is and who consumes it); a three-layer
   target profile (domain-neutral context core, domain packs, workflows) and its mapping
   onto existing milestones; the research-track redirect of D1 and D2; MVP exit-criteria
-  wording; live plant mode as an MVP-required, unscheduled item; post-MVP candidates
+  wording; live plant mode as an MVP-required P1.4 item; post-MVP candidates
 - Constrains: the future P1.3, P1.4 and P1.5 owning specs (Decisions 1 and 2); the
   future D1 owning spec (Decision 3)
 - Amends (wording and clarification only): `docs/product-maturity-and-mvp.md`
@@ -288,6 +288,17 @@ own ADR that amends them explicitly.
    provider serves the MVP real-model step and every D1 arm, frozen per study. Provider
    comparison stays OQ-12 and is not part of B5.
 
+**Owner decision — 2026-10-11 (scheduling only).** The research track (D0.2C and D1)
+is paused to focus on the context layer's two halves: "what the plant is" (P1.2 Context
+Compiler, P1.3 canonical plant context) and "what is happening in the plant" (P1.1C
+canonical telemetry, P1.4 Operational State and live plant mode). Decision 3, the D0
+freeze criteria, C0 as the mandatory baseline and ADR-004 Decision 7 are unchanged;
+on resumption, D0 still blocks D1 runs and any capability claim. No capability claim
+is made meanwhile. Runtime B5, the investigation Agent's first real provider, is
+deferred until the context layer is in place; it remains required for the MVP exit
+criterion's real-model investigation. D1 design and baseline-rule questions remain
+open, deferred with the track (OQ-16).
+
 ## What is not changed
 
 - Every accepted spec, including evaluation-v0 (capability and orchestration axes,
@@ -314,15 +325,15 @@ The Level-1 MVP stays on the process pack through TEP, because the existing asse
 choose a second domain. The Level-2 requirement "at least one non-TEP source/domain"
 and P1.7 are unchanged; which domain fills them is an open question for the owner.
 
-### Live plant mode is MVP-required (unscheduled)
+### Live plant mode is MVP-required
 
 MVP capability C requires telemetry "delivered continuously through the canonical
 telemetry path", and exit criterion 4 requires live telemetry to enter through the
 canonical SignalSample/store/reader contracts. ADR-004 Decision 2 scopes P1.1C as P0 run
 ingestion of reference-world records into a run-scoped store, with snapshot-bound reads.
 No accepted spec yet requires a plant that keeps running and streaming after READY, so
-this part of capability C has no owner. This is not a new requirement; it gives an
-existing one a name.
+this part of capability C needs the P1.4 owning spec assigned below. This is not a new
+requirement; it gives an existing one a name.
 
 **Live plant mode** is MVP-required. The only required item is the one capability C
 already states: TEP runs as a long-lived simulated plant and its live data enters the
@@ -337,10 +348,12 @@ If it does, injection is harness authority, never an Agent tool, and its identit
 timing stay EVALUATOR-only (hard rules 1, 9 and 11; ADR-001). Neither the MVP exit
 criteria nor this ADR prescribe how or when an incident is produced.
 
-Scheduling. This ADR assigns no milestone number. Live plant mode must be scheduled into
-an owning spec. Whether it belongs to P1.4 or to a new P1.x is decided by the owner under
-the ADR-004 rules (Decision 1: milestone numbers never own semantics; Decision 2: the
-sequence table).
+Scheduling. Owner decision — 2026-10-11: live plant mode belongs to P1.4, split into
+P1.4A (serving + Operational State) and P1.4B (live plant mode: TEP as a long-lived
+simulated plant streaming continuously through TEPSimulationSource into the canonical
+telemetry store). This follows ADR-004 Decision 1 (milestone numbers never own semantics)
+and Decision 2 (the sequence table). The constraints below are unchanged and now bind
+the P1.4 owning spec, which remains to be written.
 
 Constraints the owning spec must keep:
 
@@ -360,8 +373,9 @@ Constraints the owning spec must keep:
 ### MVP exit-criteria wording
 
 The exit criteria keep their substance. Their wording now centres on "the context layer
-makes the investigation possible and traceable". Exact changes in
-`docs/product-maturity-and-mvp.md`:
+makes the investigation possible and traceable". Original wording changes on 2026-10-10 in
+`docs/product-maturity-and-mvp.md` (the live plant mode scheduling decision above now
+resolves the owner question):
 
 | Location | Before | After |
 |---|---|---|
@@ -386,7 +400,7 @@ rather than just before each milestone starts. This changes no implementation or
 ADR-004 Decision 2 still sequences the milestones. Each spec states how it meets the
 Decision 1 constraints and keeps domain vocabulary in the process pack (Decision 2). The
 P1.3 spec does not adopt an ISA-95-style hierarchy anchor (a post-MVP candidate) and only
-avoids foreclosing it. The P1.4 spec
+avoids foreclosing it. The P1.4 spec covers P1.4A and P1.4B and
 should show the same serving contract feeding both an application read and the Agent
 read assembly.
 
@@ -415,7 +429,8 @@ HAZOP, MOC and DEXPI are process-pack candidates, not core features.
 
 Owner priority: this is a portfolio project, so Level-1 MVP scope wins. Every candidate
 above stays unscheduled and post-MVP, and no product-track work beyond the MVP is
-scheduled now. The research track keeps its own schedule (ADR-004 Decision 7).
+scheduled now. The research track keeps its own schedule (ADR-004 Decision 7), paused
+by the owner decision of 2026-10-11.
 
 ### TEP limitation and honest claims
 
@@ -443,8 +458,8 @@ the demo. Consequences for claims:
   strictest consumer and other consumers possible without redesign.
 - Domain-specific features (process or discrete) have a defined home, so neither domain's
   vocabulary leaks into the product identity.
-- The research track now produces product evidence (measured context value) instead of
-  a ranking of Agent configurations.
+- When resumed, the research track produces product evidence (measured context value)
+  instead of a ranking of Agent configurations.
 - Parking D2 and B4 reduces near-term research work and resource contention; the
   Level-1 critical path is unchanged (ADR-004 Decision 2 never included them).
 
@@ -465,12 +480,13 @@ the demo. Consequences for claims:
   - an adjacent batch or process domain: lower risk and more reuse of the process pack, but
     a weaker generality proof.
   The choice is not needed for Level 1.
-- **Live plant mode owner**: P1.4 or a new P1.x, decided under the ADR-004 rules.
-- **D1 design** (OQ-16): the default full ladder with every step classified
-  (recommended), or the SPEC_CONFLICT alternative of a C3-based context-only arm, which
+- **Live plant mode owner — resolved (2026-10-11)**: P1.4, split into P1.4A
+  (serving + Operational State) and P1.4B (live plant mode), under the ADR-004 rules.
+- **D1 design** (OQ-16; open, deferred with the research track): the default full ladder
+  with every step classified (recommended), or the SPEC_CONFLICT alternative of a C3-based context-only arm, which
   needs amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0.
-- **Baseline rule** (OQ-16): whether "a capability claim needs clean C1–C5 baselines
-  first" applies to context-value contrasts.
+- **Baseline rule** (OQ-16; open, deferred with the research track): whether "a capability
+  claim needs clean C1–C5 baselines first" applies to context-value contrasts.
 
 ## Governance follow-ups (not done here)
 

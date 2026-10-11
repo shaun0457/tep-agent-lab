@@ -105,6 +105,8 @@ Only add 3D if a concrete spatial-reasoning question appears.
 
 ## OQ-15 — D0.2C pilot viability and identifiability
 
+Status: open, deferred with the research track (owner decision 2026-10-11).
+
 Owning spec: `docs/specs/benchmark-comparative-pilot-v0.md`.
 
 Open empirical checks, answered only by D0.2C1–C3 evidence:
@@ -114,6 +116,9 @@ Open empirical checks, answered only by D0.2C1–C3 evidence:
 - the benchmark size needed for statistical inference, set from pilot within-class and between-class variation.
 
 ## OQ-16 — D1 context-value arm set
+
+Status: open, deferred with the research track (owner decision 2026-10-11), including
+the D1 design and baseline-rule questions below.
 
 Owning decision: [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect), which defines the default D1 design and classifies every capability-ladder step. Owning spec: the D1 spec, to be written.
 
