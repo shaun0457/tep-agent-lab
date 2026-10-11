@@ -1,6 +1,6 @@
-# P1.2B S1–S2 — Engineering corpus and deterministic fragments
+# P1.2B S1–S3 — Engineering corpus and deterministic fragments
 
-Status: S1 registration and S2 section/paragraph fragmentation implemented. Owning semantics:
+Status: S1 registration, S2 section/paragraph and S3 table/step fragmentation implemented. Owning semantics:
 [Context Compiler v0](specs/context-compiler-v0.md) sections Exact source input,
 SourceFragmentRef, Benchmark use, Model/provider boundary and Initial P1.2 vertical
 slice; existing contracts are described in [P1.2A](p1-2a-compiler-contracts.md).
@@ -192,9 +192,119 @@ S3 owns table-row and procedure-step fragments; S4 owns typed extraction. Those
 blocks remain exact content inside their SECTION fragments but get no specialized
 fragments here. S2 adds no candidates, model calls, Agent tools, reviews or publication.
 
+## S3 — Table rows and procedure steps
+
+Owning contracts remain context-compiler-v0 sections SourceFragmentRef, Exact source
+input, Candidate identity and immutability, and Incremental compilation.
+
+```text
+[exact registered ref + source bytes] -- explicit parser policy --> [sections / paragraphs / tables / rows / steps]
+[row SourceFragmentRef + exact source bytes] -- reparse + checksum verification --> [derived header-keyed cells]
+[exact fragments + derived cells] -- future S4 extraction policy --> [typed candidates]
+```
+
+### Versioned grammar
+
+`markdown.sections-paragraphs-tables-steps@1` adds `TABLE`, `TABLE_ROW` and
+`PROCEDURE_STEP`. Call `fragment_markdown(ref, bytes, policy=TABLES_STEPS_POLICY)`
+to select it. The Python API's default remains `markdown.sections-paragraphs@1`;
+that policy's records, ids, output and `tests/markdown_fragments_golden.json` are
+unchanged. Both policies preserve LF UTF-8 bytes, heading rules, innermost section
+ownership, preamble exclusion and conservative blank-line block boundaries from S2.
+
+- A supported pipe table is one contiguous nonblank block: a header, a delimiter
+  line and zero or more data rows. Outer pipes are optional. Every line must contain
+  an unescaped pipe, and every row must have the header's cell count. Delimiter cells
+  have at least three hyphens with optional leading/trailing alignment colons.
+  Header names must be nonempty and distinct after trimming spaces/tabs.
+- Cell parsing trims spaces/tabs and unescapes `\|` and `\\` for the derived view
+  only. Code-span/backtick table syntax is conservatively unsupported. It does not
+  render Markdown or infer types, units or meaning.
+- `TABLE` spans the header through the last data row (or delimiter for an empty
+  table). Each `TABLE_ROW` spans exactly its data line, including the final LF when
+  present. Header/delimiter lines are never row fragments. Output is TABLE then its
+  rows, in source order.
+- A supported ordered list is one contiguous nonblank block with one-to-nine-digit
+  markers ending in `.` or `)`, zero to three initial spaces, and whitespace or EOL
+  after the marker. Items share the initial indentation and marker delimiter.
+  Each item becomes a `PROCEDURE_STEP`, including adjacent plain continuation lines
+  indented at least to that item's content column. The marker and all whitespace
+  remain in the exact bytes. Tabs in continuation indentation, nested lists and
+  structural continuation blocks are unsupported. Blank lines end the block/list;
+  detached continuation blocks stay unsupported, while subsequent numbered blocks
+  receive a new list index. There is no LIST fragment.
+- Unsupported blocks remain wholly unclassified: unordered lists, fenced/indented
+  code, HTML containers/comments, quotations, thematic breaks, Setext headings,
+  mixed prose/table/list blocks, malformed tables (including inconsistent cell
+  counts), and unsupported list continuations. No partial rows/steps or PARAGRAPH
+  fragments are salvaged from such a block. Enclosing SECTION bytes still retain it.
+  Fences and HTML keep the S2 suppression of apparent headings and content.
+
+### Exact locators and derived cells
+
+MARKDOWN keeps the six S2 keys: `kind`, `start`, `end`, `pointer`, `section_path`,
+`paragraph_index`. SECTION/PARAGRAPH add no keys. TABLE/TABLE_ROW additionally require
+exactly `table_index` and `row_index`; PROCEDURE_STEP additionally requires exactly
+`list_index` and `step_index`. For the new kinds `paragraph_index` is null. All indices
+are positive non-boolean integers, except TABLE's null `row_index`. A row cannot exist
+without its table index, and a step requires both list and step indices. Mixed,
+missing or extra fields are rejected; semantic fields remain forbidden on BYTE_RANGE
+and JSON_POINTER, whose shapes and hashes are unchanged.
+
+Table/list indices count supported blocks per innermost section, starting at one.
+Row indices count data rows, and step indices count items in appearance order;
+the printed marker number is retained in source bytes rather than used as an index.
+Repeated `1.` markers therefore have distinct locators. Display examples are
+`section/path/table-1/row-2` and `section/path/list-1/step-3`; structured fields remain
+authoritative, since heading slugs can coincide with display suffixes.
+
+`SourceFragmentRef` checks policy/kind agreement. Verification reparses using its
+exact policy, matches the entire structured locator and byte range, and checks both
+whole-source and fragment checksums. Direct location extraction infers the new policy
+for table/step locators; shared section/paragraph locators default to S2, or accept an
+explicit `fragmentation_policy`. `_location_fits` keeps the same `sha256:bytes` plus
+`text/markdown` restriction for every MARKDOWN kind. Full exact source/location records
+still determine fragment identity; there is no offset fallback or newer-source lookup.
+
+`table_row_cells(fragment, exact_source_bytes)` first verifies the row's exact source
+and checksum, reparses its enclosing table to obtain header bytes, and parses the exact
+row bytes. It returns a fresh header-keyed string mapping. Cells are not persisted in
+fragment records and do not affect identity. S4 may consume these views with the exact
+row refs and parser policy as provenance; typed extraction, candidates, review and
+staging are outside S3.
+
+`diff_key` retains the S2 structured fields and adds only the applicable table/row or
+list/step indices. It still excludes source revision/checksum/provenance and offsets,
+and is non-identity. A length-changing row edit, preserving block structure, changes
+only that row's key plus its enclosing TABLE and SECTION keys (including ancestor
+sections). Every exact fragment id changes under a new exact source ref, even where
+later byte offsets move but content/diff keys remain unchanged. Table/list insertion,
+header edits or classification changes can affect more keys.
+
+### Evidence and demo
+
+`tests/test_markdown_tables_steps.py` was written and executed before implementation;
+it initially failed on the missing new policy/API. The independent strict identity,
+location and checksum golden at `tests/markdown_tables_steps_golden.json` anchors the two corpus documents:
+13 tag-table fragments (including one TABLE and four TABLE_ROWs), and 11 procedure
+fragments (including five PROCEDURE_STEPs). Tests verify determinism, round trips,
+exact extraction/checksums, row-edit isolation, continuation bytes, repeated markers,
+strict indices/records, forged locators, derived cells, unsupported blocks, unchanged
+S2 output, generic-code literals and subprocess demos.
+
+```console
+python -m tep_agent_lab.engineering_corpus rows tep-reactor-cooling.tags-and-limits
+python -m tep_agent_lab.engineering_corpus fragments tep-reactor-cooling.operating-procedure
+python -m tep_agent_lab.engineering_corpus fragments tep-reactor-cooling.tags-and-limits --policy markdown.sections-paragraphs@1
+```
+
+The fragments demo defaults to the new policy, while `--policy` preserves access to
+S2 output. The rows demo requires the new policy and prints each data row's locator,
+exact byte range, SHA-256 prefix and canonical-JSON cells. Registration and revision
+attestation retain the S1 limitations described above.
+
 ## Remaining slices
 
-- S3: table-row and numbered-procedure-step fragments; unsupported blocks stay unclassified.
 - S4: deterministic typed table extraction with fragment provenance and existing inert Rules.
 - S5: end-to-end test-principal review and reproducible non-canonical staged revision.
 

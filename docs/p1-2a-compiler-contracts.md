@@ -116,6 +116,11 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   other keys stay unchanged. It is never used in candidate hashing, review binding
   or publication. Legacy kinds keep their record shapes and hashes. Policy and
   identity details: [S2 note](p1-2b-engineering-corpus.md#s2--section-and-paragraph-fragmenter-parser-policy-v1).
+  S3 extends MARKDOWN with strictly paired table/row and list/step indices under
+  `markdown.sections-paragraphs-tables-steps@1`; shared section/paragraph shapes and
+  all S2/legacy hashes stay unchanged. Verification reparses the fragment's exact
+  policy. Header-keyed row cells are a non-identity derived view, not candidates.
+  Grammar and record keys: [S3 note](p1-2b-engineering-corpus.md#s3--table-rows-and-procedure-steps).
 - **Candidates**: the versioned routing (`ROUTING_POLICY`) sends ENTITY/SIGNAL
   mentions to `CandidateBinding`. OPERATING_LIMIT and CONTROL_RELATION become
   `CandidateKnowledge` carrying a `literature_candidate` Rule that stays

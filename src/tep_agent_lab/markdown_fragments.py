@@ -1,6 +1,6 @@
-"""Deterministic, byte-anchored Markdown sections and paragraphs (parser policy v1).
+"""Deterministic, byte-anchored Markdown under explicit versioned parser policies.
 
-This deliberately bounded grammar does not interpret tables, lists, code or HTML.
+The original sections/paragraphs policy is frozen; the opt-in policy adds tables/steps.
 Only LF UTF-8 input is accepted; no source text is normalized before slicing.
 """
 
@@ -17,6 +17,7 @@ from .context_compiler import CompilerError, FragmentLocation, LocationKind, Sou
 from .persistence import content_checksum as json_digest
 
 PARSER_POLICY = "markdown.sections-paragraphs@1"
+TABLES_STEPS_POLICY = "markdown.sections-paragraphs-tables-steps@1"
 
 _HEADING = re.compile(rb" {0,3}(#{1,6})(?:[ \t]+(.*)|$)")
 _FENCE = re.compile(rb" {0,3}(`{3,}|~{3,})(.*)$")
@@ -24,6 +25,8 @@ _LIST = re.compile(rb" {0,3}(?:[-+*]|[0-9]+[.)])(?:[ \t]+|$)")
 _THEMATIC = re.compile(rb" {0,3}([*_-])(?:[ \t]*\1){2,}[ \t]*$")
 _SETEXT = re.compile(rb" {0,3}(?:=+|-+)[ \t]*$")
 _HTML_TAG = re.compile(rb"<([A-Za-z][A-Za-z0-9-]*)(?:[ \t/>])")
+_ORDERED = re.compile(rb"( {0,3})([0-9]{1,9})([.)])(?:[ \t]+|$)")
+_DELIMITER_CELL = re.compile(r":?-{3,}:?")
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,8 @@ class _Line:
     text: bytes
     blocked: bool
     heading: tuple[int, str] | None
+    opaque: bool = False  # fence/HTML state; list blocking is distinct
+    nested_list: bool = False
 
 
 def _slug(title: str) -> str:
@@ -54,26 +59,33 @@ def _lines(content: bytes) -> tuple[_Line, ...]:
     fence: bytes | None = None
     html_end: bytes | None = None
     list_continuation = False
+    list_indent = 0
     for raw in content.splitlines(keepends=True):
         text = raw.removesuffix(b"\n")
         stripped = text.strip(b" \t")
         blocked = False
+        opaque = False
+        nested_list = False
         heading = None
         if fence is not None:
             blocked = True
+            opaque = True
             match = _FENCE.fullmatch(text)
             if (match and match[1][:1] == fence[:1] and len(match[1]) >= len(fence)
                     and not match[2].strip(b" \t")):
                 fence = None
         elif html_end is not None:
             blocked = True
+            opaque = True
             if html_end in stripped.lower():
                 html_end = None
         elif match := _FENCE.fullmatch(text):
             blocked = True
+            opaque = True
             fence = match[1]
         elif stripped.startswith(b"<"):
             blocked = True
+            opaque = True
             if stripped.startswith(b"<!--"):
                 ending = b"-->"
             elif stripped.startswith(b"<?"):
@@ -90,15 +102,18 @@ def _lines(content: bytes) -> tuple[_Line, ...]:
             if stripped:
                 if list_continuation and text.startswith((b" ", b"\t")):
                     blocked = True
+                    nested_list = len(text) - len(text.lstrip(b" ")) > list_indent
                 else:
                     list_continuation = bool(_LIST.match(text))
                     blocked = list_continuation
+                    if list_continuation:
+                        list_indent = len(text) - len(text.lstrip(b" "))
             if not blocked and (match := _HEADING.fullmatch(text)):
                 title = (match[2] or b"").strip(b" \t")
                 # Optional closing hashes require preceding whitespace.
                 title = re.sub(rb"(?:^|[ \t]+)#+[ \t]*$", b"", title)
                 heading = (len(match[1]), title.decode("utf-8"))
-        lines.append(_Line(offset, offset + len(raw), text, blocked, heading))
+        lines.append(_Line(offset, offset + len(raw), text, blocked, heading, opaque, nested_list))
         offset += len(raw)
     return tuple(lines)
 
@@ -112,7 +127,76 @@ def _unsupported(block: list[_Line]) -> bool:
                for line in block)
 
 
-def _locations(content: bytes) -> tuple[FragmentLocation, ...]:
+def _pipe_cells(text: bytes) -> tuple[str, ...] | None:
+    """Bounded pipe syntax: optional edges and escaped pipes; no code-span parsing."""
+    if b"|" not in text or b"`" in text or text.startswith((b"    ", b"\t")):
+        return None
+    value = text.strip(b" \t")
+    cells: list[bytearray] = [bytearray()]
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == 92 and index + 1 < len(value) and value[index + 1] in (92, 124):
+            cells[-1].append(value[index + 1])
+            index += 2
+            continue
+        if char == 124:
+            cells.append(bytearray())
+        else:
+            cells[-1].append(char)
+        index += 1
+    if len(cells) == 1:
+        return None
+    if value.startswith(b"|"):
+        cells.pop(0)
+    # An escaped final pipe is content, not an edge separator.
+    if value.endswith(b"|") and not cells[-1]:
+        cells.pop()
+    return tuple(bytes(cell).strip(b" \t").decode("utf-8") for cell in cells)
+
+
+def _table(block: list[_Line]) -> tuple[tuple[str, ...], ...] | None:
+    if len(block) < 2 or any(line.blocked for line in block):
+        return None
+    cells = tuple(_pipe_cells(line.text) for line in block)
+    header = cells[0]
+    if (not header or any(not name for name in header) or len(set(header)) != len(header)
+            or any(row is None or len(row) != len(header) for row in cells)
+            or any(not _DELIMITER_CELL.fullmatch(cell) for cell in cells[1] or ())):
+        return None
+    return cells  # all rows are checked before classifying any of the block
+
+
+def _steps(block: list[_Line]) -> tuple[tuple[_Line, ...], ...] | None:
+    """One contiguous ordered list; include adjacent plain indented continuations."""
+    if not block or block[0].nested_list or any(line.opaque for line in block):
+        return None
+    first = _ORDERED.match(block[0].text)
+    if first is None:
+        return None
+    indent, delimiter = first[1], first[3]
+    steps: list[list[_Line]] = []
+    content_column = 0
+    for line in block:
+        match = _ORDERED.match(line.text)
+        if match and match[1] == indent and match[3] == delimiter:
+            steps.append([line])
+            content_column = match.end()
+        else:
+            stripped = line.text.lstrip(b" \t")
+            leading = len(line.text) - len(stripped)
+            if (not steps or b"\t" in line.text[:leading] or leading < content_column
+                    or _LIST.match(stripped) or _FENCE.fullmatch(stripped)
+                    or stripped.startswith((b"<", b">", b"#")) or b"|" in stripped
+                    or _THEMATIC.fullmatch(stripped) or _SETEXT.fullmatch(stripped)):
+                return None
+            steps[-1].append(line)
+    return tuple(tuple(step) for step in steps)
+
+
+def _locations(content: bytes, policy: str = PARSER_POLICY) -> tuple[FragmentLocation, ...]:
+    if policy not in (PARSER_POLICY, TABLES_STEPS_POLICY):
+        raise CompilerError("unsupported Markdown parser policy")
     lines = _lines(content)
     # Each entry is (heading line index, level, semantic path, byte end).
     sections: list[tuple[int, int, tuple[str, ...], int]] = []
@@ -143,10 +227,26 @@ def _locations(content: bytes) -> tuple[FragmentLocation, ...]:
         stop = sections[position + 1][0] if position + 1 < len(sections) else len(lines)
         block: list[_Line] = []
         paragraph_index = 0
+        table_index = 0
+        list_index = 0
 
         def flush() -> None:
-            nonlocal paragraph_index
-            if block and not _unsupported(block):
+            nonlocal paragraph_index, table_index, list_index
+            if policy == TABLES_STEPS_POLICY and _table(block) is not None:
+                table_index += 1
+                result.append(FragmentLocation.markdown(block[0].start, block[-1].end,
+                                                        path, table_index=table_index))
+                for row_index, row in enumerate(block[2:], 1):
+                    result.append(FragmentLocation.markdown(row.start, row.end, path,
+                                                            table_index=table_index,
+                                                            row_index=row_index))
+            elif policy == TABLES_STEPS_POLICY and (steps := _steps(block)) is not None:
+                list_index += 1
+                for step_index, step in enumerate(steps, 1):
+                    result.append(FragmentLocation.markdown(step[0].start, step[-1].end,
+                                                            path, list_index=list_index,
+                                                            step_index=step_index))
+            elif block and not _unsupported(block):
                 paragraph_index += 1
                 result.append(FragmentLocation.markdown(block[0].start, block[-1].end,
                                                         path, paragraph_index))
@@ -161,18 +261,22 @@ def _locations(content: bytes) -> tuple[FragmentLocation, ...]:
     return tuple(result)
 
 
-def extract_location(content: bytes, location: FragmentLocation) -> bytes:
-    """Recompute policy-v1 semantics and require the exact recorded byte anchor.
+def extract_location(content: bytes, location: FragmentLocation, *, policy: str | None = None) -> bytes:
+    """Recompute versioned semantics and require the exact recorded byte anchor.
 
     No locator search against a newer source, normalized output or offset fallback.
     SourceFragmentRef.verify additionally checks the entire exact source checksum.
     """
-    if location.kind is not LocationKind.MARKDOWN or location not in _locations(content):
+    if policy is None:
+        policy = (TABLES_STEPS_POLICY if location.table_index is not None
+                  or location.list_index is not None else PARSER_POLICY)
+    if location.kind is not LocationKind.MARKDOWN or location not in _locations(content, policy):
         raise CompilerError("Markdown semantic locator does not match its exact byte range")
     return content[location.start:location.end]
 
 
-def fragment_markdown(source_ref: ContextSourceRef, content: bytes) -> tuple[SourceFragmentRef, ...]:
+def fragment_markdown(source_ref: ContextSourceRef, content: bytes, *,
+                      policy: str = PARSER_POLICY) -> tuple[SourceFragmentRef, ...]:
     """Fragment one trusted registered source's exact bytes; never accept a local path.
 
     The application supplies the ref/bytes resolved from its frozen registry. Revision
@@ -186,8 +290,26 @@ def fragment_markdown(source_ref: ContextSourceRef, content: bytes) -> tuple[Sou
     return tuple(SourceFragmentRef(
         source_ref=source_ref, location=location,
         content_checksum=hashlib.sha256(content[location.start:location.end]).hexdigest(),
-        fragment_kind="SECTION" if location.paragraph_index is None else "PARAGRAPH",
-        fragmentation_policy=PARSER_POLICY) for location in _locations(content))
+        fragment_kind=location.markdown_kind,
+        fragmentation_policy=policy) for location in _locations(content, policy))
+
+
+def table_row_cells(fragment: SourceFragmentRef, content: bytes) -> dict[str, str]:
+    """Non-identity view, re-attested against the exact source, table and row bytes.
+
+    Header names and values are trimmed/unescaped views only. The returned mapping
+    is not stored in the ref and grants no binding, candidate or canonical authority.
+    """
+    if (not isinstance(fragment, SourceFragmentRef) or fragment.fragment_kind != "TABLE_ROW"
+            or not fragment.verify(content)):
+        raise CompilerError("cells need a verified exact TABLE_ROW fragment")
+    loc = fragment.location
+    table = next(location for location in _locations(content, fragment.fragmentation_policy)
+                 if location.section_path == loc.section_path
+                 and location.table_index == loc.table_index and location.markdown_kind == "TABLE")
+    header = _pipe_cells(content[table.start:table.end].split(b"\n", 1)[0])
+    row = _pipe_cells(loc.extract(content).removesuffix(b"\n"))
+    return dict(zip(header, row, strict=True))
 
 
 def diff_key(fragment: SourceFragmentRef) -> str:
@@ -201,9 +323,11 @@ def diff_key(fragment: SourceFragmentRef) -> str:
     if (not isinstance(fragment, SourceFragmentRef)
             or fragment.location.kind is not LocationKind.MARKDOWN):
         raise CompilerError("diff_key needs a MARKDOWN SourceFragmentRef")
+    location = fragment.location.record()
+    for key in ("kind", "start", "end", "pointer"):
+        location.pop(key)
     return "diff-" + json_digest({
-        "location": {"section_path": list(fragment.location.section_path or ()),
-                     "paragraph_index": fragment.location.paragraph_index},
+        "location": location,
         "fragment_kind": fragment.fragment_kind,
         "fragmentation_policy": fragment.fragmentation_policy,
         "content_checksum": fragment.content_checksum,
@@ -215,7 +339,8 @@ def format_fragment_tree(fragments: Iterable[SourceFragmentRef]) -> tuple[str, .
     rows: list[str] = []
     for fragment in fragments:
         loc = fragment.location
-        depth = len(loc.section_path or ()) - 1 + (loc.paragraph_index is not None)
+        depth = (len(loc.section_path or ()) - 1 + (fragment.fragment_kind != "SECTION")
+                 + (fragment.fragment_kind == "TABLE_ROW"))
         rows.append(f"{'  ' * depth}{fragment.fragment_kind} {loc.semantic_locator} "
                     f"[{loc.start}, {loc.end}) sha256:{fragment.content_checksum[:12]}")
     return tuple(rows)
