@@ -88,7 +88,7 @@ Constraints on the future P1.3, P1.4 and P1.5 owning specs:
 The target profile has three layers. Only the first is the product's identity.
 
 ```text
-Layer 3  Workflows and applications (examples; none scheduled)
+Layer 3  Workflows and applications (RCA = MVP; others unscheduled)
            process: RCA (MVP wedge), HAZOP assistance, MOC impact
            discrete: downtime/OEE RCA, quality traceability, multi-site rollout
                          | consume core + one pack
@@ -163,10 +163,13 @@ questions for the owner).
 
 ### Layer 3 — Workflows and applications
 
-Workflows consume the core plus one pack. They are examples only, and none is scheduled:
+Workflows consume the core plus one pack.
 
-- process: RCA (the MVP wedge), HAZOP assistance, MOC impact analysis;
-- discrete: downtime/OEE RCA, quality traceability, multi-site rollout of improvements.
+- RCA is the MVP wedge. It is the Level-1 real-model investigation over the P1.5 path
+  and MVP integration (ADR-004 Decision 2), and this ADR does not change that.
+- Every other workflow is an example candidate and is not scheduled: process HAZOP
+  assistance, MOC impact analysis and recovery; discrete downtime/OEE RCA, quality
+  traceability and multi-site rollout of improvements.
 
 ### Mapping onto existing milestones
 
