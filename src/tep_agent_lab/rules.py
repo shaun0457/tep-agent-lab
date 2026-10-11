@@ -209,6 +209,14 @@ class RuleRegistry:
             for ref in conflict.rule_refs:
                 self.get_rule(ref)
 
+    def rules(self) -> tuple[Rule, ...]:
+        """Every rule version, in deterministic ``(rule_id, version)`` order."""
+        return self._rules
+
+    def conflicts(self) -> tuple[RuleConflict, ...]:
+        """Every conflict record, in registration order."""
+        return self._conflicts
+
     def get_rule(self, ref: RuleRef) -> Rule:
         for rule in self._rules:
             if rule.ref == ref:
