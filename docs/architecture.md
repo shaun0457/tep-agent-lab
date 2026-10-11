@@ -4,6 +4,8 @@
 
 `tep-agent-lab` is the TEP-specific integration/research layer between the generic Agent Runtime and the trusted TEP world. It owns domain state/projection, tools/adapters, policy/rules, experiments, engineering records, benchmark fixtures, and evaluation.
 
+Product positioning ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md)): the product is the industrial context layer (see §Industrial context and telemetry plane). The Agent investigation path described first is its first consumer.
+
 ## System boundary
 
 ```text
@@ -419,7 +421,7 @@ Future Context Layer views may join the same application boundary; they must not
 
 ## Industrial context and telemetry plane (P1)
 
-Owning contracts: `docs/decisions/ADR-003-industrial-environment-boundary.md` and `docs/specs/plant-telemetry-contract-v0.md` (semantics); `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (sequencing and the P1.2/P1.3 boundary). This section summarizes; it defines nothing new.
+Owning contracts: `docs/decisions/ADR-003-industrial-environment-boundary.md` and `docs/specs/plant-telemetry-contract-v0.md` (semantics); `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (sequencing and the P1.2/P1.3 boundary); `docs/decisions/ADR-005-context-layer-product-positioning.md` (product positioning). This section summarizes; it defines nothing new.
 
 ```text
 Plant Context Plane        ProcessGraph (tep-sim) -> Canonical Plant Context revision

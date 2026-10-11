@@ -105,6 +105,8 @@ Only add 3D if a concrete spatial-reasoning question appears.
 
 ## OQ-15 — D0.2C pilot viability and identifiability
 
+Status: open, deferred with the research track (owner decision 2026-10-11).
+
 Owning spec: `docs/specs/benchmark-comparative-pilot-v0.md`.
 
 Open empirical checks, answered only by D0.2C1–C3 evidence:
@@ -112,3 +114,17 @@ Open empirical checks, answered only by D0.2C1–C3 evidence:
 - whether `IDV(4)` produces supported, differing dynamics under the common 0.1 h + 0.5 h pilot window (checked so far only under 0.1 h + 0.2 h); a failure is `SPEC_CONFLICT` or an explicit timeline revision for all classes;
 - which candidates are separable across seeds under the frozen C0 features, and which must be excluded or relabeled as not identifiable under this evidence window;
 - the benchmark size needed for statistical inference, set from pilot within-class and between-class variation.
+
+## OQ-16 — D1 context-value arm set
+
+Status: open, deferred with the research track (owner decision 2026-10-11), including
+the D1 design and baseline-rule questions below.
+
+Owning decision: [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect), which defines the default D1 design and classifies every capability-ladder step. Owning spec: the D1 spec, to be written.
+
+Open:
+
+- whether the owner keeps the default design or adopts the SPEC_CONFLICT alternative of a context-only arm on top of C3 (required amendments listed in ADR-005 Decision 3);
+- whether ADR-004 Decision 6's "a capability claim needs clean C1–C5 baselines first" applies to D1 context-value contrasts, which ADR-005 does not treat as capability evidence;
+- how the C6 leakage-audit extension detects answer-bearing content in an authored engineering corpus;
+- the repeat count per arm, set from pilot variance.
