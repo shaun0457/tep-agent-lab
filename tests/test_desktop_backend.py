@@ -92,6 +92,24 @@ class FramingTests(unittest.TestCase):
                 self.assertEqual("INVALID_REQUEST", replies[0]["error"]["code"])
         self.assertEqual([], self.exchange(b""))
 
+    def test_lone_surrogate_request_id_does_not_end_the_loop(self):
+        frame = ('{"protocol_version":"%s","request_id":"\\ud800","method":"get_run",'
+                 '"params":{"run_id":"e0-observatory"}}' % PROTOCOL_VERSION).encode()
+        replies = self.exchange(frame + b"\n" + request() + b"\n")
+        self.assertEqual(2, len(replies))
+        self.assertEqual((None, "INVALID_REQUEST"),
+                         (replies[0]["request_id"], replies[0]["error"]["code"]))
+        self.assertTrue(replies[1]["ok"])
+
+    def test_unencodable_response_becomes_fixed_internal_error(self):
+        self.service.get_run.return_value = {"text": "\ud800"}
+        replies = self.exchange(request() + b"\n" + request() + b"\n")
+        self.assertEqual(2, len(replies))
+        for reply in replies:
+            self.assertEqual({"protocol_version": PROTOCOL_VERSION, "request_id": None,
+                              "ok": False, "error": {"code": "INTERNAL_ERROR",
+                                                       "message": "internal error"}}, reply)
+
     def test_client_loop_has_no_domain_or_filesystem_access(self):
         tree = ast.parse(inspect.getsource(backend.serve))
         calls = {node.func.attr for node in ast.walk(tree)

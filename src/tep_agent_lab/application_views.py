@@ -10,9 +10,9 @@ from typing import Any
 
 from industrial_agent_runtime import TaskStatus
 
-from .application_models import (Binding, CanonicalPoint, Entity, EntityType, Run, Signal,
-                                 SignalHistory, TelemetrySnapshot, snapshot_from_view,
-                                 snapshot_to_view)
+from .application_models import (Binding, CanonicalPoint, Entity, EntityType, InvalidRequest,
+                                 Run, Signal, SignalHistory, TelemetrySnapshot,
+                                 snapshot_from_view, snapshot_to_view)
 from .canonical_context import ProjectionScope
 from .playground import RunStatus
 from .playground_views import RunQueries, VisibilityViolation
@@ -20,6 +20,8 @@ from .telemetry import SnapshotUnavailable
 from .tep_world import leakage_findings
 
 MAX_HISTORY_POINTS = 1000
+__all__ = ["AmbiguousSignal", "ApplicationViewService", "InvalidRequest", "MAX_HISTORY_POINTS",
+           "UnknownEntity", "UnknownSignal"]
 
 
 class UnknownEntity(LookupError):
@@ -36,7 +38,7 @@ class AmbiguousSignal(ValueError):
 
 def _optional_ticks(name: str, value: Any) -> None:
     if value is not None and (type(value) is not int or value < 0):
-        raise ValueError(f"{name} must be a non-negative integer or None")
+        raise InvalidRequest(f"{name} must be a non-negative integer or None")
 
 
 def _point(sample: Mapping[str, Any]) -> CanonicalPoint:
@@ -70,7 +72,7 @@ class ApplicationViewService:
     @staticmethod
     def _pinned(run_id: str, snapshot: Any) -> dict[str, Any]:
         if not isinstance(snapshot, TelemetrySnapshot):
-            raise ValueError("a TelemetrySnapshot from open_telemetry_snapshot is required")
+            raise InvalidRequest("a TelemetrySnapshot from open_telemetry_snapshot is required")
         if snapshot.run_id != run_id:
             raise SnapshotUnavailable("snapshot belongs to another run")
         return snapshot_to_view(snapshot)
@@ -169,9 +171,9 @@ class ApplicationViewService:
         _optional_ticks("event_end_ticks", event_end_ticks)
         if (event_start_ticks is not None and event_end_ticks is not None
                 and event_end_ticks < event_start_ticks):
-            raise ValueError("event_end_ticks must be >= event_start_ticks")
+            raise InvalidRequest("event_end_ticks must be >= event_start_ticks")
         if type(max_points) is not int or not 1 <= max_points <= MAX_HISTORY_POINTS:
-            raise ValueError(f"max_points must be in [1, {MAX_HISTORY_POINTS}]")
+            raise InvalidRequest(f"max_points must be in [1, {MAX_HISTORY_POINTS}]")
         queries = self._queries(run_id)
         pinned = self._pinned(run_id, snapshot)
         _, binding = self._resolve(queries, run_id, signal_id)

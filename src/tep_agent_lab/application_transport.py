@@ -8,20 +8,24 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
+import re
 from typing import Any, Literal
 
 from industrial_agent_runtime import to_jsonable
 from industrial_agent_runtime.serialization import freeze_json
 
-from .application_models import snapshot_from_json
+from .application_models import InvalidRequest, snapshot_from_json
 from .application_views import (
     AmbiguousSignal, ApplicationViewService, UnknownEntity, UnknownSignal,
 )
 from .playground_views import ViewUnavailable, VisibilityViolation
-from .telemetry import ClockMismatch, ResourceLimitExceeded, SnapshotUnavailable, UnknownBinding
+from .telemetry import (ClockMismatch, ResourceLimitExceeded, SnapshotUnavailable,
+                        TelemetryError, UnknownBinding)
 
 PROTOCOL_VERSION = "tep-agent-lab.application-transport/v1"
 MAX_REQUEST_BYTES = 64 * 1024
+# Correlation ids are bounded printable ASCII tokens, so responses always encode.
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
 class ErrorCode(StrEnum):
@@ -139,10 +143,29 @@ def decode_request_json(payload: bytes | str) -> dict[str, Any] | ApplicationFai
     return decoded
 
 
-def _validate(raw: Mapping[str, Any]) -> ErrorCode | None:
+def _request_id(value: Any) -> str | None:
+    return value if type(value) is str and _REQUEST_ID.fullmatch(value) else None
+
+
+def _validate(raw: Mapping[str, Any]) -> tuple[ErrorCode | None, dict[str, Any]]:
+    """Schema validation; returns the params with ``snapshot`` parsed exactly once."""
+    code = _validate_shape(raw)
+    if code is not None:
+        return code, {}
+    params = dict(raw["params"])
+    if "snapshot" in params:
+        try:
+            params["snapshot"] = snapshot_from_json(params["snapshot"])
+        except InvalidRequest:
+            return ErrorCode.INVALID_REQUEST, {}
+    return None, params
+
+
+def _validate_shape(raw: Mapping[str, Any]) -> ErrorCode | None:
     if (set(raw) != {"protocol_version", "request_id", "method", "params"}
             or any(type(raw[key]) is not str
                    for key in ("protocol_version", "request_id", "method"))
+            or _request_id(raw["request_id"]) is None
             or not isinstance(raw["params"], Mapping)):
         return ErrorCode.INVALID_REQUEST
     if raw["protocol_version"] != PROTOCOL_VERSION:
@@ -159,11 +182,6 @@ def _validate(raw: Mapping[str, Any]) -> ErrorCode | None:
         if key in _INTEGERS and type(value) is not int:
             return ErrorCode.INVALID_REQUEST
         if key in _NULLABLE_INTEGERS and value is not None and type(value) is not int:
-            return ErrorCode.INVALID_REQUEST
-    if "snapshot" in params:
-        try:
-            snapshot_from_json(params["snapshot"])
-        except ValueError:
             return ErrorCode.INVALID_REQUEST
     # JSON safety is schema validation; ranges/order/bounds belong to the service.
     try:
@@ -199,15 +217,11 @@ class ApplicationTransport:
                        "params": request.params}
         if not isinstance(request, Mapping):
             return _failure(None, ErrorCode.INVALID_REQUEST)
-        request_id = request.get("request_id")
-        if type(request_id) is not str:
-            request_id = None
-        code = _validate(request)
+        request_id = _request_id(request.get("request_id"))
+        code, params = _validate(request)
         if code is not None:
             return _failure(request_id, code)
-        method, params = request["method"], dict(request["params"])
-        if "snapshot" in params:
-            params["snapshot"] = snapshot_from_json(params["snapshot"])
+        method = request["method"]
         try:
             # Explicit calls only; client strings never resolve Python attributes.
             if method == "open_telemetry_snapshot":
@@ -234,11 +248,10 @@ class ApplicationTransport:
             return _failure(request_id, ErrorCode.SNAPSHOT_UNAVAILABLE)
         except ResourceLimitExceeded:
             return _failure(request_id, ErrorCode.RESOURCE_LIMIT_EXCEEDED)
-        except ValueError:
-            # Application/telemetry validation owns ranges, window order and bounds; a
-            # graph read has no client numbers, so a ValueError there is internal.
-            code = ErrorCode.INTERNAL_ERROR if method == "get_entity" else ErrorCode.INVALID_REQUEST
-            return _failure(request_id, code)
+        except (InvalidRequest, TelemetryError):
+            # Client argument validation: application checks, and telemetry read-path
+            # checks of the client's snapshot, window and point bounds.
+            return _failure(request_id, ErrorCode.INVALID_REQUEST)
         except Exception:
             return _failure(request_id, ErrorCode.INTERNAL_ERROR)
         try:

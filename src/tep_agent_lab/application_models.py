@@ -6,11 +6,17 @@ Owning contract: docs/specs/application-api-v1.md.
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from enum import StrEnum
+from math import gcd
+import re
 from typing import Any
 
 from industrial_agent_runtime import TaskStatus
 
 from .playground import RunStatus
+
+
+class InvalidRequest(ValueError):
+    """Client-supplied application arguments are invalid (transport INVALID_REQUEST)."""
 
 
 class EntityType(StrEnum):
@@ -33,30 +39,37 @@ class TelemetrySnapshot:
     event_clock_id: str
     event_clock_kind: str
     event_resolution: str
-    event_clock_origin: str | None
+    event_clock_origin: str
     context_ref: str
     visibility_policy_ref: str
 
 
 _INTEGER_FIELDS = frozenset({"ingest_sequence", "event_horizon_ticks"})
-_OPTIONAL_FIELDS = frozenset({"event_clock_origin"})
 SNAPSHOT_FIELDS = tuple(field.name for field in fields(TelemetrySnapshot))
+MAX_SNAPSHOT_TEXT = 256
+_RESOLUTION = re.compile(r"([1-9][0-9]{0,17})/([1-9][0-9]{0,17})")
 
 
 def snapshot_from_json(value: Any) -> TelemetrySnapshot:
-    """Strict JSON -> TelemetrySnapshot: exact keys; integers are not booleans."""
+    """Strict JSON -> TelemetrySnapshot (Application API v1 §Telemetry snapshot).
+
+    Exact keys; integers are non-negative ints (not booleans); every other field is a
+    non-empty string of at most MAX_SNAPSHOT_TEXT characters; the resolution is a
+    reduced positive fraction ``n/d``. Raises InvalidRequest.
+    """
     if not isinstance(value, Mapping) or set(value) != set(SNAPSHOT_FIELDS):
-        raise ValueError("snapshot must have exactly the TelemetrySnapshot fields")
+        raise InvalidRequest("snapshot must have exactly the TelemetrySnapshot fields")
     for name in SNAPSHOT_FIELDS:
         item = value[name]
         if name in _INTEGER_FIELDS:
-            valid = type(item) is int
-        elif name in _OPTIONAL_FIELDS:
-            valid = item is None or type(item) is str
+            valid = type(item) is int and item >= 0
         else:
-            valid = type(item) is str
+            valid = type(item) is str and 0 < len(item) <= MAX_SNAPSHOT_TEXT
         if not valid:
-            raise ValueError(f"snapshot field {name} has an invalid type")
+            raise InvalidRequest(f"snapshot field {name} is invalid")
+    match = _RESOLUTION.fullmatch(value["event_resolution"])
+    if match is None or gcd(int(match[1]), int(match[2])) != 1:
+        raise InvalidRequest("snapshot resolution must be a reduced positive fraction")
     return TelemetrySnapshot(**{name: value[name] for name in SNAPSHOT_FIELDS})
 
 

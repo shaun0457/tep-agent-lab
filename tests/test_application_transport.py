@@ -14,7 +14,7 @@ from unittest import mock
 from industrial_agent_runtime import to_jsonable
 from industrial_agent_runtime.serialization import canonical_json
 
-from tep_agent_lab.application_models import snapshot_from_json
+from tep_agent_lab.application_models import InvalidRequest, snapshot_from_json
 from tep_agent_lab.application_transport import (
     ApplicationRequest, ApplicationTransport, ErrorCode, MAX_REQUEST_BYTES, PROTOCOL_VERSION,
     decode_request_json,
@@ -123,6 +123,40 @@ class TransportSchemaTests(unittest.TestCase):
                                      max_points=5), ErrorCode.INVALID_REQUEST)
         self.assertEqual([], self.service.mock_calls)
 
+    def test_request_id_is_a_bounded_ascii_token(self):
+        for request_id in ("", "x" * 129, "req 1", "req/1", "req-中文", "\ud800", "a\nb"):
+            with self.subTest(request_id=request_id):
+                self.assert_failure({**envelope(), "request_id": request_id},
+                                    ErrorCode.INVALID_REQUEST, None)
+        for request_id in ("desktop-1", "smoke-2", "a.b:c_d-e", "x" * 128):
+            self.service.get_run.return_value = {}
+            self.assertTrue(self.transport.dispatch({**envelope(), "request_id": request_id}).ok)
+        response = self.transport.dispatch_json('{"protocol_version":"%s","request_id":"\\ud800",'
+                                                '"method":"get_run","params":{"run_id":"r"}}'
+                                                % PROTOCOL_VERSION)
+        self.assertEqual((None, ErrorCode.INVALID_REQUEST),
+                         (response.request_id, response.error.code))
+
+    def test_snapshot_object_is_validated_once_and_strictly(self):
+        bad = ({**SNAPSHOT, "event_clock_origin": None}, {**SNAPSHOT, "ingest_sequence": -1},
+               {**SNAPSHOT, "event_horizon_ticks": -5}, {**SNAPSHOT, "context_ref": "x" * 257},
+               {**SNAPSHOT, "event_resolution": "2000/2000"}, {**SNAPSHOT, "event_resolution": "2/4"},
+               {**SNAPSHOT, "event_resolution": "0/1"}, {**SNAPSHOT, "event_resolution": "1"},
+               {**SNAPSHOT, "event_resolution": "01/1"}, {**SNAPSHOT, "run_id": ""})
+        for snapshot in bad:
+            with self.subTest(snapshot={k: v for k, v in snapshot.items() if SNAPSHOT.get(k) != v}):
+                self.assert_failure(envelope("get_signal", signal_id=TEMPERATURE,
+                                             snapshot=snapshot), ErrorCode.INVALID_REQUEST)
+        self.assertEqual([], self.service.mock_calls)
+        for resolution in ("1/1", "1/1000", "3/2"):
+            snapshot_from_json({**SNAPSHOT, "event_resolution": resolution})
+        self.service.get_signal.return_value = {}
+        with mock.patch("tep_agent_lab.application_transport.snapshot_from_json",
+                        wraps=snapshot_from_json) as parse:
+            self.assertTrue(self.transport.dispatch(
+                envelope("get_signal", signal_id=TEMPERATURE, snapshot=SNAPSHOT)).ok)
+        self.assertEqual(1, parse.call_count)
+
     def test_valid_requests_reach_the_service_with_typed_snapshot(self):
         for method in ("open_telemetry_snapshot", "get_run", "get_entity", "get_signal",
                        "get_signal_history"):
@@ -159,7 +193,8 @@ class TransportSchemaTests(unittest.TestCase):
                   (ClockMismatch, ErrorCode.SNAPSHOT_UNAVAILABLE),
                   (ResourceLimitExceeded, ErrorCode.RESOURCE_LIMIT_EXCEEDED),
                   (TelemetryError, ErrorCode.INVALID_REQUEST),
-                  (ValueError, ErrorCode.INVALID_REQUEST),
+                  (InvalidRequest, ErrorCode.INVALID_REQUEST),
+                  (ValueError, ErrorCode.INTERNAL_ERROR),          # server-side, not client
                   (RuntimeError, ErrorCode.INTERNAL_ERROR),
                   (KeyError, ErrorCode.INTERNAL_ERROR),
                   (TypeError, ErrorCode.INTERNAL_ERROR))
@@ -222,7 +257,7 @@ class TransportCodecTests(unittest.TestCase):
         self.assertEqual([], self.service.mock_calls)
 
     def test_valid_utf8_bytes_and_string_dispatch(self):
-        request = {**envelope(), "request_id": "req-中文"}
+        request = envelope(run_id="run-中文")
         text = json.dumps(request, ensure_ascii=False)
         for payload in (text, text.encode("utf-8")):
             with self.subTest(kind=type(payload)):
@@ -230,9 +265,9 @@ class TransportCodecTests(unittest.TestCase):
                 self.assertEqual(request, decode_request_json(payload))
                 response = self.transport.dispatch_json(payload)
                 self.assertTrue(response.ok)
-                self.assertEqual("req-中文", response.request_id)
+                self.assertEqual("req-123", response.request_id)
                 self.assertEqual({"run_id": "run-1"}, to_jsonable(response.result))
-                self.service.get_run.assert_called_once_with(run_id="run-1")
+                self.service.get_run.assert_called_once_with(run_id="run-中文")
 
     def test_malformed_json_is_redacted_and_never_calls_service(self):
         for text in ("", '{"request_id":"secret",', '{"path":"C:/private/hidden_fault",}',
@@ -269,7 +304,7 @@ class TransportCodecTests(unittest.TestCase):
             parser.assert_not_called()
 
     def test_multibyte_size_uses_encoded_bytes(self):
-        request = {**envelope(), "request_id": "中"}
+        request = envelope(run_id="中")
         text = json.dumps(request, ensure_ascii=False)
         boundary = text + " " * (MAX_REQUEST_BYTES - len(text.encode("utf-8")))
         self.assertLess(len(boundary), MAX_REQUEST_BYTES)
@@ -329,7 +364,7 @@ class TransportIntegrationTests(unittest.TestCase):
                                                   max_points=3)))
         for method, params, expected in calls:
             with self.subTest(method=method):
-                request = ApplicationRequest(PROTOCOL_VERSION, "req-中文", method, params)
+                request = ApplicationRequest(PROTOCOL_VERSION, "req-1", method, params)
                 response = self.transport.dispatch(request)
                 self.assertTrue(response.ok, to_jsonable(response))
                 payload = to_jsonable(response)
