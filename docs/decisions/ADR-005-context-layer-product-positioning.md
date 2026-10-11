@@ -303,16 +303,18 @@ No accepted spec yet requires a plant that keeps running and streaming after REA
 this part of capability C has no owner. This is not a new requirement; it gives an
 existing one a name.
 
-**Live plant mode** is MVP-required:
+**Live plant mode** is MVP-required. The only required item is the one capability C
+already states: TEP runs as a long-lived simulated plant and its live data enters the
+canonical telemetry path continuously, through TEPSimulationSource into the canonical
+telemetry store. The existing telemetry semantics then apply unchanged: every read and
+every ContextSnapshot pins T and K over the growing stream, and samples committed later
+never enter an earlier snapshot (plant-telemetry §Hard temporal leakage invariant).
 
-- TEP runs as a long-lived simulated plant and streams samples continuously through
-  TEPSimulationSource into the canonical telemetry store.
-- The evaluator or harness injects an incident mid-stream. Injection is harness
-  authority, never an Agent tool, and its identity and timing stay EVALUATOR-only (hard
-  rules 1, 9 and 11; ADR-001).
-- Every read and every ContextSnapshot pins T and K over the growing stream. Samples
-  committed later never enter an earlier snapshot (plant-telemetry §Hard temporal leakage
-  invariant).
+Recommended demonstration (not an acceptance condition): the evaluator or harness may,
+for example, inject an incident mid-stream so the investigation starts from live data.
+If it does, injection is harness authority, never an Agent tool, and its identity and
+timing stay EVALUATOR-only (hard rules 1, 9 and 11; ADR-001). Neither the MVP exit
+criteria nor this ADR prescribe how or when an incident is produced.
 
 Scheduling. This ADR assigns no milestone number. Live plant mode must be scheduled into
 an owning spec. Whether it belongs to P1.4 or to a new P1.x is decided by the owner under

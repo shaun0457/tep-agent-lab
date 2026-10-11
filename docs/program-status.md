@@ -56,7 +56,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.4 context serving + Operational State | no owning spec yet |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
 | B5 first real provider (runtime repo) | not started; unblocked (D-049) |
-| Live plant mode (long-lived simulated plant, mid-stream incident, T/K over a growing stream) | MVP-required, unscheduled; no owning spec ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md)) |
+| Live plant mode (long-lived simulated plant whose live data continuously enters the canonical telemetry path) | MVP-required, unscheduled; no owning spec ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md)) |
 | MVP integration (E1 substrate + context panels) | not started |
 | P1.6 write-back, P1.7 second domain | post-L1 |
 

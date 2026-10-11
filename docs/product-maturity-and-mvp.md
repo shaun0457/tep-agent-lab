@@ -202,9 +202,9 @@ TEP-specific IDs may exist inside the adapter/lab, but generic context contracts
 Telemetry is delivered continuously through the canonical telemetry path.
 
 > Clarification ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md) §Live plant mode): "continuously" means
-> a long-lived simulated plant that streams samples into the canonical store, with an
-> incident injected mid-stream by the evaluator or harness and snapshots that pin T/K over
-> the growing stream. It is MVP-required and not yet scheduled.
+> a long-lived simulated plant whose live data keeps entering the canonical telemetry path.
+> It is MVP-required and not yet scheduled. Injecting an incident mid-stream is one possible
+> demonstration, not an acceptance condition.
 
 At minimum the system can derive deterministic state features such as:
 
