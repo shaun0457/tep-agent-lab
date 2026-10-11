@@ -28,9 +28,9 @@ and the test constants. A NumPy bump edits only the JSON.
 
 | Question | Answer |
 |---|---|
-| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B, E0.2 desktop shell). No L1 exit criterion is fully met. |
+| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B, P1.2A compiler contracts, E0.2 desktop shell). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
-| Current product milestone | P1.2A Context Compiler contracts: not started, unblocked (spec accepted in PR #24) |
+| Current product milestone | P1.2B deterministic parser / fixture corpus: not started, unblocked (P1.2A merged) |
 | Parallel product milestone | P1.1C canonical telemetry integration: not started, unblocked |
 | Current research milestone | D0.2C1 comparable pilot fixtures, scorer-v1 and leakage policy v2: not started, unblocked (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
@@ -49,7 +49,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.1B TEP simulation source | merged (PR #23) |
 | ADR-004 P1 re-baseline | merged (adds this file) |
 | P1.1C canonical telemetry integration | not started; write the implementation note first |
-| P1.2 Context Compiler | spec accepted (PR #24); P1.2A not started |
+| P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B next, then P1.2C; P1.2D adds the repository transaction (one git commit, head CAS) and the review demo |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4 context serving + Operational State | no owning spec yet |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
@@ -79,9 +79,12 @@ None.
 
 ## Next implementation gates
 
-- **P1.2A** can start now. It includes the compiler workspace and the rule-set source
-  revision (context-compiler-v0 §Recommended implementation split;
-  knowledge-rule-registry-v0 §Rule-set source revision).
+- **P1.2B** can start now: a deterministic parser and fixture path for one small
+  engineering corpus that emits P1.2A `SourceFragmentRef`s, with the corpus authoring
+  provenance that context-compiler-v0 §Benchmark use requires. P1.2C (model-assisted
+  extraction and grounding) and P1.2D (review workflow, the repository publication
+  transaction that commits a P1.2A `StagedPublication`, and the revision demo) follow
+  (context-compiler-v0 §Recommended implementation split).
 - **P1.1C** can start now. The owning contract is frozen; write a short implementation note
   with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
 - **B5** can start now in `industrial-agent-runtime`.
@@ -101,8 +104,9 @@ None.
   stale after D-050 and reuse "P1" (Investigation UI) and "E1" (HAZOP). Follow-up belongs in tep-sim.
 - Spec status vocabulary drift: implemented specs still say `proposal`; several use
   `FROZEN` / `DRAFT` wording outside the documentation standard.
-- `RuleRegistry`, `records.py` (InvestigationReport, EngineeringArchive) and the P1.1
-  telemetry modules are implemented but not used by any production path.
+- `RuleRegistry`, `records.py` (InvestigationReport, EngineeringArchive), the P1.1
+  telemetry modules and the P1.2A `context_compiler` / `rule_sets` modules are
+  implemented but not used by any production path.
 
 ## Deferred work
 
