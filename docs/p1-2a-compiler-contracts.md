@@ -147,9 +147,11 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   not modify the workspace: the lock is re-entrant, so a misbehaving resolver cannot
   deadlock, and staging raises `PublicationError` if the review or candidate log
   moved. The position is always the tail. Staging
-  re-attests every session source and R0. Every considered candidate's
-  `DerivedInput`s must resolve through `derived_input_resolver` to their exact bytes;
-  an input with no resolver fails. Candidate-local failures become `Exclusion`s.
+  re-attests every session source and R0. Every approved candidate's `DerivedInput`s
+  must resolve through `derived_input_resolver` to their exact bytes, otherwise
+  staging fails. A cited conflict partner whose inputs do not resolve excludes its
+  citers as `DEPENDENCY_INVALID`, and an excluded candidate that nothing cites needs
+  no resolvable inputs. Candidate-local failures become `Exclusion`s.
   Revision-level failures raise `PublicationError` and produce no bundle: an unknown
   candidate, a changed source, an unresolved derived input, a duplicate RuleRef
   across candidates, an invalid R1 or a hidden-tainted selection. A failure also
@@ -239,7 +241,7 @@ every hash and expects rejection. It skips only the fields marked C.
 | review log | `records[*]` (every field, including `previous_hash`) | B | contiguous hash chain whose tail hash equals the anchor; each record is then used as staging input |
 | candidates | `schema_version` | A | constant |
 | candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed). Membership comes from the anchored candidate log; approved items are re-validated against the exact sources and the plant index; exclusions are re-decided. Fragments of an excluded candidate are not attested, which is safe because an excluded candidate contributes nothing to the approved set |
-| candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log (latest version per referenced id); sources, fragments and derived inputs are attested, and a failing partner excludes the claims citing it (`DEPENDENCY_INVALID`) |
+| candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log (latest version per referenced, unselected id). Every cited partner, the selected version when selected and otherwise this dependency, has its sources, fragments, influencing sources and derived inputs attested regardless of its own decision. A failing partner excludes its citers (`DEPENDENCY_INVALID`), so a claim's outcome does not depend on whether its partner is selected |
 | bundle | set of file paths | A | must equal the re-staged set exactly |
 | all records | text fields used in identity hashes | A | hashed as exact canonical bytes; an NFC/NFD variant changes the hash and fails the anchor and the byte comparison |
 | R1 | every field | A | re-derived from R0 and the approved rules, byte-exact; visibility no more restricted than the revision |
@@ -278,7 +280,7 @@ review findings they cover.
 | 14 | partial: contract level; end-to-end demo in P1.2D |
 | 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
 | 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
-| 21 | partial. The same `_stage_bundle` fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input on an approved candidate, an unresolvable, foreign or hidden parent, a fabricated conflict dependency, and extra or missing bundle files. A conflict partner that fails integrity (for example a fragment outside the inventory, or an older session's version) excludes only the claims that cite it, as `DEPENDENCY_INVALID`. Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
+| 21 | partial. The same `_stage_bundle` fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input on an approved candidate, an unresolvable, foreign or hidden parent, a fabricated conflict dependency, and extra or missing bundle files. A conflict partner that fails integrity (for example a fragment outside the inventory, an older session's sources, or an unresolvable derived input) excludes only the claims that cite it, as `DEPENDENCY_INVALID`. This holds whether or not the partner is selected and whatever its own decision (selection-invariance tests cover STALE_SESSION, REJECTED-but-intact and outside-inventory partners). Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
