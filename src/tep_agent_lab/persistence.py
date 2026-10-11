@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -43,10 +44,13 @@ def content_checksum(value: Any) -> str:
 
 
 def strict_json_loads(data: bytes | str) -> Any:
-    """Parse JSON, rejecting duplicate object keys at any depth and NaN/Infinity.
+    """Parse JSON, rejecting duplicate object keys at any depth and non-finite numbers.
 
     Plain ``json.loads`` keeps the last duplicate key, so a forged leading key could
-    otherwise survive a checksum taken over the re-encoded value.
+    otherwise survive a checksum taken over the re-encoded value. Floats must be finite
+    (``1e400`` would otherwise become ``inf``). Integers stay exact Python ints;
+    Python's integer string-conversion limit rejects oversized literals with
+    ``ValueError`` as well, so both kinds fail the same way.
     """
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -59,7 +63,14 @@ def strict_json_loads(data: bytes | str) -> Any:
     def constant(name: str) -> Any:
         raise ValueError(f"non-finite JSON number {name}")
 
-    return json.loads(data, object_pairs_hook=pairs, parse_constant=constant)
+    def finite(text: str) -> float:
+        value = float(text)
+        if not math.isfinite(value):
+            raise ValueError(f"JSON number {text!r} is not finite")
+        return value
+
+    return json.loads(data, object_pairs_hook=pairs, parse_constant=constant,
+                      parse_float=finite)
 
 
 def _write_new(path: Path, data: bytes) -> None:

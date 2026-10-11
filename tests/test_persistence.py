@@ -73,6 +73,12 @@ class RunLogTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 strict_json_loads(data)
 
+    def test_strict_json_rejects_overflowing_numbers(self):
+        for data in (b'[1e400]', b'{"x": -1e400}', b'[1' + b'0' * 5000 + b']'):
+            with self.assertRaises(ValueError):
+                strict_json_loads(data)
+        self.assertEqual([1.5, 10 ** 30], strict_json_loads(b'[1.5, 1' + b'0' * 30 + b']'))
+
     def test_mapping_order_is_irrelevant(self):
         self.assertEqual(canonical_json({"a": 1, "b": 2}),
                          canonical_json({"b": 2, "a": 1}))
