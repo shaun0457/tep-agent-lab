@@ -184,13 +184,16 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   - `_dependency_closure`: re-attest every session source; re-load R0 and its lineage
     from exact bytes, visible at the revision's visibility; resolve the parent; check
     the effective visibility of every review record and every stored candidate;
-    check each conflict dependency's exact source integrity (sources, fragments,
-    influencing sources, derived inputs); and limit the known ids to stored candidates;
+    check the exact source integrity (sources, fragments, influencing sources, derived
+    inputs) of every cited conflict partner, whether selected or a stored dependency
+    and whatever its own decision; and limit the known ids to stored candidates;
   - `_decide` for every considered candidate. A candidate whose conflict partner fails
     integrity is excluded as `DEPENDENCY_INVALID`, a candidate-level fail-closed: the
     revision does not abort;
-  - derived-input resolution for the approved candidates only (an unresolved input
-    still fails the whole publication; excluded candidates need none);
+  - derived-input resolution for the approved candidates (an unresolved input still
+    fails the whole publication). An excluded candidate that no considered candidate
+    cites needs no resolvable inputs; a cited partner was already checked by the
+    closure;
   - `_build_bundle`.
 
   A conflict dependency is, for each candidate id that a selected candidate names in
@@ -240,7 +243,7 @@ every hash and expects rejection. It skips only the fields marked C.
 | review log | `workspace_id`, `review_log_position`, `tail_hash`, `candidate_count`, `candidate_tail_hash`, `candidate_log` | B | the candidate-log hash chain and counts must equal the anchor |
 | review log | `records[*]` (every field, including `previous_hash`) | B | contiguous hash chain whose tail hash equals the anchor; each record is then used as staging input |
 | candidates | `schema_version` | A | constant |
-| candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed). Membership comes from the anchored candidate log; approved items are re-validated against the exact sources and the plant index; exclusions are re-decided. Fragments of an excluded candidate are not attested, which is safe because an excluded candidate contributes nothing to the approved set |
+| candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed). Membership comes from the anchored candidate log; approved items are re-validated against the exact sources and the plant index; exclusions are re-decided. Fragments of an excluded candidate that no considered candidate cites are not attested, which is safe because it contributes nothing to the approved set and no decision depends on it. Exception: a cited partner, selected or not and whatever its own decision (REJECTED, STALE_SESSION and so on), always has its exact sources, fragments, influencing sources and derived inputs checked by `_partner_intact`; a failure excludes its citers as `DEPENDENCY_INVALID` |
 | candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log (latest version per referenced, unselected id). Every cited partner, the selected version when selected and otherwise this dependency, has its sources, fragments, influencing sources and derived inputs attested regardless of its own decision. A failing partner excludes its citers (`DEPENDENCY_INVALID`), so a claim's outcome does not depend on whether its partner is selected |
 | bundle | set of file paths | A | must equal the re-staged set exactly |
 | all records | text fields used in identity hashes | A | hashed as exact canonical bytes; an NFC/NFD variant changes the hash and fails the anchor and the byte comparison |
