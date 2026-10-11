@@ -2,7 +2,7 @@
 
 These v0 specs define TEP-specific integration, investigation, research, application hosting, and evaluation on top of `tep-sim` and `industrial-agent-runtime`.
 
-Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Program Re-baseline v1 adds an Application / Playground Plane and canonical-context contract without reopening those accepted runtime/world/investigation boundaries. Industrial Context Platform sequencing is owned by [ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md); current state is in [`program-status.md`](../program-status.md).
+Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Program Re-baseline v1 adds an Application / Playground Plane and canonical-context contract without reopening those accepted runtime/world/investigation boundaries. Industrial Context Platform sequencing is owned by [ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md); current state is in [`program-status.md`](../program-status.md). Product positioning is owned by [ADR-005](../decisions/ADR-005-context-layer-product-positioning.md): the industrial context layer is the product, and the investigation specs govern its first consumer, the Agent.
 
 ## State / knowledge / experiment contracts
 

@@ -1,6 +1,8 @@
 # tep-agent-lab
 
-Integration and benchmark laboratory for autonomous engineering investigation over the Tennessee Eastman Process.
+Industrial context layer (Context Compiler -> Canonical Context -> Context Server / ContextSnapshot), proven first on the Tennessee Eastman Process, with an Agent investigation lab and benchmark as its first consumer.
+
+Product positioning: [ADR-005](docs/decisions/ADR-005-context-layer-product-positioning.md). The context layer is the product; the Agent investigator described below is its first consumer.
 
 Depends on pinned versions of:
 
@@ -11,7 +13,7 @@ The lab owns TEP-specific state/projection, tools, policy, experiments, engineer
 
 ## v0 role
 
-Study an **Autonomous Industrial Process Investigator**.
+Study an **Autonomous Industrial Process Investigator**, the first consumer of the context layer.
 
 The Main Agent may:
 
@@ -203,8 +205,9 @@ Later task specs remain proposals until their implementation phase.
 
 ## Program status and product direction
 
-Beyond the RCA research role above, this repository hosts the P0 Playground backend, the observatory/desktop clients and the P1 telemetry/context work (ADR-002, ADR-003).
+Beyond the RCA research role above, this repository hosts the P0 Playground backend, the observatory/desktop clients and the P1 context-layer work, which is the product (ADR-002, ADR-003, ADR-005).
 
 - Current state, open PRs and next gate: `docs/program-status.md`.
 - P1 sequencing authority: `docs/decisions/ADR-004-p1-milestone-rebaseline.md`.
+- Product positioning authority: `docs/decisions/ADR-005-context-layer-product-positioning.md`.
 - Product direction (non-normative): `docs/industrial-context-platform-north-star.md`, `docs/product-maturity-and-mvp.md`.
