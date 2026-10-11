@@ -224,12 +224,17 @@ class RunTelemetry:
                 clock["resolution"]):
             raise TelemetryError("snapshot clock resolution must be an exact n/d fraction")
         numerator, denominator = clock["resolution"].split("/")
+        resolution = Fraction(int(numerator), int(denominator))
+        if clock["resolution"] != f"{resolution.numerator}/{resolution.denominator}":
+            raise TelemetryError("snapshot clock resolution must be reduced")
+        _nonnegative("ingest_sequence", body["ingest_sequence"])
+        _nonnegative("event_horizon_ticks", horizon["ticks"])
         try:
             pinned = TelemetryReadSnapshot(
                 StoreRef(store["store_id"], store["incarnation"], store["namespace"]),
                 body["ingest_sequence"], TimePoint(horizon["clock_id"], horizon["ticks"]),
                 ClockDescriptor(clock["clock_id"], clock["kind"],
-                                Fraction(int(numerator), int(denominator)), clock["origin"]),
+                                resolution, clock["origin"]),
                 body["context_ref"], body["visibility_policy_ref"])
         except (TypeError, ValueError) as error:
             if isinstance(error, TelemetryError):

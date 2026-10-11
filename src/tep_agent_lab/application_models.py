@@ -43,6 +43,9 @@ class TelemetrySnapshot:
     context_ref: str
     visibility_policy_ref: str
 
+    def __post_init__(self) -> None:
+        _validate_snapshot_fields({name: getattr(self, name) for name in SNAPSHOT_FIELDS})
+
 
 _INTEGER_FIELDS = frozenset({"ingest_sequence", "event_horizon_ticks"})
 SNAPSHOT_FIELDS = tuple(field.name for field in fields(TelemetrySnapshot))
@@ -59,6 +62,11 @@ def snapshot_from_json(value: Any) -> TelemetrySnapshot:
     """
     if not isinstance(value, Mapping) or set(value) != set(SNAPSHOT_FIELDS):
         raise InvalidRequest("snapshot must have exactly the TelemetrySnapshot fields")
+    return TelemetrySnapshot(**{name: value[name] for name in SNAPSHOT_FIELDS})
+
+
+def _validate_snapshot_fields(value: Mapping[str, Any]) -> None:
+    """Shared field checks for typed construction, JSON parsing and direct reads."""
     for name in SNAPSHOT_FIELDS:
         item = value[name]
         if name in _INTEGER_FIELDS:
@@ -70,7 +78,6 @@ def snapshot_from_json(value: Any) -> TelemetrySnapshot:
     match = _RESOLUTION.fullmatch(value["event_resolution"])
     if match is None or gcd(int(match[1]), int(match[2])) != 1:
         raise InvalidRequest("snapshot resolution must be a reduced positive fraction")
-    return TelemetrySnapshot(**{name: value[name] for name in SNAPSHOT_FIELDS})
 
 
 def snapshot_from_view(run_id: str, body: Mapping[str, Any]) -> TelemetrySnapshot:
@@ -88,6 +95,7 @@ def snapshot_from_view(run_id: str, body: Mapping[str, Any]) -> TelemetrySnapsho
 
 def snapshot_to_view(snapshot: TelemetrySnapshot) -> dict[str, Any]:
     """The P0 snapshot object that P0 rebuilds, re-checks and resolves."""
+    _validate_snapshot_fields({name: getattr(snapshot, name) for name in SNAPSHOT_FIELDS})
     return {"contract": snapshot.contract,
             "store": {"store_id": snapshot.store_id, "incarnation": snapshot.incarnation,
                       "namespace": snapshot.namespace},

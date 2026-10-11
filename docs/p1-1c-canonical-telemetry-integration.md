@@ -356,6 +356,28 @@ plant-telemetry clause, it stops with `SPEC_CONFLICT` instead of adding a local 
   the transport parses the snapshot once; `InvalidRequest` separates client errors from
   server `ValueError`s; `serve()` never exits on an unencodable reply; the sidecar
   smoke is deadline-bounded (`tests/test_sidecar_smoke.py`).
+- Re-review fixes: transport validates the fixed snapshot shape before recursive
+  JSON serialization, so deeply nested invalid frames return `INVALID_REQUEST` and
+  the host continues serving. Typed `TelemetrySnapshot` construction, JSON parsing
+  and direct service reads share field validation; the P0 resolver rejects unreduced
+  resolution strings and negative T before normalization or reference resolution.
+  Only validation raised by a public P0 telemetry read is translated to the client
+  error family; `TelemetryError` from graph/status assembly or the service itself is
+  `INTERNAL_ERROR`. Existing snapshot/resource/clock error codes are preserved.
+- The smoke owns the entire process tree: a suspended launcher is assigned to a
+  kill-on-close job before its first thread resumes; other platforms use a separate
+  process group. Cleanup terminates workers even after the launcher exits. Reaping
+  and reader joins each have a two-second bound; stdout is closed only after the
+  reader stops, so cleanup never waits on its buffered-read lock. The regression
+  `test_worker_holding_stdout_is_killed_even_after_parent_exits` covers an orphaned
+  worker inheriting stdout; the existing silent/chatty/crash tests still pass.
+- Re-review regression tests: `test_deep_snapshot_is_rejected_and_next_frame_is_served`
+  (`test_desktop_backend.py`), `test_direct_service_rejects_invalid_snapshot_fields`,
+  `test_p0_rejects_noncanonical_resolution_and_negative_horizon` and
+  `test_only_telemetry_read_validation_maps_to_invalid_request`
+  (`test_application_views.py`), and
+  `test_telemetry_errors_outside_telemetry_reads_are_server_faults`
+  (`test_application_transport.py`). Each finding was reproduced before its fix.
 - Tests: the core differential test patches `_INDEX_BLOCK` to 7 to cross many blocks.
   Live tests reach the trusted seam through `RunManager._runs[...].session`, as the
   existing P0 execution tests do.

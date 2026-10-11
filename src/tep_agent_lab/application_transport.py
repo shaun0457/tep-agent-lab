@@ -20,7 +20,7 @@ from .application_views import (
 )
 from .playground_views import ViewUnavailable, VisibilityViolation
 from .telemetry import (ClockMismatch, ResourceLimitExceeded, SnapshotUnavailable,
-                        TelemetryError, UnknownBinding)
+                        UnknownBinding)
 
 PROTOCOL_VERSION = "tep-agent-lab.application-transport/v1"
 MAX_REQUEST_BYTES = 64 * 1024
@@ -158,6 +158,11 @@ def _validate(raw: Mapping[str, Any]) -> tuple[ErrorCode | None, dict[str, Any]]
             params["snapshot"] = snapshot_from_json(params["snapshot"])
         except InvalidRequest:
             return ErrorCode.INVALID_REQUEST, {}
+    # The fixed snapshot shape is checked before traversing any client value.
+    try:
+        to_jsonable(params)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return ErrorCode.INVALID_REQUEST, {}
     return None, params
 
 
@@ -183,11 +188,6 @@ def _validate_shape(raw: Mapping[str, Any]) -> ErrorCode | None:
             return ErrorCode.INVALID_REQUEST
         if key in _NULLABLE_INTEGERS and value is not None and type(value) is not int:
             return ErrorCode.INVALID_REQUEST
-    # JSON safety is schema validation; ranges/order/bounds belong to the service.
-    try:
-        to_jsonable(params)
-    except (TypeError, ValueError, OverflowError):
-        return ErrorCode.INVALID_REQUEST
     return None
 
 
@@ -248,9 +248,9 @@ class ApplicationTransport:
             return _failure(request_id, ErrorCode.SNAPSHOT_UNAVAILABLE)
         except ResourceLimitExceeded:
             return _failure(request_id, ErrorCode.RESOURCE_LIMIT_EXCEEDED)
-        except (InvalidRequest, TelemetryError):
-            # Client argument validation: application checks, and telemetry read-path
-            # checks of the client's snapshot, window and point bounds.
+        except InvalidRequest:
+            # Only application validation and explicitly translated read-boundary
+            # validation are client failures. Other TelemetryErrors are server faults.
             return _failure(request_id, ErrorCode.INVALID_REQUEST)
         except Exception:
             return _failure(request_id, ErrorCode.INTERNAL_ERROR)

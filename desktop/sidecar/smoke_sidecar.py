@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import signal
 import subprocess
 import tempfile
 from tempfile import TemporaryDirectory
@@ -17,10 +18,124 @@ TEMPERATURE = "reactor.temperature_measurement"
 PRESSURE = "reactor.pressure_measurement"
 FILENAME = "tep-agent-backend-x86_64-pc-windows-msvc.exe"
 SMOKE_TIMEOUT_SECONDS = 120
+CLEANUP_TIMEOUT_SECONDS = 2
 
 
 class SmokeFailure(AssertionError):
     """The backend did not answer correctly within the smoke deadline."""
+
+
+class _ProcessTree:
+    """Own descendants even if the launcher exits while a worker holds stdout."""
+
+    def __init__(self) -> None:
+        self._job = None
+        if os.name != "nt":
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                        ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                        ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                        ("scheduling", wintypes.DWORD)]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in
+                        ("read_ops", "write_ops", "other_ops", "read_bytes", "write_bytes", "other_bytes")]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("basic", BasicLimits), ("io", IoCounters),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD),
+                        ("thread_id", wintypes.DWORD), ("process_id", wintypes.DWORD),
+                        ("base_priority", wintypes.LONG), ("delta_priority", wintypes.LONG),
+                        ("flags", wintypes.DWORD)]
+
+        self._ctypes, self._ThreadEntry = ctypes, ThreadEntry
+        api = self._api = ctypes.WinDLL("kernel32", use_last_error=True)
+        signatures = {
+            "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], wintypes.HANDLE),
+            "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                         wintypes.DWORD], wintypes.BOOL),
+            "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
+            "CreateToolhelp32Snapshot": ([wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
+            "Thread32First": ([wintypes.HANDLE, ctypes.POINTER(ThreadEntry)], wintypes.BOOL),
+            "Thread32Next": ([wintypes.HANDLE, ctypes.POINTER(ThreadEntry)], wintypes.BOOL),
+            "OpenThread": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
+            "ResumeThread": ([wintypes.HANDLE], wintypes.DWORD),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(api, name)
+            function.argtypes, function.restype = arguments, result
+        self._job = api.CreateJobObjectW(None, None)
+        if not self._job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not api.SetInformationJobObject(self._job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+
+    def start(self, argv: list[str], **kwargs: object) -> subprocess.Popen:
+        process = subprocess.Popen(argv, **kwargs,
+                                   creationflags=0x4 if os.name == "nt" else 0,
+                                   start_new_session=os.name != "nt")  # CREATE_SUSPENDED
+        self.process = process
+        if os.name != "nt":
+            return process
+        # Suspend before assigning the job: no worker can escape in the launch race.
+        ctypes, api = self._ctypes, self._api
+        try:
+            if not api.AssignProcessToJobObject(self._job, int(process._handle)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            threads = api.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
+            if threads == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                entry = self._ThreadEntry()
+                entry.size = ctypes.sizeof(entry)
+                present = api.Thread32First(threads, ctypes.byref(entry))
+                while present:
+                    if entry.process_id == process.pid:
+                        thread = api.OpenThread(0x2, False, entry.thread_id)  # THREAD_SUSPEND_RESUME
+                        if not thread:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        try:
+                            if api.ResumeThread(thread) == 0xFFFFFFFF:
+                                raise ctypes.WinError(ctypes.get_last_error())
+                        finally:
+                            api.CloseHandle(thread)
+                        return process
+                    present = api.Thread32Next(threads, ctypes.byref(entry))
+                raise OSError("no suspended launcher thread")
+            finally:
+                api.CloseHandle(threads)
+        except BaseException:
+            self.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
+            for stream in (process.stdin, process.stdout):
+                stream.close()
+            raise
+
+    def close(self) -> None:
+        if self._job:
+            self._api.CloseHandle(self._job)  # kills all descendants, including orphaned workers
+            self._job = None
+        elif os.name != "nt" and hasattr(self, "process"):
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 class FrameSession:
@@ -28,8 +143,9 @@ class FrameSession:
 
     stdout is read by a daemon thread into a queue, so every exchange waits with a
     timeout; stderr goes to an unbounded temporary file, so a chatty child can never
-    block on a full pipe. On exit stdin is always closed, and a child that is still
-    running when the deadline passes is killed and reaped.
+    block on a full pipe. On exit the entire process tree is terminated; process
+    reaping and reader joins are bounded, and stdout is closed only after the
+    reader has stopped, avoiding its buffered-read lock.
     """
 
     def __init__(self, argv: list[str], *, cwd: Path, env: dict[str, str],
@@ -38,8 +154,15 @@ class FrameSession:
         self.lines: list[bytes] = []
         self._stderr = tempfile.TemporaryFile()
         self._replies: queue.Queue[bytes] = queue.Queue()
-        self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE, stderr=self._stderr)
+        try:
+            self._tree = _ProcessTree()
+            self.process = self._tree.start(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE, stderr=self._stderr)
+        except BaseException:
+            if hasattr(self, "_tree"):
+                self._tree.close()
+            self._stderr.close()
+            raise
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
 
@@ -86,6 +209,8 @@ class FrameSession:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        # Terminate descendants even when their launcher has already exited.
+        self._tree.close()
         try:
             if not self.process.stdin.closed:
                 self.process.stdin.close()
@@ -93,9 +218,14 @@ class FrameSession:
             pass
         if self.process.poll() is None:
             self.process.kill()
-        self.process.wait()
-        self._reader.join(timeout=5)
-        self.process.stdout.close()
+        try:
+            self.process.wait(timeout=CLEANUP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        self._reader.join(timeout=CLEANUP_TIMEOUT_SECONDS)
+        # A buffered close would wait forever if a reader still held its lock.
+        if not self._reader.is_alive():
+            self.process.stdout.close()
         self._stderr.close()
 
 

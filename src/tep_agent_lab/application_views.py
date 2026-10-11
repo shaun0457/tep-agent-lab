@@ -6,7 +6,7 @@ resolves "latest". Graph data comes only from the AGENT ProcessGraphView.
 """
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, TypeVar
 
 from industrial_agent_runtime import TaskStatus
 
@@ -16,7 +16,8 @@ from .application_models import (Binding, CanonicalPoint, Entity, EntityType, In
 from .canonical_context import ProjectionScope
 from .playground import RunStatus
 from .playground_views import RunQueries, VisibilityViolation
-from .telemetry import SnapshotUnavailable
+from .telemetry import (ClockMismatch, ResourceLimitExceeded, SnapshotUnavailable,
+                        TelemetryError)
 from .tep_world import leakage_findings
 
 MAX_HISTORY_POINTS = 1000
@@ -34,6 +35,23 @@ class UnknownSignal(LookupError):
 
 class AmbiguousSignal(ValueError):
     """Graph bindings disagree about the signal's semantics."""
+
+
+_ReadResult = TypeVar("_ReadResult")
+
+
+class _InvalidTelemetryRequest(InvalidRequest, TelemetryError):
+    """Read-boundary client validation; preserves the direct service exception family."""
+
+
+def _telemetry_read(read: Callable[..., _ReadResult], *args: Any, **kwargs: Any) -> _ReadResult:
+    """Translate client validation only around the public P0 telemetry read call."""
+    try:
+        return read(*args, **kwargs)
+    except (ClockMismatch, ResourceLimitExceeded):
+        raise
+    except TelemetryError:
+        raise _InvalidTelemetryRequest("invalid telemetry read arguments") from None
 
 
 def _optional_ticks(name: str, value: Any) -> None:
@@ -83,8 +101,9 @@ class ApplicationViewService:
         _optional_ticks("event_horizon_ticks", event_horizon_ticks)
         _optional_ticks("ingest_sequence", ingest_sequence)
         queries = self._queries(run_id)
-        view = self._checked(queries.telemetry_snapshot(event_horizon_ticks=event_horizon_ticks,
-                                                        ingest_sequence=ingest_sequence), run_id)
+        view = self._checked(_telemetry_read(
+            queries.telemetry_snapshot, event_horizon_ticks=event_horizon_ticks,
+            ingest_sequence=ingest_sequence), run_id)
         return snapshot_from_view(run_id, view["snapshot"])
 
     def get_run(self, run_id: str, *, snapshot: TelemetrySnapshot | None = None) -> Run:
@@ -98,7 +117,8 @@ class ApplicationViewService:
         manifest = summary.get("manifest", {})
         snapshot_ref = event_ticks = None
         if pinned is not None:
-            last = self._checked(queries.telemetry_last_event(snapshot=pinned), run_id)
+            last = self._checked(_telemetry_read(
+                queries.telemetry_last_event, snapshot=pinned), run_id)
             snapshot_ref, event_ticks = last["snapshot"]["snapshot_ref"], last["event_ticks"]
         return Run(run_id, RunStatus(summary["run_status"]),
                    None if status is None else TaskStatus(status), summary["view_version"],
@@ -155,7 +175,8 @@ class ApplicationViewService:
         queries = self._queries(run_id)
         pinned = self._pinned(run_id, snapshot)
         entities, binding = self._resolve(queries, run_id, signal_id)
-        view = self._checked(queries.telemetry_current(signal_id, snapshot=pinned), run_id)
+        view = self._checked(_telemetry_read(
+            queries.telemetry_current, signal_id, snapshot=pinned), run_id)
         self._same_signal(view, signal_id)
         sample = view["sample"]
         return Signal(run_id, signal_id, view["source_id"], binding.source_locator, entities,
@@ -177,7 +198,7 @@ class ApplicationViewService:
         queries = self._queries(run_id)
         pinned = self._pinned(run_id, snapshot)
         _, binding = self._resolve(queries, run_id, signal_id)
-        view = self._checked(queries.telemetry_history(
+        view = self._checked(_telemetry_read(queries.telemetry_history,
             signal_id, snapshot=pinned, event_start_ticks=event_start_ticks,
             event_end_ticks=event_end_ticks, max_points=max_points), run_id)
         self._same_signal(view, signal_id)

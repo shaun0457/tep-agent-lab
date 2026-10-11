@@ -192,7 +192,7 @@ class TransportSchemaTests(unittest.TestCase):
                   (SnapshotUnavailable, ErrorCode.SNAPSHOT_UNAVAILABLE),
                   (ClockMismatch, ErrorCode.SNAPSHOT_UNAVAILABLE),
                   (ResourceLimitExceeded, ErrorCode.RESOURCE_LIMIT_EXCEEDED),
-                  (TelemetryError, ErrorCode.INVALID_REQUEST),
+                  (TelemetryError, ErrorCode.INTERNAL_ERROR),
                   (InvalidRequest, ErrorCode.INVALID_REQUEST),
                   (ValueError, ErrorCode.INTERNAL_ERROR),          # server-side, not client
                   (RuntimeError, ErrorCode.INTERNAL_ERROR),
@@ -207,6 +207,17 @@ class TransportSchemaTests(unittest.TestCase):
                 self.assertNotIn(secret, json.dumps(result))
         self.service.get_entity.side_effect = ValueError(secret)
         self.assert_failure(envelope("get_entity", entity_id="reactor"), ErrorCode.INTERNAL_ERROR)
+
+    def test_telemetry_errors_outside_telemetry_reads_are_server_faults(self):
+        for method, params in (("get_entity", {"entity_id": "reactor"}), ("get_run", {}),
+                               ("get_run", {"snapshot": SNAPSHOT}),
+                               ("open_telemetry_snapshot", {}),
+                               ("get_signal", {"signal_id": TEMPERATURE, "snapshot": SNAPSHOT}),
+                               ("get_signal_history", {"signal_id": TEMPERATURE,
+                                                       "snapshot": SNAPSHOT})):
+            with self.subTest(method=method):
+                getattr(self.service, method).side_effect = TelemetryError("private fault")
+                self.assert_failure(envelope(method, **params), ErrorCode.INTERNAL_ERROR)
 
     def test_serialization_failure_is_internal_error(self):
         for result in (object(), {"value": float("nan")}, {"value": object()}):

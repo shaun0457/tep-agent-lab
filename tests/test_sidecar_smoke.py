@@ -62,6 +62,23 @@ class FrameSessionTests(unittest.TestCase):
                 session.exchange({"request_id": "smoke-1"})
         self.assertIn("boom: private failure", str(raised.exception))
 
+    def test_worker_holding_stdout_is_killed_even_after_parent_exits(self):
+        # A bounded sleeping worker reproduces the old close/readline lock hang
+        # without leaving an immortal process behind when this test fails.
+        CHILDREN["tree"] = (
+            "import json, subprocess, sys\n"
+            "sys.stdin.buffer.readline()\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(9)'], "
+            "stdout=sys.stdout, stderr=sys.stderr)\n"
+            "print(json.dumps({'ok': True}), flush=True)\n")
+        with self.session("tree", timeout=2) as session:
+            self.assertTrue(session.exchange({"request_id": "tree"})["ok"])
+            self.assertEqual(0, session.process.wait(timeout=2))
+            started = time.monotonic()
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertFalse(session._reader.is_alive())
+        self.assertTrue(session.process.stdout.closed)
+
     def test_default_deadline_matches_the_previous_smoke_timeout(self):
         self.assertEqual(120, smoke.SMOKE_TIMEOUT_SECONDS)
 

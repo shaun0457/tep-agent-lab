@@ -11,11 +11,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
 
-from industrial_agent_runtime import to_jsonable
+from industrial_agent_runtime import checksum, to_jsonable
 
 from tep_agent_lab import e0_demo
 from tep_agent_lab.application_models import (CanonicalPoint, EntityType, TelemetrySnapshot,
-                                              snapshot_from_json)
+                                              snapshot_from_json, snapshot_to_view)
 from tep_agent_lab.application_views import (
     AmbiguousSignal, ApplicationViewService, MAX_HISTORY_POINTS, UnknownEntity, UnknownSignal,
 )
@@ -160,6 +160,53 @@ class ApplicationViewsTests(unittest.TestCase):
         with self.assertRaises(SnapshotUnavailable):
             self.service.get_signal(self.run_id, TEMPERATURE,
                                     snapshot=replace(self.snapshot, snapshot_ref="forged"))
+
+    def test_direct_service_rejects_invalid_snapshot_fields(self):
+        # Construction/replace and direct service calls share the JSON validator.
+        for changes in ({"event_resolution": "2000/2000"},
+                        {"event_horizon_ticks": -1}, {"ingest_sequence": -1},
+                        {"event_horizon_ticks": True}, {"event_clock_origin": None},
+                        {"context_ref": "x" * 257}):
+            for method in (self.service.get_run, self.service.get_signal,
+                           self.service.get_signal_history):
+                with self.subTest(changes=changes, method=method.__name__):
+                    args = () if method == self.service.get_run else (TEMPERATURE,)
+                    with self.assertRaises(ValueError):
+                        snapshot = replace(self.snapshot, **changes)
+                        if "event_horizon_ticks" in changes:
+                            body = snapshot_to_view(snapshot)
+                            body.pop("snapshot_ref")
+                            snapshot = replace(snapshot, snapshot_ref=
+                                               "telemetry-snapshot:sha256:" + checksum(body))
+                        method(self.run_id, *args, snapshot=snapshot)
+
+    def test_p0_rejects_noncanonical_resolution_and_negative_horizon(self):
+        for field, value in (("event_resolution", "2000/2000"), ("event_horizon_ticks", -1)):
+            body = snapshot_to_view(self.snapshot)
+            if field == "event_resolution":
+                body["event_clock"]["resolution"] = value
+            else:
+                body["event_horizon"]["ticks"] = value
+            if field == "event_horizon_ticks":
+                body.pop("snapshot_ref")
+                body["snapshot_ref"] = "telemetry-snapshot:sha256:" + checksum(body)
+            with self.subTest(field=field), self.assertRaises(TelemetryError):
+                self.queries.telemetry_current(TEMPERATURE, snapshot=body)
+
+    def test_only_telemetry_read_validation_maps_to_invalid_request(self):
+        from tep_agent_lab.application_transport import ApplicationTransport, ErrorCode, PROTOCOL_VERSION
+        for target, expected in (("process_graph", ErrorCode.INTERNAL_ERROR),
+                                 ("telemetry_current", ErrorCode.INVALID_REQUEST)):
+            queries, service = self.changed_queries()
+            getattr(queries, target).side_effect = TelemetryError("private server detail")
+            response = ApplicationTransport(service).dispatch({
+                "protocol_version": PROTOCOL_VERSION, "request_id": "boundary",
+                "method": "get_signal", "params": {"run_id": self.run_id,
+                                                   "signal_id": TEMPERATURE,
+                                                   "snapshot": plain(self.snapshot)}})
+            with self.subTest(target=target):
+                self.assertEqual(expected, response.error.code)
+                self.assertNotIn("private server detail", json.dumps(to_jsonable(response)))
 
     def test_history_window_defaults_and_reduction(self):
         full = self.service.get_signal_history(self.run_id, PRESSURE, snapshot=self.snapshot,

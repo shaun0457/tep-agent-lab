@@ -101,6 +101,20 @@ class FramingTests(unittest.TestCase):
                          (replies[0]["request_id"], replies[0]["error"]["code"]))
         self.assertTrue(replies[1]["ok"])
 
+    def test_deep_snapshot_is_rejected_and_next_frame_is_served(self):
+        # JSON decoding succeeds near the recursion limit; recursive serialization
+        # of this invalid snapshot must never happen before shape validation.
+        frame = (b'{"protocol_version":"' + PROTOCOL_VERSION.encode()
+                 + b'","request_id":"deep","method":"get_run",'
+                 + b'"params":{"run_id":"e0-observatory","snapshot":'
+                 + b'[' * 991 + b'0' + b']' * 991 + b'}}')
+        self.assertLess(len(frame), MAX_REQUEST_BYTES)
+        replies = self.exchange(frame + b"\n" + request() + b"\n")
+        self.assertEqual(2, len(replies))
+        self.assertEqual("INVALID_REQUEST", replies[0]["error"]["code"])
+        self.assertTrue(replies[1]["ok"])
+        self.service.get_run.assert_called_once_with(run_id="e0-observatory")
+
     def test_unencodable_response_becomes_fixed_internal_error(self):
         self.service.get_run.return_value = {"text": "\ud800"}
         replies = self.exchange(request() + b"\n" + request() + b"\n")
