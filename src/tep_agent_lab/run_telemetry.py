@@ -12,9 +12,14 @@ Every prepare attempt draws an opaque incarnation token. Public identifiers (sou
 clocks, namespace, incarnation) carry that token, never the attempt counter, the
 session directory or a failure count, so failed prepares stay invisible to AGENT
 readers. The token-to-attempt association exists only in this trusted in-process
-object. ``translate``/``deliver`` are a trusted harness seam reachable through the
-in-process ``RunSession`` only; no public P0, application or transport read reaches
-them.
+object. Ingest times are diagnostic only and never public: they stay inside the store
+and are sampled once per sync.
+
+``seal()`` is called by P0 when the session is assembled, before READY. After that
+``sync_reference_history`` raises. The only post-seal delivery path is the explicit
+``_harness_translate``/``_harness_deliver`` pair, which production code never calls
+(tested); acceptance tests use it to inject late, out-of-order, duplicate and same-tick
+deliveries through a real prepared session.
 """
 
 from __future__ import annotations
@@ -49,6 +54,9 @@ _RESOLUTION = re.compile(r"[1-9][0-9]*/[1-9][0-9]*")
 SNAPSHOT_KEYS = frozenset({"contract", "store", "ingest_sequence", "event_horizon",
                            "event_clock", "context_ref", "visibility_policy_ref",
                            "snapshot_ref"})
+_STORE_KEYS = frozenset({"store_id", "incarnation", "namespace"})
+_HORIZON_KEYS = frozenset({"clock_id", "ticks"})
+_CLOCK_KEYS = frozenset({"clock_id", "kind", "resolution", "origin"})
 
 
 @dataclass(frozen=True)
@@ -76,10 +84,11 @@ def snapshot_json(snapshot: TelemetryReadSnapshot) -> dict[str, Any]:
 
 
 def sample_json(sample: SignalSample) -> dict[str, Any]:
+    """Public sample shape. ``ingest_time`` is deliberately absent: it is diagnostic
+    acceptance-clock data and would expose prepare timing to AGENT readers."""
     return {"source_id": sample.source_id, "signal_id": sample.signal_id,
             "sequence": sample.sequence, "event_ticks": sample.event_time.ticks,
-            "ingest_time_ticks": sample.ingest_time.ticks, "value": sample.value,
-            "quality": str(sample.quality)}
+            "value": sample.value, "quality": str(sample.quality)}
 
 
 def utc_ticks(timestamp: Any) -> int:
@@ -95,7 +104,7 @@ def utc_ticks(timestamp: Any) -> int:
     return (moment - _EPOCH) // timedelta(milliseconds=1)
 
 
-def _exact(value: Any, keys: set[str], name: str) -> Mapping[str, Any]:
+def _exact(value: Any, keys: frozenset[str], name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != keys:
         raise TelemetryError(f"snapshot {name} has an unexpected shape")
     return value
@@ -107,15 +116,18 @@ def _nonnegative(name: str, value: Any) -> int:
     return value
 
 
+class TelemetrySealed(TelemetryError):
+    """Ingestion was attempted after the run telemetry was sealed at READY."""
+
+
 class RunTelemetry:
     """Source, store, ingestor and reader of one prepared P0 session (one incarnation)."""
 
     def __init__(self, *, run_id: str, graph: ProcessGraph, graph_source: ContextSourceRef,
                  visibility_policy_ref: str, clock: Callable[[], str],
                  policy: TelemetryReadPolicy | None = None) -> None:
+        # The trusted host (RunManager) validates the policy type.
         policy = policy or TelemetryReadPolicy()
-        if not isinstance(policy, TelemetryReadPolicy):
-            raise TelemetryError("TelemetryReadPolicy required")
         self._token = secrets.token_hex(16)   # opaque; never the attempt number
         token = self._token
         self.policy = policy
@@ -135,30 +147,56 @@ class RunTelemetry:
         self._clock = clock
         self._lock = threading.Lock()
         self._cursor = 0
+        self._sealed = False
 
     @property
     def source_id(self) -> str:
         return self.source.source_id
 
-    # -- trusted ingestion seam ---------------------------------------------------------
-    def translate(self, record: Mapping[str, Any]) -> tuple[SourceObservation, ...]:
-        """One sanitized record -> one batch with a newly allocated source sequence."""
-        return self.source.translate_sanitized(record)
+    @property
+    def sealed(self) -> bool:
+        with self._lock:
+            return self._sealed
 
-    def deliver(self, batch: Sequence[SourceObservation]) -> AppendResult:
-        """Commit one batch atomically at the trusted P0 clock's ingest time."""
-        return self._ingestor.ingest(batch, ingest_time=TimePoint(
-            INGEST_CLOCK.clock_id, utc_ticks(self._clock())))
+    # -- ingestion (trusted, pre-READY) -------------------------------------------------
+    def _ingest_time(self) -> TimePoint:
+        return TimePoint(INGEST_CLOCK.clock_id, utc_ticks(self._clock()))
+
+    def _commit(self, batch: Sequence[SourceObservation], ingest_time: TimePoint
+                ) -> AppendResult:
+        return self._ingestor.ingest(batch, ingest_time=ingest_time)
 
     def sync_reference_history(self, history: Sequence[Mapping[str, Any]]) -> int:
-        """Translate and ingest ``history[cursor:]`` in order; return the committed K."""
+        """Translate and ingest ``history[cursor:]`` in order; return the committed K.
+
+        One trusted clock sample serves the whole sync, so ingest times carry no
+        per-record timing. Raises ``TelemetrySealed`` after ``seal()``.
+        """
         with self._lock:
+            if self._sealed:
+                raise TelemetrySealed("run telemetry is sealed")
             if len(history) < self._cursor:
                 raise TelemetryError("reference history shrank below the ingested prefix")
+            ingest_time = self._ingest_time()
             for record in history[self._cursor:]:
-                self.deliver(self.translate(record))
+                self._commit(self.source.translate_sanitized(record), ingest_time)
                 self._cursor += 1
             return self.store.current_ingest_sequence
+
+    def seal(self) -> None:
+        """Close ingestion; P0 calls this when the session is assembled, before READY."""
+        with self._lock:
+            self._sealed = True
+
+    # -- harness-only seam (acceptance tests; never production) --------------------------
+    def _harness_translate(self, record: Mapping[str, Any]) -> tuple[SourceObservation, ...]:
+        """Trusted test harness: translate a sanitized record with the session's source."""
+        return self.source.translate_sanitized(record)
+
+    def _harness_deliver(self, batch: Sequence[SourceObservation]) -> AppendResult:
+        """Trusted test harness: commit one batch even after seal (dirty-delivery tests)."""
+        with self._lock:
+            return self._commit(batch, self._ingest_time())
 
     # -- snapshots ----------------------------------------------------------------------
     def snapshot(self, *, event_horizon_ticks: int | None = None,
@@ -176,15 +214,12 @@ class RunTelemetry:
 
     def resolve_snapshot(self, value: Any) -> TelemetryReadSnapshot:
         """Rebuild an exact public snapshot object, check its ref, resolve it here."""
-        if isinstance(value, TelemetryReadSnapshot):
-            return self.store.resolve(value)
-        body = _exact(value, set(SNAPSHOT_KEYS), "object")
+        body = _exact(value, SNAPSHOT_KEYS, "object")
         if body["contract"] != TELEMETRY_CONTRACT_VERSION:
             raise SnapshotUnavailable("unsupported snapshot contract")
-        store = _exact(body["store"], {"store_id", "incarnation", "namespace"}, "store")
-        horizon = _exact(body["event_horizon"], {"clock_id", "ticks"}, "event_horizon")
-        clock = _exact(body["event_clock"], {"clock_id", "kind", "resolution", "origin"},
-                       "event_clock")
+        store = _exact(body["store"], _STORE_KEYS, "store")
+        horizon = _exact(body["event_horizon"], _HORIZON_KEYS, "event_horizon")
+        clock = _exact(body["event_clock"], _CLOCK_KEYS, "event_clock")
         if not isinstance(clock["resolution"], str) or not _RESOLUTION.fullmatch(
                 clock["resolution"]):
             raise TelemetryError("snapshot clock resolution must be an exact n/d fraction")

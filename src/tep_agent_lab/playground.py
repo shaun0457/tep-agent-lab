@@ -547,7 +547,12 @@ class RunSession:
     registry: CanonicalContextRegistry
     closed: bool = False
     # Run-scoped canonical telemetry (P1.1C); survives close() for snapshot reads.
-    telemetry: RunTelemetry | None = None
+    _telemetry: RunTelemetry | None = None
+
+    @property
+    def telemetry(self) -> RunTelemetry | None:
+        """Read-only: sealed before READY; no public path ingests into it."""
+        return self._telemetry
 
     def close(self) -> None:
         """Release simulator handles; in-memory history/lineage stays readable."""
@@ -974,6 +979,7 @@ class RunManager:
                                  visibility_policy_ref=f"{VISIBILITY_POLICY_VERSION}#AGENT",
                                  clock=self.clock, policy=self.telemetry_policy)
         telemetry.sync_reference_history(world.history())
+        telemetry.seal()  # the reference history is final for this session (P0 v0)
         artifacts = ArtifactStore(directory / "lab-artifacts")
         holder: list[RcaStateStore] = []
 
@@ -1007,7 +1013,7 @@ class RunManager:
                     request.output_schema, metadata={"run_id": run.run_id})
         return RunSession(directory, world, artifacts, bridged, run_log, store,
                           TraceRecorder(directory / "trace"), task, provider, registry,
-                          telemetry=telemetry)
+                          _telemetry=telemetry)
 
     # -- start --------------------------------------------------------------------------
     def start(self, run_id: str) -> RunOutcome:

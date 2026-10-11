@@ -4,8 +4,10 @@ docs/p1-1c-canonical-telemetry-integration.md. Every test prepares a real P0 run
 (``RunManager`` + TEP + ``FakeProvider``) and reads through the public P0 boundary
 (``RunQueries``) and, where a read exists there, the v1 application boundary
 (``ApplicationViewService``). Late, out-of-order, duplicate, conflict and same-tick
-deliveries enter through the run-scoped trusted seam (``RunSession.telemetry``
-``translate``/``deliver``): ``ReferenceWorld.history()`` cannot produce them in P0 v0.
+deliveries enter through the harness-only seam of a real prepared session
+(``RunTelemetry._harness_translate``/``_harness_deliver``, never used by production
+code): ``ReferenceWorld.history()`` cannot produce them in P0 v0, and the run telemetry
+is sealed at READY.
 """
 
 import ast
@@ -17,7 +19,7 @@ import re
 import unittest
 from unittest import mock
 
-from industrial_agent_runtime import FakeProvider, to_jsonable
+from industrial_agent_runtime import FakeProvider, ToolCallRequest, checksum, to_jsonable
 from tep_sim import ControlMode, MVIntervention
 
 from tep_agent_lab import playground, playground_views, run_telemetry
@@ -98,8 +100,8 @@ class LiveTelemetryCase(PlaygroundCase):
 
     def deliver(self, record):
         telemetry = self.telemetry()
-        batch = telemetry.translate(record)
-        return batch, telemetry.deliver(batch)
+        batch = telemetry._harness_translate(record)
+        return batch, telemetry._harness_deliver(batch)
 
     # Reads through both public boundaries: P0 RunQueries and the v1 application service.
     def app(self):
@@ -162,17 +164,18 @@ class IngestionTests(LiveTelemetryCase):
         samples = self.window(final, max_points=1000)["samples"]
         self.assertEqual(list(range(len(history))), [s["sequence"] for s in samples])
         self.assertEqual([self.ticks(r) for r in history], [s["event_ticks"] for s in samples])
+        self.assertEqual(53, len(telemetry.source.signal_ids))
+        queries = self.queries()
         for k, record in enumerate(history, start=1):
             snapshot = self.snapshot(ingest_sequence=k)
-            for signal in (TEMPERATURE, COOLING):
+            for signal in telemetry.source.signal_ids:
                 with self.subTest(k=k, signal=signal):
-                    current = self.current(snapshot, signal)
-                    self.assertEqual((current["sample"]["sequence"], current["sample"]["value"]),
-                                     (k - 1, self.value(record, signal)))
-        self.assertEqual(53, len(telemetry.source.signal_ids))
-        for signal in telemetry.source.signal_ids:
+                    sample = plain(queries.telemetry_current(signal, snapshot=snapshot))["sample"]
+                    self.assertEqual((sample["sequence"], sample["event_ticks"], sample["value"]),
+                                     (k - 1, self.ticks(record), self.value(record, signal)))
+        for signal in telemetry.source.signal_ids:     # both boundaries at the final K
             with self.subTest(signal=signal):
-                self.assertEqual(self.current(final, signal)["sample"]["value"],
+                self.assertEqual(self.current(final, signal)["application"]["current"]["value"],
                                  self.value(history[-1], signal))
 
     def test_store_context_ref_is_the_attested_process_graph_source(self):
@@ -230,6 +233,26 @@ class IngestionTests(LiveTelemetryCase):
                 self.assertEqual({f"tep-reference:{run_id}:{token}"}, source_ids)
                 self.assertEqual(len(self.history(run_id)), snapshot["ingest_sequence"])
                 self.assertEqual(0, plain(views[2])["samples"][0]["sequence"])
+                service = ApplicationViewService(self.manager.queries)
+                model = service.open_telemetry_snapshot(run_id)
+                transport = ApplicationTransport(service)
+                outputs = [plain(model), plain(service.get_run(run_id, snapshot=model)),
+                           plain(service.get_signal(run_id, TEMPERATURE, snapshot=model)),
+                           plain(service.get_signal_history(run_id, TEMPERATURE, snapshot=model,
+                                                            max_points=5))]
+                outputs += [plain(transport.dispatch({
+                    "protocol_version": PROTOCOL_VERSION, "request_id": "req", "method": method,
+                    "params": {"run_id": run_id, **params}})) for method, params in (
+                        ("open_telemetry_snapshot", {}),
+                        ("get_signal", {"signal_id": TEMPERATURE, "snapshot": plain(model)}))]
+                app_text = json.dumps(outputs)
+                self.assertIsNone(re.search(r"prepare|PREPARE_FAILED", app_text, re.IGNORECASE))
+                self.assertEqual((model.incarnation, model.namespace, model.event_clock_id,
+                                  model.event_clock_origin),
+                                 (f"inc-{token}", f"p0-run:{run_id}:{token}",
+                                  f"tep-sim:{run_id}:{token}", f"tep-reset:{run_id}:{token}"))
+                self.assertEqual(f"tep-reference:{run_id}:{token}", outputs[2]["source_id"])
+                self.assertEqual(outputs[0], outputs[4]["result"])
 
     def test_snapshot_survives_run_and_is_unavailable_after_reopen(self):
         snapshot = self.snapshot()
@@ -256,6 +279,69 @@ class IngestionTests(LiveTelemetryCase):
             reopened.telemetry_snapshot()
         with self.assertRaises(ViewUnavailable):
             reopened.telemetry_current(TEMPERATURE, snapshot=snapshot)
+
+
+class SealAndSideChannelTests(LiveTelemetryCase):
+    def test_run_telemetry_is_sealed_at_ready(self):
+        telemetry = self.telemetry()
+        self.assertTrue(telemetry.sealed)
+        with self.assertRaises(run_telemetry.TelemetrySealed):
+            telemetry.sync_reference_history(self.history())
+        for name in ("deliver", "translate", "telemetry"):
+            self.assertFalse(hasattr(telemetry, name), name)
+        with self.assertRaises(AttributeError):
+            self.session().telemetry = None                 # read-only session access
+
+    def test_harness_seam_is_never_used_by_production_code(self):
+        for path in SRC.glob("*.py"):
+            if path.name != "run_telemetry.py":
+                with self.subTest(module=path.name):
+                    self.assertNotIn("_harness_", path.read_text(encoding="utf-8"))
+
+    def test_ingest_time_is_not_public_and_sampled_once_per_sync(self):
+        snapshot = self.snapshot()
+        views = plain([self.queries().telemetry_current(TEMPERATURE, snapshot=snapshot),
+                       self.queries().telemetry_history(TEMPERATURE, snapshot=snapshot,
+                                                        max_points=1000)])
+        service = self.app()
+        model = service.open_telemetry_snapshot(self.run_id)
+        outputs = plain([service.get_signal(self.run_id, TEMPERATURE, snapshot=model),
+                         service.get_signal_history(self.run_id, TEMPERATURE, snapshot=model)])
+        self.assertNotIn("ingest_time", json.dumps([views, outputs]))
+        stamps = iter(f"2026-10-01T00:00:{second:02d}Z" for second in range(60))
+        self.manager.clock = lambda: next(stamps)
+        self.prepare_run("run-2")
+        index = self.telemetry("run-2").store._streams[
+            (self.telemetry("run-2").source_id, TEMPERATURE)]
+        ingest_times = {record.sample.ingest_time for record in index._records}
+        self.assertEqual(1, len(ingest_times))              # one clock sample per sync
+
+    def test_no_agent_output_names_failed_prepares(self):
+        def broken(world):
+            raise RuntimeError("hidden setup failure")
+        self.manager.create("run-2", request())
+        with self.assertRaises(PrepareError):
+            self.manager.prepare("run-2", provider=FakeProvider([turn()]),
+                                 context_sources=self.sources(), case_setup=broken)
+        self.manager.prepare("run-2", provider=FakeProvider([turn()]),
+                             context_sources=self.sources(), case_setup=harness_case)
+        self.manager.start("run-2")
+        queries = self.queries("run-2")
+        service = ApplicationViewService(self.manager.queries)
+        model = service.open_telemetry_snapshot("run-2")
+        transport = ApplicationTransport(service)
+        outputs = [queries.run_summary(), queries.manifest_view(), queries.events(),
+                   queries.context_inventory(), queries.telemetry_snapshot(),
+                   queries.telemetry_last_event(snapshot=plain(queries.telemetry_snapshot())[
+                       "snapshot"]),
+                   service.get_run("run-2", snapshot=model),
+                   service.get_signal("run-2", TEMPERATURE, snapshot=model)]
+        outputs += [transport.dispatch({"protocol_version": PROTOCOL_VERSION,
+                                        "request_id": "req", "method": method,
+                                        "params": {"run_id": "run-2", **params}})
+                    for method, params in (("open_telemetry_snapshot", {}), ("get_run", {}))]
+        text = json.dumps(plain(outputs))
+        self.assertIsNone(re.search(r"PREPARE_FAILED|prepare-\d{4}", text))
 
 
 class SnapshotContractTests(LiveTelemetryCase):
@@ -379,9 +465,22 @@ class DeliveryTests(LiveTelemetryCase):
                 call()
             failures[name] = (type(raised.exception), raised.exception.args)
         app_failures = self._app_failures(run_id, snapshot, a)
+        service = ApplicationViewService(self.manager.queries)
+        model = service.open_telemetry_snapshot(
+            run_id, event_horizon_ticks=snapshot["event_horizon"]["ticks"],
+            ingest_sequence=snapshot["ingest_sequence"])
+
+        def app_ok():
+            return plain(service.get_signal_history(run_id, TEMPERATURE, snapshot=model,
+                                                    event_start_ticks=a, event_end_ticks=b,
+                                                    max_points=10))
+
+        app_before = app_ok()
+        self.assertEqual([s["sequence"] for s in ok["samples"]],
+                         [p["sequence"] for p in app_before["points"]])
         telemetry = self.telemetry(run_id)
         for _ in range(6):                                  # post-K, inside the ok window
-            telemetry.deliver(telemetry.translate(self.shifted(history[2])))
+            telemetry._harness_deliver(telemetry._harness_translate(self.shifted(history[2])))
         self.assertEqual(ok, plain(queries.telemetry_history(
             TEMPERATURE, snapshot=snapshot, event_start_ticks=a, event_end_ticks=b,
             max_points=10)))
@@ -391,6 +490,7 @@ class DeliveryTests(LiveTelemetryCase):
                     call()
                 self.assertEqual(failures[name], (type(raised.exception), raised.exception.args))
         self.assertEqual(app_failures, self._app_failures(run_id, snapshot, a))
+        self.assertEqual(app_before, app_ok())
         self.assertEqual({"scan": ErrorCode.RESOURCE_LIMIT_EXCEEDED,
                           "beyond-horizon": ErrorCode.INVALID_REQUEST},
                          {name: codes[2] for name, codes in app_failures.items()})
@@ -443,7 +543,7 @@ class DeliveryTests(LiveTelemetryCase):
         frontier = self.ticks(history[-1])
         telemetry = self.telemetry()
         for step in range(1, 1101):
-            telemetry.deliver(telemetry.translate(
+            telemetry._harness_deliver(telemetry._harness_translate(
                 self.shifted(history[-1], ticks=frontier + step, offset=step)))
         snapshot = self.snapshot()
         total = len(history) + 1100
@@ -461,15 +561,15 @@ class DeliveryTests(LiveTelemetryCase):
         history = self.history()
         frontier = self.ticks(history[-1])
         telemetry = self.telemetry()
-        first = telemetry.translate(self.shifted(history[-1], ticks=frontier + 60, offset=1))
-        second = telemetry.translate(self.shifted(history[-1], ticks=frontier + 120, offset=2))
+        first = telemetry._harness_translate(self.shifted(history[-1], ticks=frontier + 60, offset=1))
+        second = telemetry._harness_translate(self.shifted(history[-1], ticks=frontier + 120, offset=2))
         n = len(history)
         self.assertEqual((n, n + 1), (first[0].sequence, second[0].sequence))
-        telemetry.deliver(second)                               # out of order
+        telemetry._harness_deliver(second)                               # out of order
         early = self.snapshot()
         before = (self.current(early), self.window(early, start=frontier + 1))
         self.assertEqual([n + 1], [s["sequence"] for s in before[1]["samples"]])
-        result = telemetry.deliver(first)                      # late: event <= T, commit K+1
+        result = telemetry._harness_deliver(first)                      # late: event <= T, commit K+1
         self.assertEqual(early["ingest_sequence"] + 1, result.ingest_sequence)
         self.assertEqual(before, (self.current(early), self.window(early, start=frontier + 1)))
         late = self.snapshot()
@@ -484,7 +584,7 @@ class DeliveryTests(LiveTelemetryCase):
         batch, first = self.deliver(record)
         snapshot = self.snapshot()
         reads = (self.current(snapshot), self.window(snapshot))
-        again = self.telemetry().deliver(batch)
+        again = self.telemetry()._harness_deliver(batch)
         self.assertEqual((0, first.ingest_sequence), (again.new_count, again.ingest_sequence))
         self.assertEqual(first.records, again.records)
         self.assertEqual(snapshot, self.snapshot())
@@ -497,7 +597,7 @@ class DeliveryTests(LiveTelemetryCase):
         batch, first = self.deliver(self.shifted(self.history()[-1]))
         conflict = (replace(batch[0], value=batch[0].value + 1.0), *batch[1:])
         with self.assertRaises(IdentityConflict):
-            self.telemetry().deliver(conflict)
+            self.telemetry()._harness_deliver(conflict)
         self.assertEqual(first.ingest_sequence, self.telemetry().store.current_ingest_sequence)
 
     def test_live_same_tick_observations_retained(self):
@@ -516,7 +616,7 @@ class DeliveryTests(LiveTelemetryCase):
         self.assertEqual(captured[0]["simulation_time_hours"], captured[1]["simulation_time_hours"])
         self.assertEqual(len(history), telemetry.store.current_ingest_sequence)
         for record in captured:
-            telemetry.deliver(telemetry.translate(record))
+            telemetry._harness_deliver(telemetry._harness_translate(record))
         snapshot = self.snapshot(run_id)
         tick = self.ticks(captured[0])
         queries = self.queries(run_id)
@@ -531,6 +631,17 @@ class DeliveryTests(LiveTelemetryCase):
         current = plain(queries.telemetry_current(COOLING, snapshot=snapshot))
         self.assertEqual((len(history) + 1, captured[1]["manipulated_variables"][runtime]),
                          (current["sample"]["sequence"], current["sample"]["value"]))
+        service = ApplicationViewService(self.manager.queries)
+        model = service.open_telemetry_snapshot(run_id)
+        self.assertEqual(snapshot["snapshot_ref"], model.snapshot_ref)
+        history_app = service.get_signal_history(run_id, COOLING, snapshot=model,
+                                                 event_start_ticks=tick, event_end_ticks=tick)
+        self.assertEqual([(s["sequence"], s["value"]) for s in samples],
+                         [(p.sequence, p.value) for p in history_app.points])
+        self.assertEqual(telemetry.source_id, history_app.source_id)
+        signal = service.get_signal(run_id, COOLING, snapshot=model)
+        self.assertEqual((len(history) + 1, captured[1]["manipulated_variables"][runtime]),
+                         (signal.current.sequence, signal.current.value))
 
 
 class BoundaryTests(LiveTelemetryCase):
@@ -586,11 +697,17 @@ class BoundaryTests(LiveTelemetryCase):
                     self.assertNotIn(forbidden, source)
         public = {name for name in dir(playground_views.RunQueries) if not name.startswith("_")}
         self.assertFalse({"deliver", "translate", "sync_reference_history", "ingest"} & public)
+        # RunTelemetry keeps only the trusted pre-READY sync (sealed afterwards, tested).
+        telemetry_public = {name for name in dir(run_telemetry.RunTelemetry)
+                            if not name.startswith("_")}
+        self.assertFalse({"deliver", "translate", "ingest"} & telemetry_public)
 
 
 class AgentAndV0RegressionTests(LiveTelemetryCase):
     # Values at e5ccf19 (the P1.1C base): Agent tools are unchanged until P1.5.
     BASE_TOOL_SET_VERSION = "68431d8093581e9cf9d649e32ef5649fc4cf399ed08ec4806984c02d82d1debf"
+    BASE_HISTORY_OUTPUT = "d0e5fd01069247bbacd3e10b2305d57b3e6f9f9de3f9ed525e4c12369b954a0a"
+    BASE_HISTORY_ARTIFACT = "84b9b7fedb7ee364f0fd9c6e6bd6689864d6bee164702a39a91e6db9ff46b810"
 
     def test_agent_tool_surface_unchanged(self):
         from tep_agent_lab.tool_bridge import BRIDGE_VERSION
@@ -599,10 +716,18 @@ class AgentAndV0RegressionTests(LiveTelemetryCase):
         self.assertEqual((TOOL_SURFACE_VERSION, BRIDGE_VERSION, self.BASE_TOOL_SET_VERSION),
                          ("tep-agent-lab.tool-surface/v0", "tep-agent-lab.tool-bridge/v0",
                           policy["tool_set_version"]))
-        # get_history still reads the unchanged sanitized reference history.
-        surface = self.session().surface.surface
-        self.assertIs(surface.world, self.session().world)
-        self.assertEqual(self.history(), surface.world.history())
+        # A fixed get_history request: structured output and artifact equal the e5ccf19
+        # baseline (checksums computed by the same request on the base checkout).
+        session = self.session()
+        spec = next(s for s in session.surface.tool_specs() if s.name == "get_history")
+        result = session.surface.execute(ToolCallRequest("fixed-history", "get_history", {
+            "window_hours": 0.3, "variables": ["XMEAS(9)", "XMEAS(21)"]}), spec)
+        artifacts = [session.artifacts.read(ref) for ref in result.artifact_refs]
+        self.assertEqual(("SUCCESS", ["HistoryWindowArtifact"], self.BASE_HISTORY_OUTPUT,
+                          self.BASE_HISTORY_ARTIFACT),
+                         (result.status, [ref.kind for ref in result.artifact_refs],
+                          checksum(to_jsonable(result.structured_output)),
+                          checksum(to_jsonable(artifacts))))
 
     def test_telemetry_view_v0_unchanged(self):
         view = plain(self.queries().telemetry(max_records=1000))
