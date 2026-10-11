@@ -425,6 +425,14 @@ optional run snapshot. Frozen D0 fixtures/tests are unchanged.
   and snapshot T/K fields outside the safe JSON range fail `INVALID_REQUEST` before
   service invocation; booleans/floats remain invalid.
 
+### Known limitations
+
+- **`last_event_time` slow path.** When T is below the frontier, the read visits each
+  stream index once (records are budgeted by `max_scan_records`; index visits are not).
+  Streams are keyed by the bindings frozen at store construction, so the visit count is
+  bounded by the binding set, not by record volume. A K-visible stream inventory would
+  remove the visits to streams created after K.
+
 ### Kept as specified
 
 - **F1 — kept: prepare fails closed.** A reference-history record that fails
