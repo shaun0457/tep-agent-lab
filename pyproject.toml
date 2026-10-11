@@ -14,4 +14,4 @@ where = ["src"]
 namespaces = true
 
 [tool.setuptools.package-data]
-tep_agent_lab = ["fixtures/benchmarks/*.json"]
+tep_agent_lab = ["fixtures/benchmarks/*.json", "engineering_corpus/*/*.md", "engineering_corpus/*/manifest.json"]
