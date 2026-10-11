@@ -130,8 +130,9 @@ a reactor/stream/valve enum (plant-telemetry §Canonical Plant Context).
 
 Candidate shared anchor (not decided here). An ISA-95-style equipment hierarchy
 (enterprise / site / area / line or process cell / unit or work cell) is used by both
-process and discrete plants. It is a candidate anchor for the canonical model. Whether to
-adopt it, and how, is for an owning spec (P1.3 or later) to decide.
+process and discrete plants. It is a post-MVP candidate anchor for the canonical model.
+P1.3 does not adopt it and gains no Level-1 requirement from it; P1.3 only must not
+foreclose adding it later. Adopting it needs a later owning spec.
 
 ### Layer 2 — Domain packs
 
@@ -383,7 +384,8 @@ They should be written early, in parallel with the P1.1C and P1.2A implementatio
 rather than just before each milestone starts. This changes no implementation order:
 ADR-004 Decision 2 still sequences the milestones. Each spec states how it meets the
 Decision 1 constraints and keeps domain vocabulary in the process pack (Decision 2). The
-P1.3 spec decides whether to adopt an ISA-95-style hierarchy anchor. The P1.4 spec
+P1.3 spec does not adopt an ISA-95-style hierarchy anchor (a post-MVP candidate) and only
+avoids foreclosing it. The P1.4 spec
 should show the same serving contract feeding both an application read and the Agent
 read assembly.
 
@@ -397,7 +399,7 @@ conflicts with ADR-003 §Positioning or ADR-004 Decision 5, a new ADR.
 |---|---|---|
 | External consumer APIs and event streams (MES, BI, process mining) | core | transport deferred (ADR-003); Level 4 lists MES/ERP/CMMS adapters |
 | Plant-model generation from engineering documents | core pipeline + pack compilers | out of P1 (ADR-004 Decision 5) |
-| Shared equipment-hierarchy anchor (ISA-95-style) | core | candidate for the P1.3 or a later owning spec |
+| Shared equipment-hierarchy anchor (ISA-95-style) | core | post-MVP candidate for a later owning spec; P1.3 does not adopt it and only avoids foreclosing it |
 | Non-TEP / brownfield connectors, incl. mixed legacy systems | pack adapters | already Level 2 (P1.7; deferred dirty-stream harness and first external connector) |
 | Diagram / P&ID recognition (P&ID -> graph) | process pack | out of P1.2 (ADR-004 Decision 5; D-003, D-019); ProcessGraph stays tep-sim-owned and human-verified |
 | DEXPI import | process pack | not specified |
