@@ -411,8 +411,10 @@ unchanged.
 
 Each prepared session owns one run-scoped canonical telemetry store. `prepare()` ingests
 every reference-world history record through the TEP simulation source before READY,
-and an ingestion failure fails `prepare()`. Store identifiers carry an opaque
-per-attempt token, never the attempt number. `RunQueries` exposes
+and an ingestion failure fails `prepare()`. The store is sealed before READY: no later
+ingestion path exists in production. Store identifiers carry an opaque per-attempt
+token, never the attempt number. Ingest times are diagnostic and never appear in a
+view. `RunQueries` exposes
 `telemetry_snapshot` (the only read that chooses event horizon T and ingest revision K;
 defaults are K = now and T = the latest committed event, or tick 0 for K = 0, both
 disclosed), and `telemetry_current`, `telemetry_history` and `telemetry_last_event`.

@@ -44,7 +44,9 @@ is the only operation that chooses (T, K):
 `contract`, `store_id`, `incarnation`, `namespace`, `ingest_sequence`,
 `event_horizon_ticks`, `event_clock_id`, `event_clock_kind`, `event_resolution`
 (exact seconds per tick as `"n/d"`), `event_clock_origin`, `context_ref`,
-`visibility_policy_ref`. Callers pass it back unchanged. P0 rebuilds the core snapshot,
+`visibility_policy_ref`. Integers are >= 0. Every other field is a non-empty string of
+at most 256 characters (no nulls). `event_resolution` is a reduced positive fraction,
+so `"2000/2000"` is rejected. Callers pass it back unchanged. P0 rebuilds the core snapshot,
 recomputes `snapshot_ref` and requires equality before resolving it. A mismatch,
 another run, incarnation, context, policy or clock, or a future K fails with
 `SnapshotUnavailable`. No read accepts a missing snapshot as "latest". Identifiers
@@ -101,14 +103,17 @@ All models are frozen dataclasses with tuple collections, serialized with runtim
 
 Sample identity is `(source_id, signal_id, sequence)`: `Signal` and `SignalHistory`
 carry the canonical `source_id` and `signal_id`, and each point carries `sequence`.
+Ingest (acceptance) times are diagnostic store data and are never part of a public
+result, because they would expose prepare timing.
 Results equal the P0 canonical views for the same snapshot and arguments.
 
 ## Failures and visibility
 
 Service failures are typed: `UnknownEntity`, `UnknownSignal`, `AmbiguousSignal`,
 `ViewUnavailable`, `VisibilityViolation`, `SnapshotUnavailable`,
-`ResourceLimitExceeded`, and `ValueError` (including `TelemetryError`) for invalid
-arguments. Messages carry no counts, values, paths or hidden data. The service accepts
+`ResourceLimitExceeded`, `InvalidRequest` (a `ValueError`) for invalid client arguments,
+and `TelemetryError` for invalid snapshot, window or point bounds on a telemetry read.
+Any other `ValueError` is a server fault. Messages carry no counts, values, paths or hidden data. The service accepts
 AGENT-scope queries only, checks run identity and the P0 leakage screen before assembly,
 and never exposes evaluator overlays.
 
@@ -143,12 +148,16 @@ service is not called.
 | `VisibilityViolation` | `VISIBILITY_VIOLATION` / visibility violation |
 | `SnapshotUnavailable`, clock mismatch | `SNAPSHOT_UNAVAILABLE` / snapshot unavailable |
 | `ResourceLimitExceeded` | `RESOURCE_LIMIT_EXCEEDED` / resource limit exceeded |
-| schema failure, `ValueError`/`TelemetryError` from a telemetry read | `INVALID_REQUEST` / invalid request |
+| schema failure, `InvalidRequest`, `TelemetryError` from a telemetry read | `INVALID_REQUEST` / invalid request |
 | method outside the five reads | `UNSUPPORTED_METHOD` / unsupported method |
 | version mismatch | `UNSUPPORTED_PROTOCOL_VERSION` / unsupported protocol version |
 | anything else | `INTERNAL_ERROR` / internal error |
 
-Responses never echo exception text or parameters.
+Responses never echo exception text or parameters. `request_id` must match
+`[A-Za-z0-9._:-]{1,128}`; otherwise the failure is `INVALID_REQUEST` with
+`request_id: null`. A host that cannot encode a response writes the fixed
+`INTERNAL_ERROR` frame with `request_id: null` and keeps serving. Any other
+`ValueError` is `INTERNAL_ERROR`.
 
 ## Versioning and v0 retirement
 

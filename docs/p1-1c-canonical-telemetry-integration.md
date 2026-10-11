@@ -92,7 +92,7 @@ setup/error isolation). Registration:
 | store | `store_id="p0-reference-telemetry"`, `namespace=f"p0-run:{run_id}:{token}"`, `incarnation=f"inc-{token}"`, bindings `source.store_bindings()` (53) |
 | `context_ref` | see §6 |
 | `visibility_policy_ref` | `f"{VISIBILITY_POLICY_VERSION}#AGENT"` (store holds only sanitized AGENT-visible data) |
-| ingest clock | `UTC`, 1 ms/tick, origin `1970-01-01T00:00:00Z/utc`; `ingest_time` = trusted `RunManager.clock()`; diagnostic only, K orders knowledge |
+| ingest clock | `UTC`, 1 ms/tick, origin `1970-01-01T00:00:00Z/utc`; `ingest_time` = trusted `RunManager.clock()`, sampled once per sync; diagnostic only (never in a view), K orders knowledge |
 | reader | `TelemetryReadPolicy(max_points_limit=1000, max_interval_ticks=2_592_000 (30 d), max_scan_records=50_000)`: service policy, not contract; a trusted `RunManager(telemetry_policy=...)` argument may lower it (tests) |
 
 Ingestion rules:
@@ -106,10 +106,13 @@ Ingestion rules:
 - In P0 v0 the reference history cannot change after READY (blind RCA has no MUTATE;
   harness advances only in `case_setup`), so no ingestion happens during or after
   RUNNING. A future reference-mutating path must call `sync_reference_history`.
-- `translate(record)` (the session's `TEPSimulationSource.translate_sanitized`) and
-  `deliver(batch)` (`TelemetryIngestor` plus the next trusted ingest time) form the
-  single commit seam. They are reachable only through the in-process `RunSession`
-  (trusted harness), never through `RunQueries`, `ApplicationViewService`, transport or
+- P0 calls `seal()` right after the sync: afterwards `sync_reference_history` raises
+  and no production ingestion path exists. `RunSession.telemetry` is read-only. The
+  only post-seal delivery path is the harness pair `_harness_translate(record)` (the
+  session's `TEPSimulationSource.translate_sanitized`) and `_harness_deliver(batch)`
+  (`TelemetryIngestor` plus a trusted ingest time, under the telemetry lock).
+  Production code never references it (tested). It is never reached through
+  `RunQueries`, `ApplicationViewService`, transport or
   the desktop. This is not the deferred dirty-stream harness: it injects no gaps,
   quality, skew or disconnect.
 - Reference and counterfactual streams stay separate: branches are not ingested.
@@ -142,7 +145,7 @@ telemetry_last_event(*, snapshot: Mapping) -> CanonicalLastEventView
   in `ProcessGraphView` bindings). Unknown ids fail closed; runtime ids are not keys.
 - Views go through `RunQueries._view` (leakage screen, frozen JSON) and carry
   `snapshot_ref`, the snapshot body, binding, bounds, eligible/returned counts, sample
-  identities, event ticks, ingest times, qualities, reduction policy and coverage. Every
+  identities, event ticks, qualities, reduction policy and coverage (no ingest times). Every
   identifier comes from the opaque token (§2), never from the attempt number.
 - Failures keep the core exception types and fixed messages (no counts or values):
   `SnapshotUnavailable`/`ClockMismatch`/`TelemetryError`/`ResourceLimitExceeded`.
@@ -207,7 +210,7 @@ metadata. The manifest is unchanged; the ref is recomputable from
 | File | Change |
 |---|---|
 | `src/tep_agent_lab/telemetry.py` | event-time index, window-bounded scans, `event_frontier`, `last_event_time`; still stdlib-only |
-| `src/tep_agent_lab/run_telemetry.py` (new) | `RunTelemetry`, `TelemetryReadPolicy`, opaque token, `sync_reference_history`, `translate`, `deliver`, `snapshot`, `resolve_snapshot(mapping)`, `context_ref_for(graph_source)` |
+| `src/tep_agent_lab/run_telemetry.py` (new) | `RunTelemetry`, `TelemetryReadPolicy`, opaque token, `sync_reference_history`, `seal`, `_harness_translate`, `_harness_deliver`, `snapshot`, `resolve_snapshot(mapping)`, `context_ref_for(graph_source)` |
 | `src/tep_agent_lab/playground.py` | `RunSession.telemetry`; optional trusted `telemetry_policy`; build and sync in `_session`; prepare fails closed on ingest failure |
 | `src/tep_agent_lab/playground_views.py` | four canonical telemetry views; `TelemetryView` v0 untouched |
 | `src/tep_agent_lab/application_views.py`, `application_models.py` | v1 reads and models (Application API v1) |
@@ -252,10 +255,11 @@ prepare with `FakeProvider`). "Both boundaries" means `RunQueries` and v1
 | `test_live_late_and_out_of_order_delivery` | §Identity: late/out-of-order arrivals append with original event time and new commit; older snapshots unchanged; new snapshot reads in `(ticks, source_id, sequence)` order |
 | `test_live_duplicate_redelivery_is_idempotent` | §Identity bullet 1: redelivered batch returns originals, K unchanged, reads identical; bullet 3: re-translated record is a new observation (P1.1B) |
 | `test_live_identity_conflict_rejects_batch` | §Identity bullet 2: changed content under an existing identity fails the whole batch; K unchanged |
-| `test_live_same_tick_observations_retained` | §Four time concepts (tick collisions do not collapse samples). A MANUAL run whose `case_setup` captures two sanitized `world.observe()` records, before and after an MV apply at the same second. `observe()` does not append to history, so sync never ingests them. After prepare they go through the session's `translate` and `deliver`. Both boundaries show distinct sequences and both values, and current returns the higher sequence. `ReferenceWorld` is unchanged |
+| `test_live_same_tick_observations_retained` | §Four time concepts (tick collisions do not collapse samples). A MANUAL run whose `case_setup` captures two sanitized `world.observe()` records, before and after an MV apply at the same second. `observe()` does not append to history, so sync never ingests them. After prepare they go through the session's `_harness_translate` and `_harness_deliver`. Both boundaries show distinct sequences and both values, and current returns the higher sequence. `ReferenceWorld` is unchanged |
 | `test_snapshot_survives_run_and_is_unavailable_after_reopen` | §Append store retention: READY snapshot reads identically after COMPLETED; reopened run reports `SNAPSHOT_UNAVAILABLE`/`VIEW_UNAVAILABLE`, never today's contents |
 | `test_canonical_views_hide_hidden_state` | Hidden-state isolation and ADR-002: harness-injected hidden disturbance; views, models and transport payloads pass `leakage_findings` and carry canonical ids plus `source_locator` only; non-AGENT queries rejected |
-| `test_no_public_ingestion_path` | §Application boundaries (cannot drive source physics): no method on `RunQueries`, `ApplicationViewService`, transport or the Rust allowlist reaches `translate`/`deliver`/`sync_reference_history` |
+| `test_no_public_ingestion_path` | §Application boundaries (cannot drive source physics): no method on `RunQueries`, `ApplicationViewService`, transport or the Rust allowlist reaches ingestion |
+| `SealAndSideChannelTests` (`test_run_telemetry_is_sealed_at_ready`, `test_harness_seam_is_never_used_by_production_code`, `test_ingest_time_is_not_public_and_sampled_once_per_sync`, `test_no_agent_output_names_failed_prepares`) | sealed seam; no ingest-time side channel; no `PREPARE_FAILED` or `prepare-NNNN` in any AGENT view, application result or transport output (playground-backend-v0 §RunOutcome) |
 
 Migrated application reads, transport and desktop:
 
@@ -291,7 +295,7 @@ Regression:
 | full check | `scripts/check.py` with pinned runtime/tep-sim, including unchanged static E0/E0.1 tests and P1.1A/B boundary tests |
 
 The leakage-matrix (set B), post-K, late, out-of-order, duplicate, conflict and
-same-tick tests inject records through `RunSession.telemetry.translate` and `deliver`,
+same-tick tests inject records through `RunTelemetry._harness_translate` and `_harness_deliver`,
 because `ReferenceWorld.history()` cannot produce them in P0 v0. Each uses a real
 prepared session, that session's source translation and ingestor, and the public
 reads (decision O3). Injected records never enter `ReferenceWorld.history()`, so Agent
@@ -306,7 +310,8 @@ tools cannot see them.
   `get_run`, `get_signal` and `get_signal_history` move to the snapshot-bound canonical
   reads in this PR. Transport v1 and desktop are in scope (§4; owning spec Application API v1). After this PR
   the application boundary has one telemetry read semantics, and P1.4 builds on it.
-- **O3 — injection seam.** Accepted: the run-scoped `translate` + `deliver` seam, with a
+- **O3 — injection seam.** Accepted: the run-scoped harness seam (now `_harness_translate` +
+  `_harness_deliver` on a sealed store), with a
   real prepared session, source translation, ingestor and the public reads.
 - **O4 — snapshot defaults.** Accepted: T/K are resolved once at snapshot creation and
   disclosed; K = 0 uses T = tick 0.
@@ -346,6 +351,11 @@ plant-telemetry clause, it stops with `SPEC_CONFLICT` instead of adding a local 
   it.
 - The ingest clock is `p0-ingest-utc` (UTC ms) fed by `RunManager.clock()`. A
   non-ISO clock value fails ingestion, and therefore `prepare()`, closed.
+- Review fixes: index blocks are read outside the store lock and history merges sorted
+  runs (`heapq.merge`); snapshot objects and `request_id` are validated strictly, and
+  the transport parses the snapshot once; `InvalidRequest` separates client errors from
+  server `ValueError`s; `serve()` never exits on an unencodable reply; the sidecar
+  smoke is deadline-bounded (`tests/test_sidecar_smoke.py`).
 - Tests: the core differential test patches `_INDEX_BLOCK` to 7 to cross many blocks.
   Live tests reach the trusted seam through `RunManager._runs[...].session`, as the
   existing P0 execution tests do.
