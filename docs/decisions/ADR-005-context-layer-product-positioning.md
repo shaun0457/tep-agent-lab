@@ -195,8 +195,9 @@ Workflows consume the core plus one pack.
    and every context revision. Late data never rewrites an earlier view, and replay
    never substitutes today's latest context (plant-telemetry §ContextSnapshot).
 4. **Visibility and leakage discipline.** Derived context takes the most restrictive
-   visibility of its inputs. Evaluator truth never reaches a consumer, and engineering
-   context enters a blind run only as C6 under a versioned leakage-audit extension
+   visibility of its inputs. Evaluator truth never reaches Agent-visible consumers or
+   projections, and engineering context enters a blind run only as C6 under a versioned
+   leakage-audit extension
    (context-compiler-v0 §Benchmark use; ADR-004 Decision 6).
 5. **Measured context value.** D1 measures what each layer of context is worth to a
    fixed consumer (Decision 3).
