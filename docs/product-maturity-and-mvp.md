@@ -459,6 +459,9 @@ P1.4
 context serving + deterministic operational state
 "What is happening now?"
 
+live plant mode
+MVP-required; owning milestone (P1.4 or a new P1.x) decided by the owner (ADR-005)
+
 P1.5
 ContextSnapshot + Investigation Context integration
 

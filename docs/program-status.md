@@ -70,12 +70,12 @@ Research track:
 | D0.2C2 deterministic C0 | pending |
 | D0.2C3 identifiability report | pending |
 | D0 freeze | pending; needs C0, identifiability, data-informed difficulty, one non-local case |
-| D1 context-value study (redirected by ADR-005) | blocked on D0 freeze and B5; the C6 arm also needs P1.2, P1.3 and P1.5; arm set open (OQ-16) |
+| D1 context-value study (redirected by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect)) | blocked on D0 freeze and B5; the C6 arm also needs P1.2, P1.3 and P1.5; open points in OQ-16 |
 | D2 orchestration ablation | parked (ADR-005) |
 
-Cross-track rules (ADR-004 Decision 7): D0 does not block P1.1C–P1.5. Agent capability
-claims need C0 and D1 evidence. B5 is shared by the MVP and D1. D1 measures context value
-with a fixed Agent (ADR-005 Decision 3).
+Cross-track rules (ADR-004 Decision 7): D0 does not block P1.1C–P1.5. While D2 is parked,
+no Agent capability claim is made; D1 produces context-value evidence only, which is not
+capability evidence ([ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect)). B5 is shared by the MVP and D1.
 
 ## Open PRs at last update
 

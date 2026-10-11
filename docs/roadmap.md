@@ -27,6 +27,7 @@ Milestone state lives only in [`program-status.md`](program-status.md).
 | P1.2 | Context Compiler | `context-compiler-v0.md` |
 | P1.3 | Canonical Context composition: PlantContextRevision, scope resolution, derived view | ADR-004 Decision 4; spec to be written |
 | P1.4 | context serving + deterministic Operational State | spec to be written |
+| unassigned | live plant mode: a long-lived simulated plant whose live data continuously enters the canonical telemetry path; MVP-required | [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) §Live plant mode; owning milestone (P1.4 or a new P1.x) decided by the owner |
 | P1.5 | ContextSnapshot + Investigation Context integration | plant-telemetry §ContextSnapshot; spec to be written |
 | — | runtime B5 first real provider; one real-model investigation; MVP integration (E1 + context panels) | Level 1; runtime repo for B5 |
 | P1.6 | validated write-back as Candidate Knowledge | post-Level 1 |
@@ -241,23 +242,7 @@ nuisance-proxy and leakage checks.
 
 ## D1 — Context-value study — after D0 freeze and B5
 
-Positioning and scope: [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) Decision 3. Owning spec to be written.
-
-D1 measures the value of context, not a ranking of Agent capability levels. The same Agent
-(model, settings, prompt template, one orchestration condition), the same cases and seeds and
-the same budgets are held fixed. Default design (recommended; no spec amendment): run the
-evaluation-v0 ladder and read context value from its single-factor steps:
-
-```text
-C0        deterministic floor
-C2 -> C3  value of ProcessGraph topology context
-C5 -> C6  value of compiled, reviewed engineering context
-```
-
-Reported per arm: accuracy, evidence quality, query waste and traceability, with C0 accuracy
-and cost for every case. A C3-based context-only arm is a SPEC_CONFLICT alternative that needs
-amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0; see OQ-16. The C6
-arm needs P1.2, P1.3 and P1.5.
+D1 measures the value of context for a fixed Agent. Its design, step classification and claims are owned by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect); open points are in OQ-16. Owning spec to be written.
 
 ## D2 — Orchestration ablation — parked
 
@@ -382,6 +367,9 @@ Deliver:
 
 ## Phase 6 — Blind RCA capability ladder
 
+> **Redirected by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect).** Do not start work from this section. The
+> capability ladder now runs as the D1 context-value study; the text below is history.
+
 Branch: `exp/rca-reactor-v0`
 
 Canonical capability progression:
@@ -399,6 +387,9 @@ Subagents are not a capability row.
 Exit: at least one blind incident is reproducibly investigated with evidence-backed hypotheses, typed predictions, and counterfactual results.
 
 ## Phase 7 — Orchestration architecture ablation
+
+> **Parked by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect).** This phase is D2, which is parked. Do not start
+> work from this section; the text below is history.
 
 Branch: `exp/orchestration-ablation-v0`
 

@@ -8,7 +8,8 @@
   wording; live plant mode as an MVP-required, unscheduled item; post-MVP candidates
 - Constrains: the future P1.3, P1.4 and P1.5 owning specs (Decisions 1 and 2); the
   future D1 owning spec (Decision 3)
-- Amends (wording only): `docs/product-maturity-and-mvp.md` §Portfolio MVP exit
+- Amends (wording and clarification only): `docs/product-maturity-and-mvp.md`
+  §Required MVP capabilities (a clarification note under C), §Portfolio MVP exit
   criterion, §Product maturity summary and §MVP implementation priority, as listed under
   Consequences. The exit-criteria substance is unchanged.
 - Does not supersede: any accepted spec, ADR-003, or ADR-004 sequencing
@@ -219,17 +220,26 @@ own ADR that amends them explicitly.
    investigation?"
    - Held fixed: the Agent (model, provider, settings, prompt template), one
      orchestration condition, budgets, and the paired cases and seeds.
-   - Default design (recommended; needs no spec amendment): run the evaluation-v0
-     capability ladder and read context value only from its single-factor steps
-     where the changed factor is context:
-     - **C0**: the deterministic floor;
-     - **C2 -> C3**: the value of ProcessGraph topology context;
-     - **C5 -> C6**: the value of compiled, reviewed engineering context from a
-       published EngineeringContextRevision.
-     The other rows (C1, C4, C5) are run because evaluation-v0 defines the ladder
-     cumulatively and ADR-004 Decision 6 requires clean C1–C5 baselines before a C6
-     claim. Their steps (C3 -> C4, C4 -> C5) are reported but are not context-value
-     contrasts.
+   - Default design (recommended; needs no spec amendment): run every evaluation-v0
+     capability row, C0 to C6, and classify each step by the one factor that
+     evaluation-v0 §Capability axis says it adds:
+
+     | Step | Factor added (evaluation-v0) | D1 reading |
+     |---|---|---|
+     | C0 | deterministic no-Agent enumerate/simulate/match baseline | floor; not a step |
+     | C0 -> C1 | not a single factor: the non-Agent baseline becomes an Agent with static compact LLM context | no contrast |
+     | C1 -> C2 | read telemetry/history tools | telemetry context value (secondary metric) |
+     | C2 -> C3 | non-answer-leaking process topology tools | topology context value (primary metric) |
+     | C3 -> C4 | first Tool Bridge analysis tools | not context; reported, no context claim |
+     | C4 -> C5 | counterfactual simulation tools | not context; reported, no context claim |
+     | C5 -> C6 | external/validated rule/knowledge evidence, here compiled, reviewed engineering context from a published EngineeringContextRevision | engineering context value (primary metric) |
+
+     Telemetry is part of the context core (Decision 2, Layer 1), so C1 -> C2 is read
+     as telemetry context value. evaluation-v0 defines C2 by its tools, not by the
+     canonical telemetry path. Until P1.5 migrates Agent telemetry tools to
+     snapshot-bound reads (ADR-004 Decision 6), C2 tools read the existing bounded TEP
+     history. A C1 -> C2 result from such runs measures telemetry access, not the
+     canonical context path, and the D1 spec records the tool version of every run.
    - Reported per arm: accuracy (E2 CausalClaim match, including `NO_ABNORMAL_CAUSE`);
      evidence quality (§Evidence/reference scoring); query waste (E3 relevant and
      irrelevant observation query rate, E4 efficiency); traceability (trace
@@ -237,20 +247,26 @@ own ADR that amends them explicitly.
      ContextSnapshot and source refs). C0 accuracy and cost are reported for every case.
    - Results are descriptive until the sample size supports paired inference
      (evaluation-v0 §Randomization / stochasticity).
+   - D1 produces context-value evidence only. It is not Agent capability evidence,
+     and while D2 is parked no Agent capability claim is made.
 
-   The default follows the existing rules, and this ADR does not reinterpret them:
-   evaluation-v0 defines C6 cumulatively (C6 = C5 + validated knowledge) and requires
-   one intended factor per comparison; ADR-004 Decision 6 and context-compiler-v0
-   §Benchmark use each require engineering context to enter a blind benchmark run only
-   as C6, under a versioned leakage-audit extension; and ADR-004 Decision 6 requires
-   clean C1–C5 baselines before a C6 claim.
+   The default follows the existing rules, and this ADR does not reinterpret them.
+   evaluation-v0 defines the rows cumulatively (C6 = C5 + validated knowledge) and
+   requires one intended factor per comparison, so C5 is the comparator for C6.
+   ADR-004 Decision 6 and context-compiler-v0 §Benchmark use each require engineering
+   context to enter a blind benchmark run only as C6, under a versioned leakage-audit
+   extension. ADR-004 Decision 6 also states: "a capability claim needs clean C1–C5
+   baselines first". Whether that rule applies to a context-value contrast is an open
+   question (OQ-16); this ADR does not decide it. The default runs C1–C5 in any case.
 
    **SPEC_CONFLICT alternative (not adopted).** A context-only arm on top of C3
    (C3 + engineering context, without C4/C5) would vary only context with fewer runs.
    It conflicts with the rules above and would need amendments to evaluation-v0, to
-   ADR-004 Decision 6 and to context-compiler-v0 §Benchmark use, plus an explicit change
-   to the clean C1–C5 baseline rule. This ADR makes none of them. The owner picks
-   between the default and this alternative (OQ-16); the recommendation is the default.
+   ADR-004 Decision 6 and to context-compiler-v0 §Benchmark use. Unless OQ-16 concludes
+   that "a capability claim needs clean C1–C5 baselines first" does not apply to
+   context-value contrasts, it would also need an explicit change to that rule. This
+   ADR makes none of these changes. The owner picks between the default and this
+   alternative (OQ-16); the recommendation is the default.
 
    The C6 arm consumes product outputs: a published EngineeringContextRevision (P1.2),
    its scope resolution (P1.3) and Agent-facing snapshot-bound reads and projection
@@ -349,8 +365,10 @@ makes the investigation possible and traceable". Exact changes in
 | §Portfolio MVP exit criterion, item 9 | "every important claim can be traced to exact source/snapshot refs;" | "every important claim remains traceable to exact source/snapshot refs, including context-layer provenance where applicable;" |
 | §Product maturity summary, L1 row | "one subsystem: context compilation + live state + ContextSnapshot + real investigation" | "one subsystem: context compilation + live state + ContextSnapshot that make a real investigation possible and traceable" |
 | §MVP implementation priority, step after P1.5 | "D1 / investigation capability" / "real model + evidence-backed RCA" | "B5 + one real-model investigation over the P1.5 path" / "first context consumer; no capability claim" |
+| §MVP implementation priority, new entry after P1.4 | (none) | "live plant mode" / "MVP-required; owning milestone (P1.4 or a new P1.x) decided by the owner" |
+| §Required MVP capabilities, C. Live operational state, new note after the first sentence | (none) | "Clarification (ADR-005 §Live plant mode): 'continuously' means a long-lived simulated plant whose live data keeps entering the canonical telemetry path. It is MVP-required and not yet scheduled. Injecting an incident mid-stream is one possible demonstration, not an acceptance condition." |
 
-The last row also corrects existing drift: ADR-004 Decision 2 already puts B5 and one
+The B5 row also corrects existing drift: ADR-004 Decision 2 already puts B5 and one
 real-model investigation without a capability claim on the Level-1 path, not D1. A
 pointer to this ADR is added under §Portfolio MVP exit criterion. No other sentence
 changes.
@@ -390,7 +408,8 @@ conflicts with ADR-003 §Positioning or ADR-004 Decision 5, a new ADR.
 HAZOP, MOC and DEXPI are process-pack candidates, not core features.
 
 Owner priority: this is a portfolio project, so Level-1 MVP scope wins. Every candidate
-above stays unscheduled and post-MVP, and nothing beyond the MVP is scheduled now.
+above stays unscheduled and post-MVP, and no product-track work beyond the MVP is
+scheduled now. The research track keeps its own schedule (ADR-004 Decision 7).
 
 ### TEP limitation and honest claims
 
@@ -441,9 +460,11 @@ the demo. Consequences for claims:
     a weaker generality proof.
   The choice is not needed for Level 1.
 - **Live plant mode owner**: P1.4 or a new P1.x, decided under the ADR-004 rules.
-- **D1 arm set** (OQ-16): the default full ladder with single-factor context steps
+- **D1 design** (OQ-16): the default full ladder with every step classified
   (recommended), or the SPEC_CONFLICT alternative of a C3-based context-only arm, which
   needs amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0.
+- **Baseline rule** (OQ-16): whether "a capability claim needs clean C1–C5 baselines
+  first" applies to context-value contrasts.
 
 ## Governance follow-ups (not done here)
 

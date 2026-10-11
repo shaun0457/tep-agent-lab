@@ -115,12 +115,11 @@ Open empirical checks, answered only by D0.2C1–C3 evidence:
 
 ## OQ-16 — D1 context-value arm set
 
-Owning decision: [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) Decision 3. Owning spec: the D1 spec, to be written.
-
-D1 holds the Agent fixed and measures context value. Default design (recommended; no spec amendment): run the evaluation-v0 ladder and read context value from its single-factor steps: C0 floor, C2 -> C3 topology context, C5 -> C6 compiled, reviewed engineering context. This follows evaluation-v0 (cumulative C6 = C5 + validated knowledge, one factor per comparison), ADR-004 Decision 6 and context-compiler-v0 §Benchmark use (engineering context enters a blind run only as C6, under a versioned leakage-audit extension) and ADR-004's clean C1–C5 baseline rule.
+Owning decision: [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect), which defines the default D1 design and classifies every capability-ladder step. Owning spec: the D1 spec, to be written.
 
 Open:
 
-- whether the owner keeps the default, or adopts the SPEC_CONFLICT alternative of a context-only arm on top of C3, which needs amendments to evaluation-v0, ADR-004 Decision 6 and context-compiler-v0 §Benchmark use, plus an explicit change to the clean C1–C5 baseline rule;
+- whether the owner keeps the default design or adopts the SPEC_CONFLICT alternative of a context-only arm on top of C3 (required amendments listed in ADR-005 Decision 3);
+- whether ADR-004 Decision 6's "a capability claim needs clean C1–C5 baselines first" applies to D1 context-value contrasts, which ADR-005 does not treat as capability evidence;
 - how the C6 leakage-audit extension detects answer-bearing content in an authored engineering corpus;
 - the repeat count per arm, set from pilot variance.
