@@ -1,6 +1,6 @@
-# P1.2B S1 — Engineering corpus and registration
+# P1.2B S1–S2 — Engineering corpus and deterministic fragments
 
-Status: S1 implemented in the working tree. Owning semantics:
+Status: S1 registration and S2 section/paragraph fragmentation implemented. Owning semantics:
 [Context Compiler v0](specs/context-compiler-v0.md) sections Exact source input,
 SourceFragmentRef, Benchmark use, Model/provider boundary and Initial P1.2 vertical
 slice; existing contracts are described in [P1.2A](p1-2a-compiler-contracts.md).
@@ -65,7 +65,7 @@ registration demo, not proof that they exist in HEAD. Production compilation mus
 supply the revision containing the committed corpus. No source is reviewed
 canonical knowledge merely because it was registered.
 
-The generic module has no domain tag literals, physics, parsing/extraction, Agent
+The S1 registration module has no domain tag literals, physics, extraction, Agent
 tools, model/provider calls, review decisions or publication. Domain names occur
 only in the default corpus path data. Setuptools includes Markdown and manifest
 package data. `.gitattributes` fixes corpus files to LF so checkout conversion does
@@ -85,9 +85,115 @@ not invalidate exact-byte checksums; other files keep the repository convention.
 S1 seeds source material only. It does not claim to have produced bindings, Rules,
 fragments, review records or a staged revision.
 
+## S2 — Section and paragraph fragmenter, parser policy v1
+
+Owning contracts: context-compiler-v0 sections SourceFragmentRef, Exact source input,
+Candidate identity and immutability, and Incremental compilation.
+`markdown_fragments.fragment_markdown(ref, bytes)`
+accepts the exact `ContextSourceRef` and bytes resolved by a trusted application
+from its frozen registry. It requires `text/markdown`, `sha256:bytes` and a matching
+whole-source checksum. It accepts no document path and does not register sources.
+The caller's registry still owns git-revision attestation and visibility filtering.
+
+```text
+[frozen registry] -- exact ref + attested bytes --> [Markdown parser policy v1]
+[Markdown parser policy v1] -- semantic path + byte anchor --> [SourceFragmentRef]
+[SourceFragmentRef] -- reparse anchor + source/fragment checksums --> [verified exact bytes]
+```
+
+Every fragment records `fragmentation_policy = markdown.sections-paragraphs@1`.
+This is a bounded deterministic grammar, not arbitrary Markdown support:
+
+- Input is UTF-8 with LF only. CRLF and bare CR are rejected before parsing; no
+  line endings or source text are normalized. Corpus LF is fixed by `.gitattributes`.
+- ATX headings have one to six `#` characters, zero to three leading spaces and
+  whitespace or end-of-line after the markers. Optional closing hashes separated
+  by whitespace are removed from the heading label used to derive the slug only.
+  A section begins at its heading's first byte and ends immediately before the
+  next heading of the same or higher level, or at EOF. Ancestor sections therefore
+  include child sections. Skipped heading levels use the actual heading stack.
+- Slugs use NFC, case folding, alphanumeric characters and collapsed hyphens;
+  an empty slug becomes `section`. Repeated sibling slugs get `~2`, `~3`, etc.
+  The `~` character cannot occur in a base slug, avoiding numbered-title collisions.
+- Paragraphs are nonempty blank-line-separated blocks owned by the innermost
+  section. Headings also terminate blocks, even without a blank separator. Blank
+  lines contain only spaces/tabs. A paragraph excludes the separators but retains
+  its last line's LF if present. Eligible paragraphs get 1-based indices per section;
+  unsupported blocks do not consume an index. Output is section-first source order.
+- Headings and table-like blocks (conservatively, any block containing `|`), ordered
+  or unordered lists and their indented continuations, fenced/indented code,
+  quotations, HTML, thematic breaks and Setext headings are not paragraph fragments.
+  A mixed prose/unsupported block remains wholly unsupported. Fences suppress
+  headings until a matching same-character fence of at least the opening length;
+  an unclosed fence suppresses through EOF. HTML containers conservatively suppress
+  through their closing tag, including blank lines; unclosed containers suppress
+  through EOF. Preamble before the first ATX heading stays unsupported.
+
+### Locator model and strict persistence
+
+P1.2A `FragmentLocation` adds `LocationKind.MARKDOWN`. Its exact record keys are
+`kind`, `start`, `end`, `pointer`, `section_path`, `paragraph_index`. `pointer` must
+be null; `start` and `end` must be non-boolean integers with `0 <= start < end`.
+`section_path` is a nonempty immutable tuple of slugs (a JSON array in records),
+and `paragraph_index` is null for a section or a positive non-boolean integer for
+a paragraph. `fragment_kind` must agree (`SECTION` or `PARAGRAPH`), and the policy
+must be the supported v1. The demo displays the path and `/paragraph-N` suffix;
+the structured path/index fields, rather than this display string, are the locator.
+
+`extract` recomputes v1 locations from the supplied bytes and requires both the
+semantic path/index and the recorded `[start, end)` to match before returning that
+exact byte slice. A checksum-valid slice with a fabricated semantic path or changed
+anchor is rejected. `SourceFragmentRef.verify` additionally checks the exact source
+checksum and fragment SHA-256. Existing compiler candidate validation and publication
+verification use this same path; they still require exact session source membership.
+There is no search against newer revisions or offset fallback.
+
+`_location_fits` restricts MARKDOWN to `sha256:bytes`. Strict reconstruction rejects
+missing or extra location/fragment keys. The existing BYTE_RANGE and JSON_POINTER
+record keys, extraction behavior and identity hashes stay unchanged; semantic fields
+are forbidden on these legacy kinds.
+
+### Identity and edit isolation
+
+`fragment_id` uses the same exact identity for every location kind: the full
+`source_ref` record (including git revision, whole-source checksum and provenance),
+the full location record (including byte start/end and structured section path and
+paragraph index), fragment kind, content checksum, policy and optional label.
+Identical exact refs, locations and policy yield identical ids and order. A new
+source revision changes every fragment id even for unchanged paragraph bytes;
+candidate content keys and versions therefore change through the existing P1.2A
+candidate API. Record reconstruction rejects a substituted source under the old id.
+
+`markdown_fragments.diff_key(fragment)` is a separate **non-identity** comparison
+key: structured semantic locator (section path and paragraph index), fragment kind,
+policy and fragment content checksum. It excludes the source ref and byte offsets
+and is compared only within corresponding source namespaces. It is not persisted
+and is never used in candidate hashing, review binding or publication. Equal diff
+keys permit edit comparison only; they cannot reuse trust decisions or exact refs.
+
+Replacing one paragraph, without changing headings or block structure, changes
+exactly that paragraph's diff key and those of its enclosing sections, including
+ancestors: their exact byte slices contain the edited paragraph by design. Every
+other diff key stays unchanged even when later offsets move. Heading renames,
+paragraph insertion/deletion, or classification changes can change locators and
+therefore additional diff keys. New parser semantics require a new policy version.
+
+The corpus golden is strict JSON at `tests/markdown_fragments_golden.json`, with
+all 32 ids, kinds, displayed locators and byte ranges (6 procedure, 9 subsystem,
+8 tag-table, 9 troubleshooting fragments). `tests/test_markdown_fragments.py` was
+written first and failed initially because the module did not exist. It covers
+the full golden, repeated runs, exact fragment/candidate identity changes across
+source revisions, substituted-source reconstruction rejection, exact diff-key edit
+isolation including ancestor sections, exact re-extraction/checksums, empty sections,
+Unicode byte offsets, duplicate headings, unsupported blocks, LF rejection, strict
+persistence, legacy compatibility, generic code literals and subprocess demo output.
+
+S3 owns table-row and procedure-step fragments; S4 owns typed extraction. Those
+blocks remain exact content inside their SECTION fragments but get no specialized
+fragments here. S2 adds no candidates, model calls, Agent tools, reviews or publication.
+
 ## Remaining slices
 
-- S2: versioned deterministic section/paragraph fragments and exact re-extraction.
 - S3: table-row and numbered-procedure-step fragments; unsupported blocks stay unclassified.
 - S4: deterministic typed table extraction with fragment provenance and existing inert Rules.
 - S5: end-to-end test-principal review and reproducible non-canonical staged revision.
@@ -98,12 +204,15 @@ The repository publication transaction and head CAS remain P1.2D.
 
 ```console
 python -m tep_agent_lab.engineering_corpus list
+python -m tep_agent_lab.engineering_corpus fragments tep-reactor-cooling.subsystem
 ```
 
 Each tab-separated line prints source id, repository-relative path, byte size and
 SHA-256, in the registry's deterministic source-id order. In an installed package
 outside a checkout, pass `--git-revision <trusted-40-hex-revision>` (and
 `--repository <owner/repo>` when needed). No arbitrary local document is accepted.
+The fragments command prints the tree with kind, semantic locator, half-open exact
+byte range and SHA-256 prefix; it resolves only the supplied registered source id.
 
 `tests/test_engineering_corpus.py` was written first and initially failed because
 the module did not exist. It covers exact registry resolution, freeze, changed

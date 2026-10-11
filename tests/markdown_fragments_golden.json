@@ -1,0 +1,237 @@
+{
+  "policy": "markdown.sections-paragraphs@1",
+  "sources": {
+    "tep-reactor-cooling.operating-procedure": [
+      {
+        "id": "frag-82eee1000fdad176f47a42a35536dd556607d65b9484796295fe17fe9545c142",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-review-procedure",
+        "start": 0,
+        "end": 1030
+      },
+      {
+        "id": "frag-96793c759140db070a1d482a830c1e7e0722325754fb669c767ea20f04546236",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-review-procedure/purpose",
+        "start": 36,
+        "end": 205
+      },
+      {
+        "id": "frag-3f9c31c2fd1c38fa56ead892afcd2785abf80f117940d24616b49073d924b1d7",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-cooling-review-procedure/purpose/paragraph-1",
+        "start": 48,
+        "end": 204
+      },
+      {
+        "id": "frag-872661c1aafad5c2fd199bd562b179740e946077d6c8a196b946a071f12cb832",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-review-procedure/review-steps",
+        "start": 205,
+        "end": 770
+      },
+      {
+        "id": "frag-d93a53e4ab10cfc971baaf0faaf0bd524566e9e5d36e99f332f3d2a8f7367062",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-review-procedure/ambiguous-wording-in-step-4",
+        "start": 770,
+        "end": 1030
+      },
+      {
+        "id": "frag-ba484b663ac2af803b20950c3663e8e3dec6fe3b0e2fd5ce9980ab44ff7fb420",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-cooling-review-procedure/ambiguous-wording-in-step-4/paragraph-1",
+        "start": 802,
+        "end": 1030
+      }
+    ],
+    "tep-reactor-cooling.subsystem": [
+      {
+        "id": "frag-fcb82121f7824a6c35bd245c177f0cb276605c62d3ca0c727c23d5cf87098e93",
+        "kind": "SECTION",
+        "locator": "reactor-and-cooling-water-loop",
+        "start": 0,
+        "end": 968
+      },
+      {
+        "id": "frag-d4d7f95f52c9835a6fb32173b30f52f5568c43a0720b26770a1e29a1826d9d66",
+        "kind": "SECTION",
+        "locator": "reactor-and-cooling-water-loop/scope-and-source",
+        "start": 34,
+        "end": 355
+      },
+      {
+        "id": "frag-19c255cf20bd2a3dfb3f22495bc43479b0b2cd9a6c9a4aa40f4860de777b6c33",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-and-cooling-water-loop/scope-and-source/paragraph-1",
+        "start": 55,
+        "end": 354
+      },
+      {
+        "id": "frag-dc9063ac3b057a46d1e00779504242134d15d4fcdfe879ff7b46c86134cfde08",
+        "kind": "SECTION",
+        "locator": "reactor-and-cooling-water-loop/equipment-and-heat-removal",
+        "start": 355,
+        "end": 540
+      },
+      {
+        "id": "frag-fcf2ce548b5c9ebf860fc8818a6039ba1ddaa7c3d8ae155599d95e33770f5c17",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-and-cooling-water-loop/equipment-and-heat-removal/paragraph-1",
+        "start": 386,
+        "end": 539
+      },
+      {
+        "id": "frag-d6db21cc426481f732c0f7c30fbbac0267db8eda2735f370ff028124300b404f",
+        "kind": "SECTION",
+        "locator": "reactor-and-cooling-water-loop/measurement-identity",
+        "start": 540,
+        "end": 715
+      },
+      {
+        "id": "frag-982a9472034e5d82b2e73f5cacdce00a15b5cd3ee099d67be78648db996328d4",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-and-cooling-water-loop/measurement-identity/paragraph-1",
+        "start": 565,
+        "end": 714
+      },
+      {
+        "id": "frag-5ad78e1b84fc76afb356151b6c44c030eba26b1dd957634c96b06d43208153ee",
+        "kind": "SECTION",
+        "locator": "reactor-and-cooling-water-loop/control-relation",
+        "start": 715,
+        "end": 968
+      },
+      {
+        "id": "frag-38e6d47c9b9cb854ccd21c6602ca695274728a0027f577d56710ecf16c9b46ed",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-and-cooling-water-loop/control-relation/paragraph-1",
+        "start": 736,
+        "end": 968
+      }
+    ],
+    "tep-reactor-cooling.tags-and-limits": [
+      {
+        "id": "frag-c3fe3b21823e2c335a410b3b29639ab96c69fa4bfeee2feb4390e4d1ad8ca55e",
+        "kind": "SECTION",
+        "locator": "reactor-tag-and-limit-table",
+        "start": 0,
+        "end": 1405
+      },
+      {
+        "id": "frag-1c37f8b3cfbfc8ee66380e81d221da6df2bee7bf75837887aa43e515cbab939c",
+        "kind": "SECTION",
+        "locator": "reactor-tag-and-limit-table/basis",
+        "start": 31,
+        "end": 349
+      },
+      {
+        "id": "frag-846bfe4ac354b0a1761a5747d51cc2dacb6b73934bf004c57f3e4c74f71b2a9d",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-tag-and-limit-table/basis/paragraph-1",
+        "start": 41,
+        "end": 348
+      },
+      {
+        "id": "frag-dc2c24e63b36794c8d771d9bf21f3736345fe9754ed733017d1ddebb53956048",
+        "kind": "SECTION",
+        "locator": "reactor-tag-and-limit-table/tags-and-constraints",
+        "start": 349,
+        "end": 983
+      },
+      {
+        "id": "frag-dfbf915c644e6df7b8c3455d3521c2e61a7c819c53f01cc5d35eaefac0a3a5af",
+        "kind": "SECTION",
+        "locator": "reactor-tag-and-limit-table/flow-units",
+        "start": 983,
+        "end": 1135
+      },
+      {
+        "id": "frag-2ac85936c407ebaa3697d7582be6789a0c64f113ce812ef3a8f97b7299f9028f",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-tag-and-limit-table/flow-units/paragraph-1",
+        "start": 998,
+        "end": 1134
+      },
+      {
+        "id": "frag-6191897f21efb39fd16dfaa35fca1250e0c3bafcbef1871e3ffdd54617cd3fd0",
+        "kind": "SECTION",
+        "locator": "reactor-tag-and-limit-table/cross-document-conflict",
+        "start": 1135,
+        "end": 1405
+      },
+      {
+        "id": "frag-392a988a7ad9e9b355646e8f60a0ec51954810d12e37b39c3f419b791d748e35",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-tag-and-limit-table/cross-document-conflict/paragraph-1",
+        "start": 1163,
+        "end": 1405
+      }
+    ],
+    "tep-reactor-cooling.troubleshooting": [
+      {
+        "id": "frag-e3a28cc49f36095fd6a98e64a6124dec7214eea470f14da6b8df0e5bb89b3c77",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-troubleshooting-note",
+        "start": 0,
+        "end": 1111
+      },
+      {
+        "id": "frag-0a366be80d66032c8cea571d04c64edf8ae6e15bb5dd5f635aed2ec7e501e7dc",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-troubleshooting-note/scope",
+        "start": 40,
+        "end": 205
+      },
+      {
+        "id": "frag-86df15c1bbe3bfbd81650da3594c166be5108fc5016c727facf082d2e17b1130",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-cooling-troubleshooting-note/scope/paragraph-1",
+        "start": 50,
+        "end": 204
+      },
+      {
+        "id": "frag-7de4bfe2febef769ce1a32689a4d41bffcd7319d8381a7a4d75efd2b91b846ff",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-troubleshooting-note/temperature-review",
+        "start": 205,
+        "end": 453
+      },
+      {
+        "id": "frag-19ebb4a050a5e5f0313d7f9c4505b8fe00cd172e3c5b7f12be4c9ffd19b078ee",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-cooling-troubleshooting-note/temperature-review/paragraph-1",
+        "start": 228,
+        "end": 452
+      },
+      {
+        "id": "frag-e2831f5e2990ffbc0fcadccb34fbca6b8e17103cf7495ff6b301a57123d2e2c2",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-troubleshooting-note/intentional-competing-limit",
+        "start": 453,
+        "end": 770
+      },
+      {
+        "id": "frag-3178f69f2d98473822267d5b8d9e325b42d619f6366305f6d0ba6654dc17878e",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-cooling-troubleshooting-note/intentional-competing-limit/paragraph-1",
+        "start": 485,
+        "end": 769
+      },
+      {
+        "id": "frag-45d1a72fda1e3391e15d65e5b93ad474a01befeed100b8582382e2b5e1d2942b",
+        "kind": "SECTION",
+        "locator": "reactor-cooling-troubleshooting-note/unverified-instrumentation-proposal",
+        "start": 770,
+        "end": 1111
+      },
+      {
+        "id": "frag-2927d54c9d2caa9746ab3ce8262fa1f97ac9546d42b2fd2796a77cc7eb6513f1",
+        "kind": "PARAGRAPH",
+        "locator": "reactor-cooling-troubleshooting-note/unverified-instrumentation-proposal/paragraph-1",
+        "start": 810,
+        "end": 1111
+      }
+    ]
+  }
+}

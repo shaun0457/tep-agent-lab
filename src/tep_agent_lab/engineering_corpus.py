@@ -25,6 +25,7 @@ from .canonical_context import (
     PackageSourceMaterializer, ProjectionScope, SourceMaterializer, checked_relative_path,
 )
 from .persistence import strict_json_loads
+from .markdown_fragments import fragment_markdown, format_fragment_tree
 
 DEFAULT_MANIFEST = (
     "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/manifest.json"
@@ -183,10 +184,13 @@ def register_corpus(*, repository: str, git_revision: str,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("list",))
+    parser.add_argument("command", choices=("list", "fragments"))
+    parser.add_argument("source_id", nargs="?", help="registered source id for fragments")
     parser.add_argument("--repository", default="shaun0457/tep-agent-lab")
     parser.add_argument("--git-revision", help="trusted exact revision (required outside a checkout)")
     args = parser.parse_args(argv)
+    if (args.command == "fragments") != (args.source_id is not None):
+        parser.error("fragments requires one source-id; list takes none")
     try:
         revision = args.git_revision
         if revision is None:
@@ -195,11 +199,16 @@ def main(argv: list[str] | None = None) -> int:
                 ["git", "-c", f"safe.directory={root.as_posix()}", "-C", str(root),
                  "rev-parse", "HEAD"], text=True, stderr=subprocess.PIPE).strip()
         registry = register_corpus(repository=args.repository, git_revision=revision)
-        for ref in registry.inventory(ProjectionScope.AGENT):
-            resolved = registry.resolve(ref.source_id, ProjectionScope.AGENT)
-            print(f"{ref.source_id}\t{ref.path_or_ref}\t{len(resolved.content)}\t"
-                  f"{ref.content_checksum}")
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        if args.command == "fragments":
+            resolved = registry.resolve(args.source_id, ProjectionScope.AGENT)
+            for row in format_fragment_tree(fragment_markdown(resolved.ref, resolved.content)):
+                print(row)
+        else:
+            for ref in registry.inventory(ProjectionScope.AGENT):
+                resolved = registry.resolve(ref.source_id, ProjectionScope.AGENT)
+                print(f"{ref.source_id}\t{ref.path_or_ref}\t{len(resolved.content)}\t"
+                      f"{ref.content_checksum}")
+    except (OSError, ValueError, LookupError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"corpus validation failed: {exc}\n")
     return 0
 
