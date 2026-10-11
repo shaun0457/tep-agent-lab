@@ -32,7 +32,6 @@ import math
 import re
 import threading
 from typing import Any, NoReturn
-import unicodedata
 
 from industrial_agent_runtime import Visibility
 from industrial_agent_runtime.serialization import freeze_json
@@ -146,19 +145,13 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _nfc(value: Any) -> Any:
-    if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
-    if isinstance(value, Mapping):
-        return {_nfc(key): _nfc(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_nfc(item) for item in value]
-    return value
-
-
 def _digest(value: Any) -> str:
-    """Identity hash: NFC-normalized canonical JSON, so equivalent text hashes alike."""
-    return json_digest(_nfc(value))
+    """Identity hash over the exact canonical JSON bytes (no Unicode normalization).
+
+    Like canonical_context checksums, identity is the exact text: an NFC and an NFD
+    spelling are different records and never share a hash.
+    """
+    return json_digest(value)
 
 
 def _number(value: Any, name: str) -> float:
@@ -1518,6 +1511,7 @@ class ExclusionReason(StrEnum):
     KEEP_CANDIDATE = "KEEP_CANDIDATE"
     VALIDATION_FAILED = "VALIDATION_FAILED"
     REMAP_INVALID = "REMAP_INVALID"
+    DEPENDENCY_INVALID = "DEPENDENCY_INVALID"  # a conflict partner fails exact integrity
 
 
 _STATUS_EXCLUSION = {ReviewStatus.UNREVIEWED: ExclusionReason.UNREVIEWED,
@@ -1587,20 +1581,11 @@ class StagedPublication:
                                     or _sha256(files[ref.path]) != ref.content_checksum):
                 raise PublicationError(f"{ref.path} is missing or its checksum differs")
         document = _keys(_artifact(files, self.revision), _REVISION_KEYS, "revision")
-        parent = document["parent_revision"]
-        expected_parent = None if parent is None else ArtifactPathRef(
-            parent["path_or_ref"], parent["content_checksum"])
-        rule_set = ({"revision": "INPUT"} if self.published_rule_set is None
-                    else {"revision": "SAME_COMMIT", **self.published_rule_set.record()})
-        if (document["lineage_id"] != lineage
-                or {key: value for key, value in document["review_log"].items()
-                    if key in ("review_log_position", "path", "content_checksum")} != {
-                        "review_log_position": self.review_log_position,
-                        **self.review_log.record()}
-                or document["candidates"] != self.candidates.record()
-                or document["published_rule_set"] != rule_set
-                or expected_parent != self.expected_head
-                or document["exclusions"] != [item.record() for item in self.exclusions]):
+        try:
+            consistent = self._agrees(document, lineage)
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise PublicationError(f"malformed revision: {exc!r}") from exc
+        if not consistent:
             raise PublicationError("bundle metadata disagrees with its revision")
         object.__setattr__(self, "document", freeze_json(document))
         object.__setattr__(self, "head_path", head)
@@ -1609,6 +1594,22 @@ class StagedPublication:
             "expected_parent": None if self.expected_head is None
             else self.expected_head.record(),
             "revision": self.revision.record()}))
+
+    def _agrees(self, document: Mapping[str, Any], lineage: str) -> bool:
+        parent = document["parent_revision"]
+        expected_parent = None if parent is None else ArtifactPathRef(
+            parent["path_or_ref"], parent["content_checksum"])
+        rule_set = ({"revision": "INPUT"} if self.published_rule_set is None
+                    else {"revision": "SAME_COMMIT", **self.published_rule_set.record()})
+        return not (document["lineage_id"] != lineage
+                or {key: value for key, value in document["review_log"].items()
+                    if key in ("review_log_position", "path", "content_checksum")} != {
+                        "review_log_position": self.review_log_position,
+                        **self.review_log.record()}
+                or document["candidates"] != self.candidates.record()
+                or document["published_rule_set"] != rule_set
+                or expected_parent != self.expected_head
+                or document["exclusions"] != [item.record() for item in self.exclusions])
 
     def __hash__(self) -> int:
         return hash(self.revision)
@@ -1687,6 +1688,24 @@ def _check_rule_set_visibility(rule_set: RuleSetRevision, visibility: Visibility
 class _Closure:
     input_rule_set: RuleSetRevision
     known_candidate_ids: frozenset[str]
+    invalid_dependency_ids: frozenset[str]
+
+
+def _dependency_refs(candidate_log: Sequence[CandidateRef],
+                     considered: Sequence[Candidate]) -> list[CandidateRef]:
+    """One partner per referenced, unselected candidate id: its latest logged version.
+
+    A selected id is its own partner. Older versions (for example from an earlier
+    session) are never pulled in alongside the version the selection relies on.
+    """
+    selected_ids = {candidate.candidate_id for candidate in considered}
+    referenced = {item for candidate in considered
+                  for item in _conflicting_ids(candidate)} - selected_ids
+    latest: dict[str, CandidateRef] = {}
+    for ref in candidate_log:
+        if ref.candidate_id in referenced:
+            latest[ref.candidate_id] = ref
+    return sorted(latest.values())
 
 
 def _dependency_closure(session: CompileSession, *, considered: Sequence[Candidate],
@@ -1703,11 +1722,13 @@ def _dependency_closure(session: CompileSession, *, considered: Sequence[Candida
     3. the parent revision resolves in the lineage at an allowed visibility;
     4. every review record (by every ref it carries) and every stored candidate is
        visible here;
-    5. every stored candidate's derived inputs resolve to their exact bytes;
-    6. conflict dependencies re-attest their sources and fragments, are exactly
-       conflict partners of the selection, and the known candidate ids for conflict
-       validation come from stored candidates only.
-    Any failure raises ``PublicationError``.
+    5. conflict dependencies are distinct partners of the selection; each one's exact
+       source integrity (sources, fragments, influencing sources, derived inputs) is
+       checked, and a failing partner invalidates only the candidates that rely on it
+       (``invalid_dependency_ids``, excluded as DEPENDENCY_INVALID by ``_decide``);
+    6. the known candidate ids for conflict validation come from stored candidates.
+    Approved candidates' derived inputs are resolved after ``_decide`` (excluded
+    candidates need none). Revision-level failures raise ``PublicationError``.
     """
     try:
         for ref in session.inventory:
@@ -1729,23 +1750,26 @@ def _dependency_closure(session: CompileSession, *, considered: Sequence[Candida
         if most_restrictive(candidate.visibility, visibility) != visibility:
             raise PublicationError("selection includes inputs more restrictive than the "
                                    "publication; compile an allowed-input one")
-        _resolve_derived_inputs(candidate, derived_input_resolver)
-    for candidate in dependencies:
-        # Conflict partners stay unapproved, but their source integrity is mandatory.
-        problems = _source_findings(session, candidate)
-        if problems:
-            raise PublicationError("a conflict dependency fails source attestation: "
-                                   + ",".join(sorted(item.code.value for item in problems)))
-    considered_refs = {candidate.ref for candidate in considered}
+    selected_ids = {candidate.candidate_id for candidate in considered}
     referenced = {item for candidate in considered for item in _conflicting_ids(candidate)}
-    dependency_refs = [candidate.ref for candidate in dependencies]
-    if len(set(dependency_refs)) != len(dependency_refs) or any(
-            candidate.ref in considered_refs or candidate.candidate_id not in referenced
-            for candidate in dependencies):
+    dependency_ids = [candidate.candidate_id for candidate in dependencies]
+    if len(set(dependency_ids)) != len(dependency_ids) or any(
+            item in selected_ids or item not in referenced for item in dependency_ids):
         raise PublicationError("dependencies must be distinct conflict partners of the "
                                "selection")
-    return _Closure(input_rule_set, frozenset(
-        candidate.candidate_id for candidate in (*considered, *dependencies)))
+    invalid: set[str] = set()
+    for candidate in dependencies:
+        # Partners stay unapproved, but the exact source integrity a selected claim
+        # relies on is mandatory: a failing partner excludes the claims that cite it.
+        if _source_findings(session, candidate):
+            invalid.add(candidate.candidate_id)
+            continue
+        try:
+            _resolve_derived_inputs(candidate, derived_input_resolver)
+        except PublicationError:
+            invalid.add(candidate.candidate_id)
+    return _Closure(input_rule_set, frozenset(selected_ids | set(dependency_ids)),
+                    frozenset(invalid))
 
 
 def _check_parent_revision(parent: ContextSourceRef | None,
@@ -1797,7 +1821,9 @@ class CompilerWorkspace:
     def __init__(self, workspace_id: str, visibility: Visibility = Visibility.AGENT) -> None:
         self.workspace_id = _pattern(workspace_id, _ID, "workspace_id")
         self.visibility = _visibility(visibility)
-        self._lock = threading.Lock()
+        # Re-entrant so a misbehaving resolver called during staging cannot deadlock
+        # the workspace; staging detects and rejects any such mutation instead.
+        self._lock = threading.RLock()
         self._entries: dict[CandidateRef, _Entry] = {}
         self._reviews: list[ReviewRecord] = []
 
@@ -1937,7 +1963,8 @@ class CompilerWorkspace:
         bytes through ``derived_input_resolver``, and a parent revision must resolve
         through ``parent_resolver`` to the same lineage at no more restricted visibility.
         The bundle is then verified exactly as a consumer would, against this
-        workspace's review-log anchor.
+        workspace's anchor. Resolvers run while the workspace lock is held and must not
+        modify the workspace; if one does, staging raises ``PublicationError``.
         """
         if not isinstance(session, CompileSession) or not isinstance(request,
                                                                      PublicationRequest):
@@ -1953,12 +1980,10 @@ class CompilerWorkspace:
                     raise PublicationError("selection names an unknown candidate version")
                 entries.append(entry)
             considered = tuple(entry.candidate for entry in entries)
-            selected = {candidate.ref for candidate in considered}
-            referenced = {item for candidate in considered for item in _conflicting_ids(candidate)}
-            # Conflict partners are stored with the bundle as exact dependency records.
-            dependencies = tuple(entry.candidate for ref, entry in sorted(self._entries.items())
-                                 if ref.candidate_id in referenced and ref not in selected)
             candidate_log = tuple(self._entries)  # append order
+            # Conflict partners are stored with the bundle as exact dependency records.
+            dependencies = tuple(self._entries[ref].candidate
+                                 for ref in _dependency_refs(candidate_log, considered))
             staged = _stage_bundle(session, request, workspace_id=self.workspace_id,
                                    records=records, candidate_log=candidate_log,
                                    considered=considered, dependencies=dependencies,
@@ -1968,11 +1993,15 @@ class CompilerWorkspace:
                                anchor=_anchor_of(self.workspace_id, records, candidate_log),
                                derived_input_resolver=derived_input_resolver,
                                parent_resolver=parent_resolver)
+            if (len(self._reviews), len(self._entries)) != (len(records), len(candidate_log)):
+                raise PublicationError("the workspace changed during staging; a resolver must "
+                                       "not modify it")
             return staged
 
 
 def _decide(session: CompileSession, candidate: Candidate, records: Sequence[ReviewRecord],
-            position: int, known_ids: frozenset[str]) -> _Approved | Exclusion:
+            position: int, known_ids: frozenset[str],
+            invalid_dependency_ids: frozenset[str] = frozenset()) -> _Approved | Exclusion:
     """The per-candidate publication decision (shared by staging and verification)."""
     ref = candidate.ref
     if candidate.session_id != session.session_id:
@@ -1989,6 +2018,9 @@ def _decide(session: CompileSession, candidate: Candidate, records: Sequence[Rev
                                    session.plant.source_ref)):
         return Exclusion(ref, ExclusionReason.STALE_REVIEW,
                          "review was made against an incompatible tuple")
+    broken = sorted(set(_conflicting_ids(candidate)) & invalid_dependency_ids)
+    if broken:
+        return Exclusion(ref, ExclusionReason.DEPENDENCY_INVALID, ",".join(broken))
     remap = review.decision is ReviewDecision.REMAP
     if remap:
         original = (candidate.proposed_target if isinstance(candidate, CandidateBinding)
@@ -2022,11 +2054,8 @@ def _stage_bundle(session: CompileSession, request: PublicationRequest, *, works
     if len(set(candidate_log)) != len(candidate_log) or not set(
             request.candidate_refs) <= set(candidate_log):
         raise PublicationError("selection names candidates outside the candidate log")
-    selected = set(request.candidate_refs)
-    referenced = {item for candidate in considered for item in _conflicting_ids(candidate)}
-    expected = sorted(ref for ref in candidate_log
-                      if ref.candidate_id in referenced and ref not in selected)
-    if [candidate.ref for candidate in dependencies] != expected:
+    if [candidate.ref for candidate in dependencies] != _dependency_refs(candidate_log,
+                                                                         considered):
         raise PublicationError("dependencies differ from the conflict partners in the "
                                "candidate log")
     closure = _dependency_closure(
@@ -2037,11 +2066,14 @@ def _stage_bundle(session: CompileSession, request: PublicationRequest, *, works
     approved: list[_Approved] = []
     exclusions: list[Exclusion] = []
     for candidate in considered:
-        outcome = _decide(session, candidate, records, position, closure.known_candidate_ids)
+        outcome = _decide(session, candidate, records, position, closure.known_candidate_ids,
+                          closure.invalid_dependency_ids)
         if isinstance(outcome, Exclusion):
             exclusions.append(outcome)
         else:
             approved.append(outcome)
+    for item in approved:  # excluded candidates need no resolvable derived inputs
+        _resolve_derived_inputs(item.candidate, derived_input_resolver)
     return _build_bundle(session, request, workspace_id, records, candidate_log, approved,
                          tuple(exclusions), considered, dependencies)
 
@@ -2295,11 +2327,11 @@ def _verify(files: Mapping[str, bytes], revision: ArtifactPathRef, session: Comp
     # (A) every artifact is recomputed and compared byte-exactly.
     if restaged.revision != revision:
         _fail("revision differs from its re-staged bytes")
+    if set(files) != {path for path, _ in restaged.files}:
+        _fail("bundle files differ from the re-staged file set")
     for path, data in restaged.files:
         if files.get(path) != data:
             _fail(f"{path} differs from its re-staged bytes")
-    if restaged.expected_head != request.expected_head:
-        _fail("expected head differs from the parent revision")
     effective = tuple(effective_review(records, CandidateRef.from_record(item["candidate_ref"]),
                                        anchor.review_log_position)
                       for section in ("approved_bindings", "approved_knowledge",

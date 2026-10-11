@@ -394,7 +394,7 @@ class FragmentAndCandidateTests(CompilerTestCase):
         nfc = self.c.binding("cafe", 2, "café reactor", TargetKind.ENTITY, "reactor")
         nfd = self.c.binding("cafe", 2, unicodedata.normalize("NFD", "café reactor"),
                              TargetKind.ENTITY, "reactor")
-        self.assertEqual(nfc.content_key, nfd.content_key)
+        self.assertNotEqual(nfc.content_key, nfd.content_key)  # exact text is identity
         self.assertEqual(TypedValue("limit", 130, "degC"), TypedValue("limit", 130.0, "degC"))
         self.assertEqual(1.0, Confidence(1, "fixture-score@1").score)
         for bad in (True, float("nan"), 2 ** 60):
@@ -812,7 +812,7 @@ class PublicationTests(CompilerTestCase):
         self.assertEqual(1, staged["result"].review_log_position)
         self.assertEqual(2, appended["record"].review_log_position)
         self.assertEqual(1, len(committed(staged["result"])["approved_bindings"]))
-        self.assertIsInstance(self.workspace._lock, type(threading.Lock()))
+        self.assertIsInstance(self.workspace._lock, type(threading.RLock()))
 
     def test_ac21_dependency_failure_stages_nothing(self) -> None:
         refs = self.vertical_slice()
@@ -1286,8 +1286,10 @@ class RoundFourTests(CompilerTestCase):
         self.add(ghost)
         claim = self.add(self.c.knowledge("claim", conflicting_candidate_ids=("ghost",)))
         self.review(claim)
-        with self.assertRaises(PublicationError):
-            self.stage([claim])
+        staged = self.stage([claim])  # the claim fails closed; the revision does not abort
+        self.assertEqual([(claim, ExclusionReason.DEPENDENCY_INVALID, "ghost")],
+                         [(item.candidate_ref, item.reason, item.detail)
+                          for item in staged.exclusions])
 
     def test_r4_4_metadata_forgeries_fail(self) -> None:
         refs = PublicationTests.vertical_slice(self)
@@ -1527,6 +1529,128 @@ class TamperEveryFieldTests(CompilerTestCase):
         with self.assertRaises(PublicationError):
             replace(self.staged, expected_head=ArtifactPathRef(
                 self.staged.revision.path, "8" * 64))
+
+
+class CodeReviewTests(CompilerTestCase):
+    """High-level code-review findings on P1.2A."""
+
+    def revision_b(self):
+        """S2: the same lab sources at another attested lab revision (rev B)."""
+        revisions = {**REVISIONS, LAB_REPOSITORY: "d" * 40}
+        sop = replace(self.c.sop_ref, git_revision="d" * 40)
+        r0 = replace(self.c.r0_ref, git_revision="d" * 40)
+        session = CompileSession.prepare(
+            revisions, self.c.materializers(), [GRAPH, sop, r0],
+            process_graph_source_id=GRAPH.source_id, input_rule_set_source_id=R0_ID,
+            plant_graph_loader=build_process_graph,
+            policies=CompilerPolicies("lab-review@1"))
+        return session, sop
+
+    def claim_in(self, session, sop, candidate_id="x", conflicts=("y",)):
+        fragment = self.c.fragment(4, ref=sop)
+        scope = (PlantTargetRef(GRAPH, TargetKind.ENTITY, "reactor"),)
+        return CandidateKnowledge(
+            candidate_id=candidate_id, session_id=session.session_id,
+            extraction_kind=ExtractionKind.TROUBLESHOOTING_GUIDANCE,
+            source_fragments=(fragment,), scope_refs=scope, provenance=self.c.provenance(),
+            conflicting_candidate_ids=tuple(conflicts))
+
+    def test_cr1_old_session_partner_excludes_only_the_claim(self) -> None:
+        s2, sop_b = self.revision_b()
+        self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))  # y@v1, S1
+        x = self.claim_in(s2, sop_b)
+        self.add(x, session=s2)
+        self.review(x.ref)
+        staged = self.stage([x.ref], session=s2)  # must not abort the whole revision
+        self.assertEqual([(x.ref, ExclusionReason.DEPENDENCY_INVALID)],
+                         [(item.candidate_ref, item.reason) for item in staged.exclusions])
+        y2 = self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor", session=s2)
+        y2 = replace(y2, mention_fragment=self.c.fragment(2, ref=sop_b))
+        self.add(y2, session=s2)  # the latest y now attests under S2
+        staged = self.stage([x.ref], session=s2)
+        self.assertEqual(1, len(committed(staged)["approved_knowledge"]))
+        self.assertEqual([y2.ref.record()], committed(staged)["dependency_candidate_refs"])
+
+    def test_cr1_excluded_candidate_needs_no_resolvable_derived_input(self) -> None:
+        s2, _ = self.revision_b()
+        phantom = model_input(ref="nonexistent:model-call")
+        old = self.add(self.c.binding("old", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                      provenance=self.c.provenance(derived_inputs=(phantom,))))
+        self.review(old)
+        staged = self.stage([old], session=s2)
+        self.assertEqual([(old, ExclusionReason.STALE_SESSION)],
+                         [(item.candidate_ref, item.reason) for item in staged.exclusions])
+
+    def test_cr2_extra_bundle_files_are_rejected(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref)
+        staged = self.stage([ref])
+        revision = dict(staged.files)[staged.revision.path]
+        for extra in ("context/rule-sets/x.json",
+                      "context/engineering-context/reactor-cooling/revisions/ecr-extra.json"):
+            with self.subTest(extra=extra):
+                files = {**dict(staged.files), extra: revision}
+                with self.assertRaises(PublicationError):
+                    self.verify(files, staged.revision)
+
+    def test_cr3_unicode_normalization_variants_do_not_collide(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref, reason="caf\u00e9 matches the fragment")
+        staged = self.stage([ref])
+        files = dict(staged.files)
+        log = json.loads(files[staged.review_log.path])
+        log["records"][0]["reason"] = "cafe\u0301 matches the fragment"
+        forged = reseal(files, committed(staged), log)
+        with self.assertRaises(PublicationError):
+            self.verify(files, forged)
+        nfc = self.c.binding("cafe", 2, "caf\u00e9", TargetKind.ENTITY, "reactor")
+        nfd = self.c.binding("cafe", 2, "cafe\u0301", TargetKind.ENTITY, "reactor")
+        self.assertNotEqual(nfc.content_key, nfd.content_key)
+
+    def test_cr5_resolver_reentry_cannot_move_the_pinned_tail(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                      provenance=self.c.provenance(
+                                          derived_inputs=(model_input(),))))
+        self.review(ref, review_id="r1")
+        workspace = self.workspace
+
+        def reentrant(item):
+            workspace.append_review(ref, ReviewDecision.REJECT, review_id="r2",
+                                    principal=HUMAN, reason="re-entry", reviewed_at=STAMP,
+                                    supersedes=("r1",))
+            return MODEL_CALL
+
+        done = threading.Event()
+        outcome = {}
+
+        def run():
+            try:
+                workspace.stage_publication(self.session, self.request([ref]),
+                                            derived_input_resolver=reentrant)
+            except Exception as exc:  # recorded for the assertion below
+                outcome["error"] = exc
+            done.set()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.assertTrue(done.wait(10), "staging deadlocked on a re-entrant resolver")
+        self.assertIsInstance(outcome.get("error"), PublicationError)
+
+    def test_cr7_malformed_revision_raises_publication_error(self) -> None:
+        ref = self.add(self.c.binding("reactor", 2, "reactor", TargetKind.ENTITY, "reactor"))
+        self.review(ref)
+        staged = self.stage([ref])
+        document = committed(staged)
+        for field, value in (("review_log", []), ("parent_revision", "not-a-ref"),
+                             ("exclusions", None)):
+            with self.subTest(field=field):
+                broken = {**document, field: value}
+                data = canonical_json(broken)
+                revision = ArtifactPathRef.of(staged.revision.path, data)
+                files = tuple((path, data if path == staged.revision.path else content)
+                              for path, content in staged.files)
+                with self.assertRaises(PublicationError):
+                    replace(staged, files=files, revision=revision)
 
 
 class BoundaryTests(unittest.TestCase):
