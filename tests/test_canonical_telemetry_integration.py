@@ -19,7 +19,7 @@ import re
 import unittest
 from unittest import mock
 
-from industrial_agent_runtime import FakeProvider, ToolCallRequest, checksum, to_jsonable
+from industrial_agent_runtime import FakeProvider, ToolCallRequest, to_jsonable
 from tep_sim import ControlMode, MVIntervention
 
 from tep_agent_lab import playground, playground_views, run_telemetry
@@ -34,7 +34,7 @@ from tep_agent_lab.telemetry import (IdentityConflict, ResourceLimitExceeded,
                                      SnapshotUnavailable, TelemetryError, UnknownBinding)
 from tep_agent_lab.tep_telemetry import TEPSourceError
 from tep_agent_lab.tep_world import leakage_findings
-from test_playground import (PINS, REVISIONS, PlaygroundCase, harness_case, request, turn)
+from test_playground import (NOW, PINS, REVISIONS, PlaygroundCase, harness_case, request, turn)
 
 SRC = Path(playground.__file__).parent
 TEMPERATURE = "reactor.temperature_measurement"
@@ -704,10 +704,8 @@ class BoundaryTests(LiveTelemetryCase):
 
 
 class AgentAndV0RegressionTests(LiveTelemetryCase):
-    # Values at e5ccf19 (the P1.1C base): Agent tools are unchanged until P1.5.
+    # Tool catalog at e5ccf19 (the P1.1C base): unchanged until P1.5.
     BASE_TOOL_SET_VERSION = "68431d8093581e9cf9d649e32ef5649fc4cf399ed08ec4806984c02d82d1debf"
-    BASE_HISTORY_OUTPUT = "d0e5fd01069247bbacd3e10b2305d57b3e6f9f9de3f9ed525e4c12369b954a0a"
-    BASE_HISTORY_ARTIFACT = "84b9b7fedb7ee364f0fd9c6e6bd6689864d6bee164702a39a91e6db9ff46b810"
 
     def test_agent_tool_surface_unchanged(self):
         from tep_agent_lab.tool_bridge import BRIDGE_VERSION
@@ -716,18 +714,57 @@ class AgentAndV0RegressionTests(LiveTelemetryCase):
         self.assertEqual((TOOL_SURFACE_VERSION, BRIDGE_VERSION, self.BASE_TOOL_SET_VERSION),
                          ("tep-agent-lab.tool-surface/v0", "tep-agent-lab.tool-bridge/v0",
                           policy["tool_set_version"]))
-        # A fixed get_history request: structured output and artifact equal the e5ccf19
-        # baseline (checksums computed by the same request on the base checkout).
+        # Independently reconstruct the v0 response from this session's reference
+        # history: simulator floats may differ in their last bits across platforms.
+        # Do not call the tool's history/preview/artifact helpers for the expectation.
         session = self.session()
+        variables = ["XMEAS(9)", "XMEAS(21)"]
+        window_hours = 0.3
+        history = session.world.history()
+        end = history[-1]["simulation_time_hours"]
+        records = [{"simulation_time_hours": row["simulation_time_hours"],
+                    **{name: row["measurements"][name] for name in variables}}
+                   for row in history
+                   if row["simulation_time_hours"] >= end - window_hours - 1e-9]
+        self.assertGreater(len(records), 12)  # v0's dense window has a 12-point preview
+        preview = [records[round(i * (len(records) - 1) / 11)] for i in range(12)]
+        artifact_bytes = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":"),
+                                             allow_nan=False).encode("utf-8") + b"\n"
+                                  for row in records)
+        expected_ref = {
+            "ref_id": "tep-artifact-000001", "kind": "HistoryWindowArtifact",
+            "owner": "tep-agent-lab", "version": "tep-agent-lab.artifacts/v0",
+            "visibility": "AGENT", "created_at": NOW,
+            "checksum": hashlib.sha256(artifact_bytes).hexdigest()}
+        expected_output = {
+            "window": {"requested_hours": window_hours,
+                       "start_hours": records[0]["simulation_time_hours"], "end_hours": end},
+            "variables": variables,
+            "schema": {"simulation_time_hours": "h", "XMEAS(9)": "deg C",
+                       "XMEAS(21)": "deg C"},
+            "shape": {"records": len(records), "variables": 2},
+            "summary": {},
+            "preview": {"simulation_time_hours": [row["simulation_time_hours"] for row in preview],
+                        "values": {name: [row[name] for row in preview] for name in variables}},
+            "preview_complete": False, "artifact_ref": expected_ref}
+        for name in variables:
+            values = [row[name] for row in records]
+            expected_output["summary"][name] = {
+                "first": values[0], "last": values[-1], "min": min(values), "max": max(values),
+                "mean": sum(values) / len(values)}
+
+        # Make canonical telemetry differ, so a migration away from ReferenceWorld
+        # would fail even though both stores initially contain the same samples.
+        self.deliver(self.shifted(history[-1]))
         spec = next(s for s in session.surface.tool_specs() if s.name == "get_history")
         result = session.surface.execute(ToolCallRequest("fixed-history", "get_history", {
-            "window_hours": 0.3, "variables": ["XMEAS(9)", "XMEAS(21)"]}), spec)
+            "window_hours": window_hours, "variables": variables}), spec)
+        self.assertEqual("SUCCESS", result.status)
+        self.assertEqual(["HistoryWindowArtifact"], [ref.kind for ref in result.artifact_refs])
         artifacts = [session.artifacts.read(ref) for ref in result.artifact_refs]
-        self.assertEqual(("SUCCESS", ["HistoryWindowArtifact"], self.BASE_HISTORY_OUTPUT,
-                          self.BASE_HISTORY_ARTIFACT),
-                         (result.status, [ref.kind for ref in result.artifact_refs],
-                          checksum(to_jsonable(result.structured_output)),
-                          checksum(to_jsonable(artifacts))))
+        self.assertEqual(expected_output, to_jsonable(result.structured_output))
+        self.assertEqual([records], to_jsonable(artifacts))
+        self.assertEqual([expected_ref], to_jsonable(result.artifact_refs))
 
     def test_telemetry_view_v0_unchanged(self):
         view = plain(self.queries().telemetry(max_records=1000))
