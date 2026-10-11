@@ -1722,13 +1722,16 @@ def _dependency_closure(session: CompileSession, *, considered: Sequence[Candida
     3. the parent revision resolves in the lineage at an allowed visibility;
     4. every review record (by every ref it carries) and every stored candidate is
        visible here;
-    5. conflict dependencies are distinct partners of the selection; each one's exact
-       source integrity (sources, fragments, influencing sources, derived inputs) is
-       checked, and a failing partner invalidates only the candidates that rely on it
+    5. conflict dependencies are distinct, unselected partners of the selection;
+       every referenced partner (the selected version if selected, otherwise the
+       stored dependency) is checked for exact source integrity (sources, fragments,
+       influencing sources, derived inputs) regardless of its own decision, and a
+       failing partner invalidates only the candidates that cite it
        (``invalid_dependency_ids``, excluded as DEPENDENCY_INVALID by ``_decide``);
     6. the known candidate ids for conflict validation come from stored candidates.
-    Approved candidates' derived inputs are resolved after ``_decide`` (excluded
-    candidates need none). Revision-level failures raise ``PublicationError``.
+    Approved candidates' derived inputs are resolved after ``_decide``; an excluded
+    candidate that no selected candidate cites needs none. Revision-level failures
+    raise ``PublicationError``.
     """
     try:
         for ref in session.inventory:
@@ -1757,19 +1760,31 @@ def _dependency_closure(session: CompileSession, *, considered: Sequence[Candida
             item in selected_ids or item not in referenced for item in dependency_ids):
         raise PublicationError("dependencies must be distinct conflict partners of the "
                                "selection")
-    invalid: set[str] = set()
-    for candidate in dependencies:
-        # Partners stay unapproved, but the exact source integrity a selected claim
-        # relies on is mandatory: a failing partner excludes the claims that cite it.
-        if _source_findings(session, candidate):
-            invalid.add(candidate.candidate_id)
-            continue
-        try:
-            _resolve_derived_inputs(candidate, derived_input_resolver)
-        except PublicationError:
-            invalid.add(candidate.candidate_id)
+    # Partner integrity is checked for every referenced id, whether or not the partner
+    # is itself selected and whatever its own decision: the selected version when it
+    # is selected, otherwise the stored dependency (latest logged version). Only an
+    # integrity failure propagates, so a claim's outcome is selection-invariant.
+    partners: dict[str, list[Candidate]] = {}
+    for candidate in (*considered, *dependencies):
+        if candidate.candidate_id in referenced:
+            partners.setdefault(candidate.candidate_id, []).append(candidate)
+    invalid = {partner_id for partner_id, versions in partners.items()
+               if not all(_partner_intact(session, version, derived_input_resolver)
+                          for version in versions)}
     return _Closure(input_rule_set, frozenset(selected_ids | set(dependency_ids)),
                     frozenset(invalid))
+
+
+def _partner_intact(session: CompileSession, candidate: Candidate,
+                    derived_input_resolver: Callable[[DerivedInput], bytes] | None) -> bool:
+    """Exact source, fragment, influencing-source and derived-input integrity."""
+    if _source_findings(session, candidate):
+        return False
+    try:
+        _resolve_derived_inputs(candidate, derived_input_resolver)
+    except PublicationError:
+        return False
+    return True
 
 
 def _check_parent_revision(parent: ContextSourceRef | None,
@@ -1958,9 +1973,11 @@ class CompilerWorkspace:
                           ) -> StagedPublication:
         """Build and fully validate the complete approved set, pinned to the log tail.
 
-        The result is staging only (``StagedPublication``); no head moves. Every
-        considered candidate's derived inputs must resolve to their exact recorded
-        bytes through ``derived_input_resolver``, and a parent revision must resolve
+        The result is staging only (``StagedPublication``); no head moves. The derived
+        inputs of every approved candidate must resolve to their exact recorded bytes
+        through ``derived_input_resolver`` (otherwise staging fails); a cited conflict
+        partner whose inputs do not resolve excludes its citers as DEPENDENCY_INVALID;
+        an uncited excluded candidate needs none. A parent revision must resolve
         through ``parent_resolver`` to the same lineage at no more restricted visibility.
         The bundle is then verified exactly as a consumer would, against this
         workspace's anchor. Resolvers run while the workspace lock is held and must not

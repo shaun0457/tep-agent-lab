@@ -1653,6 +1653,80 @@ class CodeReviewTests(CompilerTestCase):
                     replace(staged, files=files, revision=revision)
 
 
+class SelectionInvarianceTests(CompilerTestCase):
+    """Round 6: a claim's outcome never depends on whether its partner is selected."""
+
+    revision_b = CodeReviewTests.revision_b
+
+    def outcome(self, staged, ref):
+        approved = {CandidateRef.from_record(item["candidate_ref"])
+                    for section in ("approved_bindings", "approved_knowledge",
+                                    "rule_scope_bindings")
+                    for item in committed(staged)[section]}
+        if ref in approved:
+            return "APPROVED"
+        (exclusion,) = [item for item in staged.exclusions if item.candidate_ref == ref]
+        return (exclusion.reason, exclusion.detail)
+
+    def partner(self, kind):
+        """y in one of three states; returns the ref of y."""
+        if kind == "stale_session":
+            s2, sop_b = self.revision_b()
+            y = self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor", session=s2)
+            y = replace(y, mention_fragment=self.c.fragment(2, ref=sop_b))
+            self.add(y, session=s2)
+            self.review(y.ref)
+            return y.ref
+        if kind == "rejected_intact":
+            y = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"))
+            self.review(y, ReviewDecision.REJECT)
+            return y
+        outside = source_ref("lab.unknown", "docs/unknown.sop", SOP, Visibility.AGENT)
+        y = replace(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor"),
+                    mention_fragment=self.c.fragment(2, ref=outside))
+        self.add(y)
+        self.review(y.ref)
+        return y.ref
+
+    def test_r6_partner_integrity_is_selection_invariant(self) -> None:
+        expected = {"stale_session": (ExclusionReason.DEPENDENCY_INVALID, "y"),
+                    "rejected_intact": "APPROVED",
+                    "outside_inventory": (ExclusionReason.DEPENDENCY_INVALID, "y")}
+        for kind, want in expected.items():
+            with self.subTest(partner=kind):
+                self.workspace = CompilerWorkspace(f"ws-{kind.replace('_', '-')}")
+                y = self.partner(kind)
+                x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+                self.review(x)
+                alone = self.stage([x], lineage=f"{kind.replace('_', '-')}-alone")
+                both = self.stage([x, y], lineage=f"{kind.replace('_', '-')}-both")
+                self.assertEqual(want, self.outcome(alone, x))
+                self.assertEqual(self.outcome(alone, x), self.outcome(both, x))
+                for staged in (alone, both):
+                    self.verify(dict(staged.files), staged.revision)
+
+    def test_r6_unreferenced_excluded_candidate_needs_no_derived_input(self) -> None:
+        phantom = model_input(ref="nonexistent:model-call")
+        lone = self.add(self.c.binding("lone", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                       provenance=self.c.provenance(derived_inputs=(phantom,))))
+        self.review(lone, ReviewDecision.REJECT)
+        staged = self.stage([lone])
+        self.assertEqual(ExclusionReason.REJECTED, staged.exclusions[0].reason)
+
+    def test_r6_referenced_partner_with_unresolvable_input_excludes_the_claim(self) -> None:
+        phantom = model_input(ref="nonexistent:model-call")
+        y = self.add(self.c.binding("y", 2, "reactor", TargetKind.ENTITY, "reactor",
+                                    provenance=self.c.provenance(derived_inputs=(phantom,))))
+        self.review(y, ReviewDecision.REJECT)
+        x = self.add(self.c.knowledge("x", conflicting_candidate_ids=("y",)))
+        self.review(x)
+        for selection in ([x], [x, y]):
+            with self.subTest(selection=len(selection)):
+                staged = self.stage(selection, lineage=f"input-{len(selection)}")
+                self.assertEqual((ExclusionReason.DEPENDENCY_INVALID, "y"),
+                                 self.outcome(staged, x))
+
+
 class BoundaryTests(unittest.TestCase):
     SOURCE = Path(context_compiler.__file__).read_text(encoding="utf-8")
 
