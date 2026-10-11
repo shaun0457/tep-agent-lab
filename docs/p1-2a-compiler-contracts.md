@@ -104,6 +104,13 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   canonical-JSON checksum ignores line endings, so a CRLF checkout would shift the
   offsets silently. `citation()` is the `SourceVersion` that a Rule-routed item must
   cite.
+  S2 adds `LocationKind.MARKDOWN`: a section path and optional positive paragraph
+  index anchored to an exact BYTE_RANGE under `markdown.sections-paragraphs@1`.
+  It requires byte checksums, strict kind-specific record keys and a reparse matching
+  semantics to offsets. Its content id excludes source revision/checksum/provenance
+  and offsets, while its record and validation retain the full exact source ref;
+  paragraph edits therefore preserve unaffected ids. Legacy kinds keep their record
+  shapes and hashes. Policy and identity details: [S2 note](p1-2b-engineering-corpus.md#s2--section-and-paragraph-fragmenter-parser-policy-v1).
 - **Candidates**: the versioned routing (`ROUTING_POLICY`) sends ENTITY/SIGNAL
   mentions to `CandidateBinding`. OPERATING_LIMIT and CONTROL_RELATION become
   `CandidateKnowledge` carrying a `literature_candidate` Rule that stays
@@ -321,8 +328,8 @@ The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.
   an empty scope fails validation.
 - No deterministic acceptance policy is registered, so every approved item needs a
   human review.
-- The location kinds are BYTE_RANGE and JSON_POINTER. Semantic locators (section,
-  table rows, procedure steps) arrive with the P1.2B parser policy.
+- Location kinds are BYTE_RANGE, JSON_POINTER and byte-anchored MARKDOWN (P1.2B S2
+  sections/paragraphs). Table-row and procedure-step locators remain P1.2B S3.
 - Derived-input resolvers are caller-supplied until P1.2C defines model-call records.
   Resolvers must be deterministic and must not mutate the workspace. The staging
   guard detects append-only mutations before and after verification and cannot undo them.

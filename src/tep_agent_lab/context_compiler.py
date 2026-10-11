@@ -34,7 +34,7 @@ import threading
 from typing import Any, NoReturn
 
 from industrial_agent_runtime import Visibility
-from industrial_agent_runtime.serialization import freeze_json
+from industrial_agent_runtime.serialization import freeze_json, to_jsonable
 
 from .canonical_context import (
     BYTES_SHA256, CANONICAL_JSON_SHA256, CanonicalContextRegistry, ContextSourceError,
@@ -168,6 +168,7 @@ def _json(data: bytes, what: str) -> Any:
 class LocationKind(StrEnum):
     BYTE_RANGE = "BYTE_RANGE"      # exact bytes [start, end); BYTES_SHA256 sources only
     JSON_POINTER = "JSON_POINTER"  # RFC 6901 subtree of a JSON source, canonical JSON
+    MARKDOWN = "MARKDOWN"          # policy-v1 semantic locator AND exact byte anchor
 
 
 @dataclass(frozen=True)
@@ -176,17 +177,28 @@ class FragmentLocation:
     start: int | None = None
     end: int | None = None
     pointer: str | None = None
+    section_path: tuple[str, ...] | None = None
+    paragraph_index: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", _enum(LocationKind, self.kind, "location kind"))
-        if self.kind is LocationKind.BYTE_RANGE:
+        if self.kind in (LocationKind.BYTE_RANGE, LocationKind.MARKDOWN):
             if (type(self.start) is not int or type(self.end) is not int or self.start < 0
                     or self.end <= self.start or self.pointer is not None):
-                raise CompilerError("BYTE_RANGE needs integers 0 <= start < end, no pointer")
+                raise CompilerError(f"{self.kind.value} needs integers 0 <= start < end, no pointer")
         elif (self.start is not None or self.end is not None
               or not isinstance(self.pointer, str)
               or (self.pointer and not self.pointer.startswith("/"))):
             raise CompilerError("JSON_POINTER needs an RFC 6901 pointer and no byte range")
+        if self.kind is LocationKind.MARKDOWN:
+            if (not isinstance(self.section_path, tuple) or not self.section_path
+                    or any(not isinstance(part, str) or not part
+                           or re.search(r"[\s/#\x00-\x1f]", part) for part in self.section_path)
+                    or (self.paragraph_index is not None
+                        and (type(self.paragraph_index) is not int or self.paragraph_index < 1))):
+                raise CompilerError("MARKDOWN needs a section path and optional positive paragraph index")
+        elif self.section_path is not None or self.paragraph_index is not None:
+            raise CompilerError("semantic fields belong only to MARKDOWN locations")
 
     @classmethod
     def byte_range(cls, start: int, end: int) -> "FragmentLocation":
@@ -196,9 +208,26 @@ class FragmentLocation:
     def json_pointer(cls, pointer: str) -> "FragmentLocation":
         return cls(LocationKind.JSON_POINTER, pointer=pointer)
 
+    @classmethod
+    def markdown(cls, start: int, end: int, section_path: tuple[str, ...],
+                 paragraph_index: int | None = None) -> "FragmentLocation":
+        return cls(LocationKind.MARKDOWN, start, end, section_path=section_path,
+                   paragraph_index=paragraph_index)
+
+    @property
+    def semantic_locator(self) -> str:
+        if self.kind is not LocationKind.MARKDOWN:
+            raise CompilerError("only MARKDOWN has a semantic locator")
+        path = "/".join(self.section_path or ())
+        return path if self.paragraph_index is None else f"{path}/paragraph-{self.paragraph_index}"
+
     def extract(self, content: bytes) -> bytes:
         if not isinstance(content, bytes):
             raise CompilerError("fragment content must be bytes")
+        if self.kind is LocationKind.MARKDOWN:
+            # Lazy import keeps the contracts independent of parser implementation at import time.
+            from .markdown_fragments import extract_location
+            return extract_location(content, self)
         if self.kind is LocationKind.BYTE_RANGE:
             start, end = self.start, self.end
             if start is None or end is None or end > len(content):
@@ -220,13 +249,35 @@ class FragmentLocation:
             raise CompilerError("fragment subtree is not canonical JSON") from exc
 
     def record(self) -> dict[str, Any]:
-        return {"kind": self.kind.value, "start": self.start, "end": self.end,
-                "pointer": self.pointer}
+        record = {"kind": self.kind.value, "start": self.start, "end": self.end,
+                  "pointer": self.pointer}
+        if self.kind is LocationKind.MARKDOWN:
+            record.update(section_path=list(self.section_path or ()),
+                          paragraph_index=self.paragraph_index)
+        return record
+
+    @classmethod
+    def from_record(cls, record: Any) -> "FragmentLocation":
+        if not isinstance(record, Mapping):
+            raise CompilerError("location record must be an object")
+        kind = _enum(LocationKind, record.get("kind"), "location kind")
+        keys = {"kind", "start", "end", "pointer"}
+        if kind is LocationKind.MARKDOWN:
+            keys |= {"section_path", "paragraph_index"}
+        if set(record) != keys:
+            raise CompilerError("location record must have exactly its kind's fields")
+        path = record.get("section_path")
+        if kind is LocationKind.MARKDOWN and not isinstance(path, (list, tuple)):
+            raise CompilerError("section_path record must be an array")
+        return cls(kind, record["start"], record["end"], record["pointer"],
+                   None if path is None else tuple(path), record.get("paragraph_index"))
 
 
 def _location_fits(location: FragmentLocation, source: ContextSourceRef) -> bool:
     """Byte offsets are exact only over exact bytes; a canonical-JSON checksum is line-
-    ending independent, so a CRLF checkout would silently shift BYTE_RANGE offsets."""
+    ending independent, so a CRLF checkout would silently shift byte-anchored offsets."""
+    if location.kind is LocationKind.MARKDOWN:
+        return source.checksum_method == BYTES_SHA256 and source.schema_version == "text/markdown"
     return location.kind is not LocationKind.BYTE_RANGE or source.checksum_method == BYTES_SHA256
 
 
@@ -247,12 +298,30 @@ class SourceFragmentRef:
         if not isinstance(self.location, FragmentLocation):
             raise CompilerError("location must be a FragmentLocation")
         if not _location_fits(self.location, self.source_ref):
+            if self.location.kind is LocationKind.MARKDOWN:
+                raise CompilerError("MARKDOWN fragments need a BYTES_SHA256 text/markdown source")
             raise CompilerError("BYTE_RANGE fragments need a BYTES_SHA256 source")
         _pattern(self.content_checksum, _SHA256, "fragment content_checksum")
         _pattern(self.fragment_kind, _KIND, "fragment_kind")
         _pattern(self.fragmentation_policy, _VERSIONED, "fragmentation_policy")
         _optional_text(self.label, "label")
-        object.__setattr__(self, "fragment_id", "frag-" + json_digest(self._identity()))
+        identity = self._identity()
+        if self.location.kind is LocationKind.MARKDOWN:
+            from .markdown_fragments import PARSER_POLICY
+            expected_kind = "SECTION" if self.location.paragraph_index is None else "PARAGRAPH"
+            if self.fragmentation_policy != PARSER_POLICY or self.fragment_kind != expected_kind:
+                raise CompilerError("MARKDOWN kind/locator needs the supported parser policy")
+            # Stable content identity; the complete exact source and offsets remain in record().
+            ref = self.source_ref
+            identity = {**identity, "source_ref": {
+                "repository": ref.repository, "source_id": ref.source_id,
+                "path_or_ref": ref.path_or_ref, "kind": ref.kind,
+                "schema_version": ref.schema_version, "checksum_method": ref.checksum_method,
+                "visibility": ref.visibility.value},
+                "location": {"kind": self.location.kind.value,
+                             "section_path": list(self.location.section_path or ()),
+                             "paragraph_index": self.location.paragraph_index}}
+        object.__setattr__(self, "fragment_id", "frag-" + json_digest(identity))
 
     def __hash__(self) -> int:  # ContextSourceRef holds unhashable frozen mappings
         return hash(self.fragment_id)
@@ -283,6 +352,10 @@ class SourceFragmentRef:
         if not _location_fits(self.location, self.source_ref):
             return False
         try:
+            if (self.location.kind is LocationKind.MARKDOWN
+                    and (not isinstance(content, bytes)
+                         or _sha256(content) != self.source_ref.content_checksum)):
+                return False
             return _sha256(self.location.extract(content)) == self.content_checksum
         except CompilerError:
             return False
@@ -799,15 +872,20 @@ def _conflicting_ids(candidate: Candidate) -> tuple[str, ...]:
 
 
 def _fragment_from_record(record: Any) -> SourceFragmentRef:
+    if not isinstance(record, Mapping) or set(record) != {
+            "source_ref", "location", "content_checksum", "fragment_kind",
+            "fragmentation_policy", "label", "fragment_id"}:
+        raise CompilerError("fragment record must have exactly its contract fields")
     record = dict(record)
-    location = dict(record["location"])
     fragment = SourceFragmentRef(
         source_ref=_context_source(record["source_ref"]),
-        location=FragmentLocation(location["kind"], location["start"], location["end"],
-                                  location["pointer"]),
+        location=FragmentLocation.from_record(record["location"]),
         content_checksum=record["content_checksum"], fragment_kind=record["fragment_kind"],
         fragmentation_policy=record["fragmentation_policy"], label=record["label"])
-    if fragment.record() != record:
+    rebuilt = fragment.record()
+    matches = (canonical_json(rebuilt) == canonical_json(to_jsonable(record))
+               if fragment.location.kind is LocationKind.MARKDOWN else rebuilt == record)
+    if not matches:
         raise CompilerError("fragment record does not reconstruct exactly")
     return fragment
 
