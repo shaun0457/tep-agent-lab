@@ -3,7 +3,9 @@
 Two tracks share this repository ([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) Decision 7):
 
 - **Product track** — Industrial Context Platform: P0/P1 milestones, E-series clients and MVP integration. P1 sequencing is owned by ADR-004.
-- **Research track** — benchmark and evaluation: D0, D1, D2.
+- **Research track** — benchmark and evaluation: D0.2C and D1 (context-value study) paused by owner decision 2026-10-11; D2 remains parked, per [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) Decision 3.
+
+Product positioning: the industrial context layer is the product and the Agent is its first consumer ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md); domain semantics live in domain packs, and Level 1 uses the process pack through TEP).
 
 Current state, open PRs and the next gate: [`program-status.md`](program-status.md). This roadmap points to owning specs; it never defines semantics.
 
@@ -14,7 +16,10 @@ Canonical specs live in `docs/specs/`.
 ## Product track — Industrial Context Platform (P1)
 
 Sequencing authority: ADR-004. Scope rule: [`product-maturity-and-mvp.md`](product-maturity-and-mvp.md).
-Milestone state lives only in [`program-status.md`](program-status.md).
+Milestone state lives only in [`program-status.md`](program-status.md). Owner decision
+2026-10-11 focuses work on the context layer's two halves: "what the plant is" (P1.2
+Context Compiler, P1.3 canonical plant context) and "what is happening in the plant"
+(P1.1C canonical telemetry, P1.4 Operational State and live plant mode).
 
 | Milestone | Scope | Owning contract / note |
 |---|---|---|
@@ -24,9 +29,10 @@ Milestone state lives only in [`program-status.md`](program-status.md).
 | P1.1C | canonical telemetry integration: event-time-bounded scans, P0 run ingestion, snapshot-bound public P0/application reads | plant-telemetry migration obligations; implementation note to be written |
 | P1.2 | Context Compiler | `context-compiler-v0.md`; P1.2A note `docs/p1-2a-compiler-contracts.md` |
 | P1.3 | Canonical Context composition: PlantContextRevision, scope resolution, derived view | ADR-004 Decision 4; spec to be written |
-| P1.4 | context serving + deterministic Operational State | spec to be written |
+| P1.4A | serving + Operational State | P1.4 owning spec to be written; owner decision 2026-10-11 |
+| P1.4B | live plant mode: TEP as a long-lived simulated plant streaming continuously through TEPSimulationSource into the canonical telemetry store; MVP-required | P1.4 owning spec to be written; unchanged [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) §Live plant mode constraints bind it; owner decision 2026-10-11 |
 | P1.5 | ContextSnapshot + Investigation Context integration | plant-telemetry §ContextSnapshot; spec to be written |
-| — | runtime B5 first real provider; one real-model investigation; MVP integration (E1 + context panels) | Level 1; runtime repo for B5 |
+| — | runtime B5 first real provider for the investigation Agent; one real-model investigation; MVP integration (E1 + context panels) | Level 1; runtime repo for B5; B5 deferred until the context layer is in place (owner decision 2026-10-11), still required for the MVP exit criterion's real-model investigation |
 | P1.6 | validated write-back as Candidate Knowledge | post-Level 1 |
 | P1.7 | second non-TEP source/domain and abstraction review | Level 2 |
 | — | dirty-stream replay harness; first external connector | deferred to Level 2 |
@@ -213,7 +219,7 @@ no-intervention setup. This does not make the benchmark balanced.
 
 Implementation note: `docs/d0-2b-healthy-negative.md`.
 
-### D0.2C — C0 + identifiability pilot — current
+### D0.2C — C0 + identifiability pilot — paused (owner decision 2026-10-11)
 
 Owning spec: `docs/specs/benchmark-comparative-pilot-v0.md`. The historical fixtures
 `rca-dev-001..004` stay immutable and are not comparable experimental cases; the pilot
@@ -228,14 +234,28 @@ class; opaque case ids; scorer-v1 semantics; the deterministic C0 contract; the 
 identifiability outputs; retain/exclude rules. No code, fixture, C0 result or difficulty
 threshold.
 
-#### D0.2C1 — comparable pilot variants — next
+#### D0.2C1 — comparable pilot variants — paused; not started
 
 Viability check, twelve paired pilot fixtures, scorer-v1, leakage policy v2,
 nuisance-proxy and leakage checks.
 
-#### D0.2C2 — deterministic C0 — pending
+#### D0.2C2 — deterministic C0 — paused; pending
 
-#### D0.2C3 — identifiability pilot — pending
+#### D0.2C3 — identifiability pilot — paused; pending
+
+## D1 — Context-value study — paused; on resumption, after D0 freeze and B5
+
+D1 measures the value of context for a fixed Agent. Its design, step classification and claims are owned by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect); open points remain open in OQ-16, deferred with the track. Owning spec to be written.
+
+The pause is scheduling only (owner decision 2026-10-11): ADR-005 Decision 3, the D0
+freeze criteria, C0 as the mandatory baseline and ADR-004 Decision 7 are unchanged.
+On resumption, D0 still blocks D1 runs and any capability claim. No capability claim
+is made meanwhile.
+
+## D2 — Orchestration ablation — parked
+
+Parked by ADR-005 Decision 3: not scheduled. The evaluation-v0 orchestration axis (O0–O5) keeps
+its meaning; un-parking needs an owner decision.
 
 ## Phase 0 — Reproducible lab / benchmark shell
 
@@ -355,6 +375,9 @@ Deliver:
 
 ## Phase 6 — Blind RCA capability ladder
 
+> **Redirected by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect).** Do not start work from this section. The
+> capability ladder now runs as the D1 context-value study; the text below is history.
+
 Branch: `exp/rca-reactor-v0`
 
 Canonical capability progression:
@@ -372,6 +395,9 @@ Subagents are not a capability row.
 Exit: at least one blind incident is reproducibly investigated with evidence-backed hypotheses, typed predictions, and counterfactual results.
 
 ## Phase 7 — Orchestration architecture ablation
+
+> **Parked by [ADR-005 Decision 3](decisions/ADR-005-context-layer-product-positioning.md#decision-3--research-track-redirect).** This phase is D2, which is parked. Do not start
+> work from this section; the text below is history.
 
 Branch: `exp/orchestration-ablation-v0`
 

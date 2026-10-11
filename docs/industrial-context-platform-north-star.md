@@ -536,6 +536,11 @@ An Agent conclusion or repeated pattern can propose new context; it cannot autom
 
 ## Portfolio and product positioning
 
+> [ADR-005](decisions/ADR-005-context-layer-product-positioning.md) records the product as the domain-neutral context layer
+> (Context Compiler, Canonical Industrial Context, Context Server / ContextSnapshot), with domain
+> semantics in domain packs and the Agent as its first consumer. It does not change the P1
+> positioning below.
+
 The architecture should be broad enough to represent a full industrial context layer, while the MVP remains investigation-first.
 
 This project is not primarily:

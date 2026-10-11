@@ -2,9 +2,15 @@
 
 Rules for coding agents working on `tep-agent-lab`.
 
-## Product boundary
+## Product, goal and repository boundary
 
-This repository owns TEP-specific Agent tools, domain state/projection, lab policy, experiments, Engineering Records, and evaluation. It also hosts the P0 Playground application plane, the observatory/desktop clients (ADR-002) and the Industrial Context Platform contracts (ADR-003, ADR-004). It does not own TEP physics or generic runtime internals.
+The product is the **domain-neutral industrial context layer**: Context Compiler -> Canonical Context -> Context Server / ContextSnapshot (`docs/decisions/ADR-005-context-layer-product-positioning.md`). The Agent / Investigation Runtime is its first and strictest consumer, not the product. The UI, evaluation harnesses and, later, external systems are other consumers.
+
+- Domain semantics stay in domain packs. TEP is the process pack: TEP identifiers and ProcessGraph stay below the generic context contracts, and generic contracts never import TEP.
+- Current goal: the L1 Portfolio MVP (`docs/product-maturity-and-mvp.md`), sequenced by ADR-004. Live plant mode is MVP-required. No product-track work beyond the MVP is scheduled. The research track (D0.2C, D1 context-value study) is scheduled independently and does not block P1 (ADR-004 Decision 7).
+- Context-layer invariants: LLM output is never canonical; consumers read exact pinned revisions and T/K snapshots, never "latest"; the context layer never creates a second investigation state model.
+
+This repository hosts the context-layer contracts (ADR-003, ADR-004, ADR-005), the P0 Playground application plane, the observatory/desktop clients (ADR-002) and the investigation consumer: TEP-specific Agent tools, domain state/projection, lab policy, experiments, Engineering Records and evaluation. It does not own TEP physics or generic runtime internals.
 
 ## Canonical specs
 
@@ -37,6 +43,7 @@ Also canonical:
 - `docs/decisions/ADR-002-ui-application-boundary.md`
 - `docs/decisions/ADR-003-industrial-environment-boundary.md`
 - `docs/decisions/ADR-004-p1-milestone-rebaseline.md` (P1 sequencing; milestone numbers never own semantics)
+- `docs/decisions/ADR-005-context-layer-product-positioning.md` (product = domain-neutral industrial context layer; domain semantics stay in domain packs; the Agent is its first consumer; D1 measures context value; D2 parked)
 
 Product direction guardrails (non-normative): `docs/industrial-context-platform-north-star.md`, `docs/product-maturity-and-mvp.md`. Current state, open PRs and next gate: `docs/program-status.md`.
 
@@ -51,6 +58,8 @@ If implementation discovers an architecture/spec contradiction, emit `SPEC_CONFL
 - evaluator-only truth/candidate sets never become registered Agent tools.
 
 ## Hard rules
+
+These rules bind the whole repository, including the context layer (Context Compiler LLM extraction, the live-plant harness, telemetry), not only the investigation consumer and the benchmarks. They are accepted semantics and ADR-005 does not change them.
 
 1. Preserve hidden truth/candidate-answer isolation in blind experiments.
 2. Every successful agent-visible ToolResult is deterministically registered as an immutable `ObservationRecord` during result ingestion.
@@ -107,9 +116,11 @@ successful SubtaskResult
 
 Observation registration is automatic. The model must explicitly link observations as evidence later.
 
-## Research-track order (v0)
+## Research track (benchmark and evaluation)
 
-Product-track (P1) sequencing is owned by `docs/decisions/ADR-004-p1-milestone-rebaseline.md`; current state is in `docs/program-status.md`.
+Product-track (P1) sequencing is owned by `docs/decisions/ADR-004-p1-milestone-rebaseline.md` and product positioning by `docs/decisions/ADR-005-context-layer-product-positioning.md`; current state is in `docs/program-status.md`.
+
+ADR-005 Decision 3 redirects this track and owns the D1 design: finish D0.2C (C0 + identifiability); D1 is a context-value study on the existing evaluation-v0 ladder, with every step classified in Decision 3 (open points: OQ-16); D2 orchestration ablation (O0-O5) is parked. The block below is the original v0 research order, kept as dependency history:
 
 ```text
 RcaState / run-log / ContextProjection
