@@ -37,6 +37,7 @@ Process pack (TEP): `docs/specs/tool-surface-v0.md` (TEP Agent tools). ProcessGr
 Application plane:
 
 - `docs/specs/playground-backend-v0.md`
+- `docs/specs/application-api-v1.md` (application reads and local transport v1)
 - `docs/decisions/ADR-002-ui-application-boundary.md`
 
 Investigation consumer:

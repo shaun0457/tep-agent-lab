@@ -1,19 +1,28 @@
-"""Bounded AGENT application assembly over public P0 projections only."""
+"""Bounded AGENT application assembly over public P0 projections only.
+
+Owning contract: docs/specs/application-api-v1.md. Telemetry-bearing reads are pinned
+to one exact TelemetrySnapshot obtained through ``open_telemetry_snapshot``; no read
+resolves "latest". Graph data comes only from the AGENT ProcessGraphView.
+"""
 
 from collections.abc import Callable, Mapping
-import math
-from typing import Any
+from typing import Any, TypeVar
 
 from industrial_agent_runtime import TaskStatus
 
-from .application_models import Binding, Entity, EntityType, Run, Signal, SignalHistory, SignalPoint
+from .application_models import (Binding, CanonicalPoint, Entity, EntityType, InvalidRequest,
+                                 Run, Signal, SignalHistory, TelemetrySnapshot,
+                                 snapshot_from_view, snapshot_to_view)
 from .canonical_context import ProjectionScope
 from .playground import RunStatus
-from .playground_views import MAX_TELEMETRY_RECORDS, RunQueries, ViewUnavailable, VisibilityViolation
+from .playground_views import RunQueries, VisibilityViolation
+from .telemetry import (ClockMismatch, ResourceLimitExceeded, SnapshotUnavailable,
+                        TelemetryError, TelemetryRequestError)
 from .tep_world import leakage_findings
 
 MAX_HISTORY_POINTS = 1000
-TIME_BOUND_TOLERANCE_HOURS = 1e-9
+__all__ = ["AmbiguousSignal", "ApplicationViewService", "InvalidRequest", "MAX_HISTORY_POINTS",
+           "UnknownEntity", "UnknownSignal"]
 
 
 class UnknownEntity(LookupError):
@@ -21,19 +30,45 @@ class UnknownEntity(LookupError):
 
 
 class UnknownSignal(LookupError):
-    """No matching AGENT-visible graph binding."""
+    """No matching AGENT-visible graph binding for a canonical signal id."""
 
 
 class AmbiguousSignal(ValueError):
     """Graph bindings disagree about the signal's semantics."""
 
 
+_ReadResult = TypeVar("_ReadResult")
+
+
+class _InvalidTelemetryRequest(InvalidRequest, TelemetryRequestError):
+    """Read-boundary client validation; preserves the direct service exception family."""
+
+
+def _telemetry_read(read: Callable[..., _ReadResult], *args: Any, **kwargs: Any) -> _ReadResult:
+    """Translate client validation only around the public P0 telemetry read call."""
+    try:
+        return read(*args, **kwargs)
+    except (ClockMismatch, ResourceLimitExceeded):
+        raise
+    except TelemetryRequestError:
+        raise _InvalidTelemetryRequest("invalid telemetry read arguments") from None
+
+
+def _optional_ticks(name: str, value: Any) -> None:
+    if value is not None and (type(value) is not int or value < 0):
+        raise InvalidRequest(f"{name} must be a non-negative integer or None")
+
+
+def _point(sample: Mapping[str, Any]) -> CanonicalPoint:
+    return CanonicalPoint(sample["event_ticks"], sample["sequence"], sample["value"],
+                          sample["quality"])
+
+
 class ApplicationViewService:
     """Pass ``manager.queries`` as queries_for_run; scope is always AGENT.
 
-    History reads only the bounded recent P0 telemetry projection. An explicit
-    window requiring records outside that projection is unavailable, never
-    silently clipped. No data is cached or canonical state modified.
+    No data is cached and no canonical state is modified. Each call assembles fresh
+    projections; only telemetry values share the caller's pinned snapshot.
     """
 
     def __init__(self, queries_for_run: Callable[[str], RunQueries]) -> None:
@@ -52,23 +87,47 @@ class ApplicationViewService:
             raise VisibilityViolation("invalid application projection")
         return view
 
-    def get_run(self, run_id: str) -> Run:
+    @staticmethod
+    def _pinned(run_id: str, snapshot: Any) -> dict[str, Any]:
+        if not isinstance(snapshot, TelemetrySnapshot):
+            raise InvalidRequest("a TelemetrySnapshot from open_telemetry_snapshot is required")
+        if snapshot.run_id != run_id:
+            raise SnapshotUnavailable("snapshot belongs to another run")
+        return snapshot_to_view(snapshot)
+
+    def open_telemetry_snapshot(self, run_id: str, *, event_horizon_ticks: int | None = None,
+                                ingest_sequence: int | None = None) -> TelemetrySnapshot:
+        """The only read that chooses (T, K); defaults are resolved once and returned."""
+        _optional_ticks("event_horizon_ticks", event_horizon_ticks)
+        _optional_ticks("ingest_sequence", ingest_sequence)
         queries = self._queries(run_id)
+        view = self._checked(_telemetry_read(
+            queries.telemetry_snapshot, event_horizon_ticks=event_horizon_ticks,
+            ingest_sequence=ingest_sequence), run_id)
+        try:
+            return snapshot_from_view(run_id, view["snapshot"])
+        except InvalidRequest:
+            # This snapshot was produced by the server, not supplied by the client.
+            raise TelemetryError("invalid server telemetry snapshot") from None
+
+    def get_run(self, run_id: str, *, snapshot: TelemetrySnapshot | None = None) -> Run:
+        queries = self._queries(run_id)
+        pinned = None if snapshot is None else self._pinned(run_id, snapshot)
         summary = self._checked(queries.run_summary(), run_id)
         status = summary.get("runtime_task_status", {}).get("status")
         if status is None:
             runtime = summary.get("outcome", {}).get("runtime_result")
             status = None if runtime is None else runtime["task_status"]
         manifest = summary.get("manifest", {})
-        try:
-            telemetry = self._checked(queries.telemetry(variables=(), max_records=1), run_id)
-            time = telemetry["current"]["simulation_time_hours"]
-        except ViewUnavailable:
-            time = None
+        snapshot_ref = event_ticks = None
+        if pinned is not None:
+            last = self._checked(_telemetry_read(
+                queries.telemetry_last_event, snapshot=pinned), run_id)
+            snapshot_ref, event_ticks = last["snapshot"]["snapshot_ref"], last["event_ticks"]
         return Run(run_id, RunStatus(summary["run_status"]),
-                   None if status is None else TaskStatus(status), time,
-                   summary["view_version"], manifest.get("manifest_version"),
-                   manifest.get("checksum"))
+                   None if status is None else TaskStatus(status), summary["view_version"],
+                   manifest.get("manifest_version"), manifest.get("checksum"),
+                   snapshot_ref, event_ticks)
 
     @staticmethod
     def _entities(graph: Mapping[str, Any]):
@@ -79,8 +138,8 @@ class ApplicationViewService:
 
     @staticmethod
     def _binding(binding: Mapping[str, Any]) -> Binding:
-        return Binding(binding["runtime_variable_id"], binding["quantity"],
-                       binding["relation"], binding["unit"])
+        return Binding(binding["semantic_entity_id"], binding["runtime_variable_id"],
+                       binding["quantity"], binding["relation"], binding["unit"])
 
     def get_entity(self, run_id: str, entity_id: str) -> Entity:
         graph = self._checked(self._queries(run_id).process_graph(), run_id)
@@ -103,81 +162,54 @@ class ApplicationViewService:
         matches = [(identity, self._binding(binding))
                    for identity, _, entity in self._entities(graph)
                    for binding in entity["bindings"]
-                   if binding["runtime_variable_id"] == signal_id]
+                   if binding["semantic_entity_id"] == signal_id]
         if not matches:
             raise UnknownSignal("unknown signal")
         semantics = {(b.quantity, b.relation, b.unit) for _, b in matches}
         if len(semantics) != 1:
             raise AmbiguousSignal("inconsistent signal binding metadata")
-        return tuple(sorted({identity for identity, _ in matches})), matches[0][1]
+        binding = min(matches, key=lambda item: (item[0], item[1].source_locator))[1]
+        return tuple(sorted({identity for identity, _ in matches})), binding
 
     @staticmethod
-    def _value(record: Mapping[str, Any], signal_id: str) -> float | None:
-        values = [record[group][signal_id] for group in ("measurements", "manipulated_variables")
-                  if signal_id in record[group]]
-        if len(values) > 1 and len(set(values)) != 1:
-            raise AmbiguousSignal("inconsistent telemetry values")
-        if not values:
-            return None
-        value = float(values[0])
-        if not math.isfinite(value):
-            raise ViewUnavailable("nonfinite telemetry value")
-        return value
+    def _same_signal(view: Mapping[str, Any], signal_id: str) -> None:
+        if view["signal_id"] != signal_id:
+            raise VisibilityViolation("telemetry view answered another signal")
 
-    def get_signal(self, run_id: str, signal_id: str) -> Signal:
+    def get_signal(self, run_id: str, signal_id: str, *, snapshot: TelemetrySnapshot) -> Signal:
         queries = self._queries(run_id)
+        pinned = self._pinned(run_id, snapshot)
         entities, binding = self._resolve(queries, run_id, signal_id)
-        value, time = None, None
-        try:
-            telemetry = self._checked(queries.telemetry(variables=(signal_id,), max_records=1), run_id)
-            value = self._value(telemetry["current"], signal_id)
-            if value is not None:
-                time = telemetry["current"]["simulation_time_hours"]
-        except ViewUnavailable:
-            pass
-        return Signal(signal_id, entities, binding.quantity, binding.relation, binding.unit,
-                      value is not None, value, time)
+        view = self._checked(_telemetry_read(
+            queries.telemetry_current, signal_id, snapshot=pinned), run_id)
+        self._same_signal(view, signal_id)
+        sample = view["sample"]
+        return Signal(run_id, signal_id, view["source_id"], binding.source_locator, entities,
+                      binding.quantity, binding.relation, binding.unit,
+                      view["snapshot"]["snapshot_ref"], view["status"], view["eligible_count"],
+                      None if sample is None else _point(sample))
 
-    def get_signal_history(self, run_id: str, signal_id: str, *,
-                           start_hours: float | None = None, end_hours: float | None = None,
+    def get_signal_history(self, run_id: str, signal_id: str, *, snapshot: TelemetrySnapshot,
+                           event_start_ticks: int | None = None,
+                           event_end_ticks: int | None = None,
                            max_points: int = 500) -> SignalHistory:
-        queries = self._queries(run_id)
-        _, binding = self._resolve(queries, run_id, signal_id)
-        for value in (start_hours, end_hours):
-            if value is not None and (type(value) not in (int, float)
-                                      or not math.isfinite(value) or value < 0):
-                raise ValueError("history bounds must be finite nonnegative hours")
-        if start_hours is not None and end_hours is not None and end_hours < start_hours:
-            raise ValueError("end_hours must be >= start_hours")
+        _optional_ticks("event_start_ticks", event_start_ticks)
+        _optional_ticks("event_end_ticks", event_end_ticks)
+        if (event_start_ticks is not None and event_end_ticks is not None
+                and event_end_ticks < event_start_ticks):
+            raise InvalidRequest("event_end_ticks must be >= event_start_ticks")
         if type(max_points) is not int or not 1 <= max_points <= MAX_HISTORY_POINTS:
-            raise ValueError(f"max_points must be in [1, {MAX_HISTORY_POINTS}]")
-        telemetry = self._checked(queries.telemetry(variables=(signal_id,),
-                                                    max_records=MAX_TELEMETRY_RECORDS), run_id)
-        records = telemetry["records"]
-        if not records:
-            raise ViewUnavailable("no telemetry records")
-        first, last = (records[i]["simulation_time_hours"] for i in (0, -1))
-        start = first if start_hours is None else start_hours
-        end = last if end_hours is None else end_hours
-        if end < start:
-            raise ValueError("end_hours must be >= start_hours")
-        omitted = telemetry["total_records"] > telemetry["returned_records"]
-        if ((omitted and start < first - TIME_BOUND_TOLERANCE_HOURS)
-                or end > last + TIME_BOUND_TOLERANCE_HOURS):
-            raise ViewUnavailable("requested window exceeds available telemetry projection")
-        points = []
-        for record in records:
-            time = record["simulation_time_hours"]
-            value = self._value(record, signal_id)
-            if value is None:
-                raise ViewUnavailable("signal history is not available in telemetry")
-            if start - TIME_BOUND_TOLERANCE_HOURS <= time <= end + TIME_BOUND_TOLERANCE_HOURS:
-                points.append(SignalPoint(time, value))
-        count = len(points)
-        if count > max_points:
-            # Integer-spaced indices include both endpoints; one point means latest.
-            points = ([points[-1]] if max_points == 1 else
-                      [points[i * (count - 1) // (max_points - 1)] for i in range(max_points)])
-        return SignalHistory(signal_id, binding.quantity, binding.unit, start, end,
-                             tuple(points), "P0 TelemetryView.records", telemetry["view_version"],
-                             run_id, first, last, omitted, count, count > max_points)
+            raise InvalidRequest(f"max_points must be in [1, {MAX_HISTORY_POINTS}]")
+        queries = self._queries(run_id)
+        pinned = self._pinned(run_id, snapshot)
+        _, binding = self._resolve(queries, run_id, signal_id)
+        view = self._checked(_telemetry_read(queries.telemetry_history,
+            signal_id, snapshot=pinned, event_start_ticks=event_start_ticks,
+            event_end_ticks=event_end_ticks, max_points=max_points), run_id)
+        self._same_signal(view, signal_id)
+        return SignalHistory(run_id, signal_id, view["source_id"], binding.quantity, binding.unit,
+                             view["snapshot"]["snapshot_ref"], view["event_start_ticks"],
+                             view["event_end_ticks"], view["max_points"], view["eligible_count"],
+                             view["returned_count"], view["reduced"], view["reduction_policy"],
+                             view["coverage"], view["status"],
+                             tuple(_point(sample) for sample in view["samples"]))

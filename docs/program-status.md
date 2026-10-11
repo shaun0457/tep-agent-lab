@@ -28,10 +28,10 @@ and the test constants. A NumPy bump edits only the JSON.
 
 | Question | Answer |
 |---|---|
-| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B, P1.2A compiler contracts, E0.2 desktop shell). No L1 exit criterion is fully met. |
+| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B/C, P1.2A compiler contracts, E0.2 desktop shell on application transport v1). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
 | Current product milestone | P1.2B deterministic parser / fixture corpus: not started, unblocked (P1.2A merged) |
-| Parallel product milestone | P1.1C canonical telemetry integration: not started, unblocked |
+| Parallel product milestone | P1.1C canonical telemetry integration: merged; P1.4 can read live telemetry through snapshot-bound P0/application reads once its owning spec exists |
 | Current research milestone | D0.2C and D1 paused (owner decision 2026-10-11); D0.2C1 not started (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
 | Product positioning | the domain-neutral industrial context layer is the product; domain semantics live in domain packs; the Agent is its first consumer; L1 stays on the process pack through TEP; second domain not chosen ([ADR-005](decisions/ADR-005-context-layer-product-positioning.md)) |
@@ -50,7 +50,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.1B TEP simulation source | merged (PR #23) |
 | ADR-004 P1 re-baseline | merged (adds this file) |
 | ADR-005 context-layer product positioning | merged (accepted) |
-| P1.1C canonical telemetry integration | not started; write the implementation note first |
+| P1.1C canonical telemetry integration | merged: event-time-bounded scans, run-scoped P0 ingestion, snapshot-bound P0 views, Application API v1 / transport v1 (desktop, Rust bridge, sidecar); note `docs/p1-1c-canonical-telemetry-integration.md`, spec `docs/specs/application-api-v1.md` |
 | P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B next, then P1.2C; P1.2D adds the repository transaction (one git commit, head CAS) and the review demo |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4A serving + Operational State | no owning spec yet; P1.4 split by owner decision 2026-10-11 |
@@ -94,9 +94,7 @@ None.
   extraction and grounding) and P1.2D (review workflow, the repository publication
   transaction that commits a P1.2A `StagedPublication`, and the revision demo) follow
   (context-compiler-v0 §Recommended implementation split).
-- **P1.1C** can start now. The owning contract is frozen; write a short implementation note
-  with acceptance tests first (ADR-004 Decision 6 lists the required live-path tests).
-- Write the **P1.3 and P1.4 owning specs** early alongside P1.1C and P1.2A. P1.4 owns
+- Write the **P1.3 and P1.4 owning specs** early, alongside P1.2B. P1.4 owns
   **P1.4A** (serving + Operational State) and **P1.4B** (live plant mode); the existing
   ADR-005 live plant mode constraints bind that spec (owner decision 2026-10-11).
 - **B5** is deferred until the context layer is in place; it remains required for the
@@ -118,9 +116,10 @@ None.
   stale after D-050 and reuse "P1" (Investigation UI) and "E1" (HAZOP). Follow-up belongs in tep-sim.
 - Spec status vocabulary drift: implemented specs still say `proposal`; several use
   `FROZEN` / `DRAFT` wording outside the documentation standard.
-- `RuleRegistry`, `records.py` (InvestigationReport, EngineeringArchive), the P1.1
-  telemetry modules and the P1.2A `context_compiler` / `rule_sets` modules are
-  implemented but not used by any production path.
+- `RuleRegistry`, `records.py` (InvestigationReport, EngineeringArchive) and the P1.2A
+  `context_compiler` / `rule_sets` modules are implemented but not used by any production
+  path. The P1.1 telemetry modules serve P0 application reads since P1.1C; Agent tools
+  still read `ReferenceWorld.history()` until P1.5.
 
 ## Deferred work
 

@@ -9,7 +9,7 @@ Decision: [ADR-003](../decisions/ADR-003-industrial-environment-boundary.md).
 Sequencing: [ADR-004](../decisions/ADR-004-p1-milestone-rebaseline.md) supersedes the
 milestone numbering in §Frozen implementation sequence and amends the §Context Builder
 boundary scope for P1.2. The semantics in this contract are unchanged. Implementation
-(informative): P1.1A and P1.1B implement the telemetry subset.
+(informative): P1.1A, P1.1B and P1.1C implement the telemetry subset.
 
 Reviewed base: `83a96c19675eed03831f7106834904b667959fbd`.
 

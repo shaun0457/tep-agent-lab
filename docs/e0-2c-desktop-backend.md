@@ -89,4 +89,13 @@ E0.2C2A adds the Tauri/TypeScript/Rust live development shell and process
 supervision (`e0-2c-tauri-shell.md`). E0.2C2B owns packaging Python as an external
 sidecar (`e0-2c-packaged-sidecar.md`). E0.2C is complete; E1 remains future UI work.
 
+## Superseded by application transport v1 (P1.1C)
+
+The host now serves application transport v1 ([Application API v1](specs/application-api-v1.md)) with unchanged framing. A
+client first sends `open_telemetry_snapshot`, then passes the returned snapshot to
+`get_run`, `get_signal` and `get_signal_history`, so a client reads one frame and one
+reply at a time.
+
+The v0 text above is kept as history.
+
 SPEC_CONFLICT: none

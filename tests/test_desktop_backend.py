@@ -27,10 +27,8 @@ def request(method="get_run", **params):
                            "method": method, "params": {"run_id": "e0-observatory", **params}}).encode("utf-8")
 
 
-def four_requests():
-    return [request(), request("get_entity", entity_id="reactor"),
-            request("get_signal", signal_id="XMEAS(9)"),
-            request("get_signal_history", signal_id="XMEAS(7)")]
+TEMPERATURE = "reactor.temperature_measurement"
+PRESSURE = "reactor.pressure_measurement"
 
 
 class BoundedSource(io.BytesIO):
@@ -93,6 +91,38 @@ class FramingTests(unittest.TestCase):
                 self.assertEqual(1, len(replies))
                 self.assertEqual("INVALID_REQUEST", replies[0]["error"]["code"])
         self.assertEqual([], self.exchange(b""))
+
+    def test_lone_surrogate_request_id_does_not_end_the_loop(self):
+        frame = ('{"protocol_version":"%s","request_id":"\\ud800","method":"get_run",'
+                 '"params":{"run_id":"e0-observatory"}}' % PROTOCOL_VERSION).encode()
+        replies = self.exchange(frame + b"\n" + request() + b"\n")
+        self.assertEqual(2, len(replies))
+        self.assertEqual((None, "INVALID_REQUEST"),
+                         (replies[0]["request_id"], replies[0]["error"]["code"]))
+        self.assertTrue(replies[1]["ok"])
+
+    def test_deep_snapshot_is_rejected_and_next_frame_is_served(self):
+        # JSON decoding succeeds near the recursion limit; recursive serialization
+        # of this invalid snapshot must never happen before shape validation.
+        frame = (b'{"protocol_version":"' + PROTOCOL_VERSION.encode()
+                 + b'","request_id":"deep","method":"get_run",'
+                 + b'"params":{"run_id":"e0-observatory","snapshot":'
+                 + b'[' * 991 + b'0' + b']' * 991 + b'}}')
+        self.assertLess(len(frame), MAX_REQUEST_BYTES)
+        replies = self.exchange(frame + b"\n" + request() + b"\n")
+        self.assertEqual(2, len(replies))
+        self.assertEqual("INVALID_REQUEST", replies[0]["error"]["code"])
+        self.assertTrue(replies[1]["ok"])
+        self.service.get_run.assert_called_once_with(run_id="e0-observatory")
+
+    def test_unencodable_response_becomes_fixed_internal_error(self):
+        self.service.get_run.return_value = {"text": "\ud800"}
+        replies = self.exchange(request() + b"\n" + request() + b"\n")
+        self.assertEqual(2, len(replies))
+        for reply in replies:
+            self.assertEqual({"protocol_version": PROTOCOL_VERSION, "request_id": None,
+                              "ok": False, "error": {"code": "INTERNAL_ERROR",
+                                                       "message": "internal error"}}, reply)
 
     def test_client_loop_has_no_domain_or_filesystem_access(self):
         tree = ast.parse(inspect.getsource(backend.serve))
@@ -165,21 +195,43 @@ class DemoCompatibilityTests(unittest.TestCase):
             self.assertIn('id="agent-payload"', html)
             self.assertIn('id="developer-setup"', html)
 
-    def test_subprocess_multiple_reads_same_real_session_and_clean_eof(self):
+    def test_desktop_backend_v1_session(self):
+        """One real host process: snapshot first, then reads pinned to it, then clean EOF."""
         with TemporaryDirectory() as directory:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [sys.executable, "-m", "tep_agent_lab.desktop_backend", "--output-root", directory],
-                input=b"\n".join(four_requests()) + b"\n", capture_output=True, timeout=90)
-            self.assertEqual(0, result.returncode, result.stderr.decode("utf-8"))
-            replies = [json.loads(line) for line in result.stdout.splitlines()]
-            self.assertEqual(4, len(replies))
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                def exchange(frame):
+                    process.stdin.write(frame + b"\n")
+                    process.stdin.flush()
+                    return json.loads(process.stdout.readline())
+
+                opened = exchange(request("open_telemetry_snapshot"))
+                self.assertTrue(opened["ok"], opened)
+                snapshot = opened["result"]
+                replies = [opened] + [exchange(frame) for frame in (
+                    request(snapshot=snapshot), request("get_entity", entity_id="reactor"),
+                    request("get_signal", signal_id=TEMPERATURE, snapshot=snapshot),
+                    request("get_signal_history", signal_id=PRESSURE, snapshot=snapshot))]
+                process.stdin.close()
+                self.assertEqual(0, process.wait(timeout=90), process.stderr.read().decode())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.stdout.close()
+                process.stderr.close()
             self.assertTrue(all(row["ok"] for row in replies), replies)
-            self.assertEqual("COMPLETED", replies[0]["result"]["run_status"])
+            self.assertEqual("COMPLETED", replies[1]["result"]["run_status"])
+            self.assertEqual(snapshot["snapshot_ref"], replies[1]["result"]["snapshot_ref"])
+            self.assertEqual("XMEAS(9)", replies[3]["result"]["source_locator"])
             self.assertTrue(replies[-1]["result"]["points"])
             self.assertEqual([], leakage_findings(replies))
+            text = json.dumps(replies).lower()
             for hidden in ("IDV", "active_disturbances", "evaluator", "known_injected_cause",
-                           "developer_setup", "candidate_cause", "lab-artifacts", directory):
-                self.assertNotIn(hidden.lower(), result.stdout.decode("utf-8").lower())
+                           "developer_setup", "candidate_cause", "lab-artifacts", "prepare-",
+                           directory):
+                self.assertNotIn(hidden.lower(), text)
             # One creation/start, not a new session per request; no report is produced.
             events = (Path(directory) / "p0-runs" / e0_demo.DEFAULT_RUN_ID /
                       "lifecycle" / "events.jsonl").read_text(encoding="utf-8")

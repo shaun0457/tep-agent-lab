@@ -403,6 +403,27 @@ This is the backend surface a later UI may use for a 2D process/P&ID-like displa
 
 Bounded current/history telemetry projection using existing sanitized world/lab contracts. Dense data remains artifact-backed.
 
+### Canonical telemetry views (P1.1C)
+
+Additive amendment required by plant-telemetry-contract-v0 §Existing architecture
+consistency and migration obligations (ADR-004 Decision 3). `TelemetryView` above is
+unchanged.
+
+Each prepared session owns one run-scoped canonical telemetry store. `prepare()` ingests
+every reference-world history record through the TEP simulation source before READY,
+and an ingestion failure fails `prepare()`. The store is sealed before READY: no later
+ingestion path exists in production. Store identifiers carry an opaque per-attempt
+token, never the attempt number. Ingest times are diagnostic and never appear in a
+view. `RunQueries` exposes
+`telemetry_snapshot` (the only read that chooses event horizon T and ingest revision K;
+defaults are K = now and T = the latest committed event, or tick 0 for K = 0, both
+disclosed), and `telemetry_current`, `telemetry_history` and `telemetry_last_event`.
+Each requires the exact snapshot object and never resolves "latest". Results follow
+plant-telemetry semantics (cutoffs before ordering and reduction, sample identities,
+coverage). The views never touch the world, so they are available while the
+in-process session exists, including while RUNNING, and unavailable otherwise. Implementation note:
+[`p1-1c-canonical-telemetry-integration.md`](../p1-1c-canonical-telemetry-integration.md).
+
 ### InvestigationView
 
 Derived from `RcaStateStore` and typed investigation records. Observation/Evidence semantics remain unchanged.

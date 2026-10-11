@@ -130,4 +130,17 @@ the app binary; mock-runtime tests still link native common-control APIs. This
 avoids the Windows loader's `STATUS_ENTRYPOINT_NOT_FOUND` before tests can run.
 It adds no runtime process API or frontend permission.
 
+## Superseded by application transport v1 (P1.1C)
+
+Rust allows the five v1 methods of [Application API v1](specs/application-api-v1.md) (`open_telemetry_snapshot` plus the four
+reads) with per-method parameter allowlists. It passes `snapshot` through as an opaque
+JSON value, still owns the run ID and forwards the two new fixed error codes. The shell
+pins one snapshot on load, shows its K, T and ref, and runs every probe against it with
+canonical ids (`reactor.temperature_measurement`, `reactor.pressure_measurement`;
+XMEAS labels are display only). A "New snapshot" button re-pins explicitly.
+`tauri_ipc.rs` and `bridge.rs` (development Python, plain `cargo test`) chain the
+snapshot the same way.
+
+The v0 text above is kept as history.
+
 SPEC_CONFLICT: none

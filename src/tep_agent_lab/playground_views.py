@@ -2,7 +2,8 @@
 
 Every view is derived from an existing canonical owner (manifest/outcome files, the
 lifecycle log, runtime ``TraceRecorder``, lab ``RunLog``/``RcaStateStore`` snapshots,
-lab ``ArtifactStore`` files, the attested ProcessGraph source, the live world) and can
+lab ``ArtifactStore`` files, the attested ProcessGraph source, the live world, the
+run-scoped canonical telemetry store) and can
 be rebuilt from it. Views never become a second TaskStateStore, ProcessGraph, or world
 truth store, and ``Trace != Observation != Evidence`` stays visible in their shapes.
 
@@ -27,6 +28,8 @@ from tep_sim.evaluator_bindings import build_evaluator_disturbance_bindings
 
 from .canonical_context import (CanonicalContextRegistry, ProjectionScope,
                                 inventory_checksum, visible_in)
+from .run_telemetry import CANONICAL_SOURCE, RunTelemetry, sample_json, snapshot_json
+from .telemetry import TimePoint
 from .tep_world import ARTIFACT_OWNER, leakage_findings
 
 VIEW_VERSION = "tep-agent-lab.playground-views/v0"
@@ -284,6 +287,72 @@ class RunQueries:
             "total_records": len(history), "returned_records": len(selected),
             "current": pick(history[-1]), "records": list(selected),
             "artifact_refs": dense})
+
+    # -- Canonical telemetry views (P1.1C) -----------------------------------------------
+    # Snapshot-bound reads of the run-scoped canonical store. They never touch the world,
+    # so they need no world lock; they exist while the in-process session is live.
+    def _run_telemetry(self) -> RunTelemetry:
+        session = self._run.session
+        telemetry = None if session is None else getattr(session, "telemetry", None)
+        if telemetry is None:
+            raise ViewUnavailable("canonical telemetry needs the in-process run session")
+        return telemetry
+
+    def telemetry_snapshot(self, *, event_horizon_ticks: int | None = None,
+                           ingest_sequence: int | None = None) -> Mapping[str, Any]:
+        """The only read that chooses (T, K); defaults are resolved once and disclosed."""
+        telemetry = self._run_telemetry()
+        snapshot = telemetry.snapshot(event_horizon_ticks=event_horizon_ticks,
+                                      ingest_sequence=ingest_sequence)
+        return self._view("TelemetrySnapshotView", self.scope, {
+            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(snapshot)})
+
+    def telemetry_current(self, signal_id: str, *,
+                          snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Last eligible sample at or before T under K (any quality), or NO_DATA."""
+        telemetry = self._run_telemetry()
+        pinned = telemetry.resolve_snapshot(snapshot)
+        result = telemetry.reader.current(source_id=telemetry.source_id, signal_id=signal_id,
+                                          snapshot=pinned)
+        return self._view("CanonicalCurrentView", self.scope, {
+            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(pinned),
+            "source_id": result.source_id, "signal_id": result.signal_id,
+            "status": str(result.status), "eligible_count": result.eligible_count,
+            "sample": None if result.sample is None else sample_json(result.sample),
+            "coverage": str(result.coverage)})
+
+    def telemetry_history(self, signal_id: str, *, snapshot: Mapping[str, Any],
+                          event_start_ticks: int | None = None,
+                          event_end_ticks: int | None = None,
+                          max_points: int) -> Mapping[str, Any]:
+        """Bounded inclusive window at or before T; default bounds are resolved once."""
+        telemetry = self._run_telemetry()
+        pinned = telemetry.resolve_snapshot(snapshot)
+        start, end = telemetry.history_bounds(pinned, event_start_ticks, event_end_ticks)
+        clock = pinned.event_clock.clock_id
+        result = telemetry.reader.history(
+            source_id=telemetry.source_id, signal_id=signal_id,
+            event_start=TimePoint(clock, start), event_end=TimePoint(clock, end),
+            max_points=max_points, snapshot=pinned)
+        return self._view("CanonicalHistoryView", self.scope, {
+            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(pinned),
+            "source_id": result.source_id, "signal_id": result.signal_id,
+            "event_start_ticks": start, "event_end_ticks": end,
+            "max_points": result.max_points, "eligible_count": result.eligible_count,
+            "returned_count": result.returned_count, "reduced": result.reduced,
+            "reduction_policy": result.reduction_policy, "coverage": str(result.coverage),
+            "status": str(result.status),
+            "samples": [sample_json(sample) for sample in result.samples]})
+
+    def telemetry_last_event(self, *, snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Latest eligible event time at or before T under K across the run store."""
+        telemetry = self._run_telemetry()
+        pinned = telemetry.resolve_snapshot(snapshot)
+        last = telemetry.reader.last_event_time(pinned)
+        return self._view("CanonicalLastEventView", self.scope, {
+            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(pinned),
+            "status": "NO_DATA" if last is None else "DATA",
+            "event_ticks": None if last is None else last.ticks})
 
     # -- InvestigationView --------------------------------------------------------------
     def investigation(self) -> Any:

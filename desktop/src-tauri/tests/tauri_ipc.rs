@@ -44,13 +44,23 @@ fn registered_tauri_command_reads_one_real_python_session() {
             },
         )
     };
+    let opened = invoke("application_request", "open_telemetry_snapshot", json!({}))
+        .unwrap()
+        .deserialize::<Value>()
+        .unwrap();
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["request_id"], "desktop-1");
+    let snapshot = opened["result"].clone();
     for (index, (method, params)) in [
-        ("get_run", json!({})),
+        ("get_run", json!({"snapshot": snapshot.clone()})),
         ("get_entity", json!({"entity_id":"reactor"})),
-        ("get_signal", json!({"signal_id":"XMEAS(9)"})),
+        (
+            "get_signal",
+            json!({"signal_id":"reactor.temperature_measurement","snapshot":snapshot.clone()}),
+        ),
         (
             "get_signal_history",
-            json!({"signal_id":"XMEAS(7)","max_points":30}),
+            json!({"signal_id":"reactor.pressure_measurement","snapshot":snapshot.clone(),"max_points":30}),
         ),
     ]
     .into_iter()
@@ -61,10 +71,14 @@ fn registered_tauri_command_reads_one_real_python_session() {
             .deserialize::<Value>()
             .unwrap();
         assert_eq!(response["protocol_version"], PROTOCOL);
-        assert_eq!(response["request_id"], format!("desktop-{}", index + 1));
+        assert_eq!(response["request_id"], format!("desktop-{}", index + 2));
         assert_eq!(response["ok"], true, "{response}");
         if method == "get_run" {
             assert_eq!(response["result"]["run_id"], RUN_ID);
+            assert_eq!(
+                response["result"]["snapshot_ref"],
+                snapshot["snapshot_ref"]
+            );
         }
         if method == "get_signal_history" {
             let points = response["result"]["points"].as_array().unwrap();

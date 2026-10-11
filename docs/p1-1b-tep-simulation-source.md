@@ -191,11 +191,15 @@ one commit revision K. A snapshot never sees part of a record.
 Deterministic, in-process only. No sleep/wall-clock pacing, websocket, REST or UI
 refresh. ACCELERATED/REAL_TIME pacing stays compatible but is deferred.
 
-## Current production path is unchanged
+## Production path (since P1.1C)
 
-`ReferenceWorld.history()/advance()`, `RunQueries.telemetry()`, tool-surface
-`get_history`, `ApplicationViewService` and the desktop are untouched; no existing
-module imports `tep_telemetry` (tested). This is a parallel canonical path.
+P1.1B shipped as a parallel path. Since
+[P1.1C](p1-1c-canonical-telemetry-integration.md), `run_telemetry` (the only importer
+of `tep_telemetry`, tested) gives every prepared P0 session its own source
+incarnation. Each `ReferenceWorld.history()` record is ingested through this adapter
+into a run-scoped store before READY. Application reads consume it through
+snapshot-bound P0 views. `ReferenceWorld.history()/advance()`, `RunQueries.telemetry()`
+and tool-surface `get_history` are unchanged.
 
 ## Tests
 
@@ -226,16 +230,13 @@ isolation and dependency direction. P1.1A boundary tests stay green.
   clean adapter; partial graphs need an explicit exclusion list.
 - Samples of a record with `shutdown_state = True` are still `GOOD`; shutdown is
   not yet represented in canonical telemetry.
-- Inherited from P1.1A: the reader's `max_scan_records` bound counts a binding's
-  whole K-committed prefix (no event-time index). One record per signal per TEP
-  record means a long run eventually makes every read of that binding exceed the
-  bound, however narrow the interval. Size the reader for the run, and add an
-  event-time index in the core before long-running or live sources.
+- Resolved in P1.1C: the core's event-time index bounds history scans by the
+  requested window (records committed at or before K inside it), so long runs no
+  longer make narrow reads exceed `max_scan_records`.
 
 ## Next milestone
 
-P1.1C canonical telemetry integration
-([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md)): event-time-bounded scans, P0
-run ingestion through this adapter, and snapshot-bound reads through the public
-P0/application boundary. The generic `SignalDescriptor` projection belongs to P1.3
-(`PlantContextRevision`); Agent telemetry tool migration belongs to P1.5.
+P1.1C ([note](p1-1c-canonical-telemetry-integration.md)) integrated this adapter. The
+generic `SignalDescriptor` projection belongs to P1.3 (`PlantContextRevision`); Agent
+telemetry tool migration belongs to P1.5
+([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md)).

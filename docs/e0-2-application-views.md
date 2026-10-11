@@ -108,4 +108,18 @@ access, raw artifact filesystem reads, evaluator payloads, unbounded history,
 TEP-specific public application types, transport framework, frontend, or dependency
 was added. Full `scripts/check.py` includes all unchanged E0/E0.1 acceptance tests.
 
+## Superseded by application transport v1 (P1.1C)
+
+[Application API v1](specs/application-api-v1.md) now owns the application reads. `get_run`, `get_signal` and
+`get_signal_history` no longer read `TelemetryView`. They read the run-scoped canonical
+telemetry store through P0 canonical views, pinned to one exact `TelemetrySnapshot`
+from the new `open_telemetry_snapshot`. Signal keys are canonical ProcessGraph ids
+(runtime ids only as `source_locator`). History serves any window at or before T within
+reader policy, replacing the recent-window projection, the hours bounds and the
+`earlier_records_omitted` behaviour described here. `get_entity` bindings now carry the
+canonical `signal_id` plus `source_locator`. See
+[`p1-1c-canonical-telemetry-integration.md`](p1-1c-canonical-telemetry-integration.md).
+
+The v0 text above is kept as history.
+
 SPEC_CONFLICT: none

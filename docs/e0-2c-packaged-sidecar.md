@@ -155,4 +155,17 @@ ApplicationViewService and ApplicationTransport stay independent of UI redesign.
 E0.2 COMPLETE = MVP UI is no longer an architectural dependency.
 E1 remains the richer Industrial Observatory UI.
 
+## Superseded by application transport v1 (P1.1C)
+
+The frozen EXE smoke now speaks transport v1 ([Application API v1](specs/application-api-v1.md)) interactively, one frame and one
+reply at a time. It opens a snapshot, then sends `get_run`, the reactor entity, the
+canonical temperature signal and canonical pressure history (<= 30 points) pinned to
+it. The smoke is bounded: each exchange has a deadline inside the overall 120 s, stderr
+goes to a temporary file, EOF reports stderr, and the child is always killed and reaped.
+`tests/test_sidecar_smoke.py` covers a silent, a stderr-flooding and a crashing child.
+`packaged.rs` (ignored; CI with `TEP_FROZEN_SIDECAR`) chains the snapshot the same
+way. `verify_bundle.py` reuses the smoke unchanged.
+
+The v0 text above is kept as history.
+
 SPEC_CONFLICT: none

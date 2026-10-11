@@ -18,6 +18,7 @@ Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Progra
 
 ## Application / Playground
 
+- [`application-api-v1.md`](application-api-v1.md) — P1.1C AGENT-scope application read models (`open_telemetry_snapshot`, snapshot-bound `get_run`/`get_signal`/`get_signal_history`, `get_entity`) and the versioned local JSON transport v1; retires transport v0.
 - [`playground-backend-v0.md`](playground-backend-v0.md) — minimal local-first RunManager/RunManifest lifecycle, Git/repository-backed `CanonicalContextRegistry`, visibility-aware context-source resolution, read/event projections, branch-tree views, and typed artifact access. Application/UI APIs remain separate from Agent tool authority.
 
 The Playground backend is initially an integration layer in this repo, not a fourth core repository and not another canonical TaskStateStore/world store. Existing runtime/lab/world components remain authoritative; Playground views are derived projections.

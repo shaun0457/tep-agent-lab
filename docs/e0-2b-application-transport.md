@@ -136,4 +136,17 @@ E0/P0 equivalence, domain validation,
 and evaluator-scope rejection. The complete `scripts/check.py` suite also checks
 unchanged static E0/E0.1 behavior and exact dependency pins.
 
+## Superseded by application transport v1 (P1.1C)
+
+The v0 contract above is retired. The host speaks only
+`tep-agent-lab.application-transport/v1` (a v0 request receives
+`UNSUPPORTED_PROTOCOL_VERSION`). v1 adds `open_telemetry_snapshot`, makes `snapshot`
+(an exact `TelemetrySnapshot` object) a parameter of the telemetry reads, replaces the
+hours bounds with integer tick bounds and adds the `SNAPSHOT_UNAVAILABLE` and
+`RESOURCE_LIMIT_EXCEEDED` codes. The envelope, the 64 KiB raw-input bound, the codec and
+the validation order are unchanged. Methods, parameters, models and codes are owned by
+[Application API v1](specs/application-api-v1.md).
+
+The v0 text above is kept as history.
+
 SPEC_CONFLICT: none

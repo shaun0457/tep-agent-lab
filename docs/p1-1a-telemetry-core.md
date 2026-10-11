@@ -1,6 +1,7 @@
 # P1.1A — Generic Telemetry Core and Snapshot-Bound Reader
 
-Status: implemented (P1.1A). Normative contract:
+Status: implemented (P1.1A); scan bounds amended by
+[P1.1C](p1-1c-canonical-telemetry-integration.md). Normative contract:
 [Plant Context + Telemetry v0](specs/plant-telemetry-contract-v0.md),
 [ADR-003](decisions/ADR-003-industrial-environment-boundary.md).
 
@@ -44,12 +45,15 @@ SourceObservation            source event fields; no ingest_time
   `snapshot_ref`), binding, bounds, eligible/returned counts, sample identities,
   qualities, reduction policy and retention coverage.
 - Resource bounds (`TimeSeriesReader`): `max_points_limit`, `max_interval_ticks`
-  and `max_scan_records`. The scan bound applies to the binding's K-committed
-  candidate prefix, sized by bisection before any record is read; above the
-  limit the read raises `ResourceLimitExceeded` with no partial scan, no
-  truncation, and no counts or values in the error. Because the prefix is fixed
-  by (binding, K), a snapshot's pass/fail outcome never changes after later
-  appends, and other bindings never count against it.
+  and `max_scan_records`. Since P1.1C the scan bound counts only the history
+  window's candidates: records committed at or before K inside
+  `[event_start, event_end]`. The count comes from a per-binding event-time index
+  before any record is read. Above the limit the read raises
+  `ResourceLimitExceeded` with no partial scan, no truncation, and no counts or
+  values in the error. The outcome depends only on (binding, K, T, window), so a
+  snapshot's pass/fail outcome never changes after later appends, and other
+  bindings never count against it. `current` and `last_event_time` use the index
+  and do not scan the prefix. (P1.1A counted the whole K-committed prefix.)
 - Retention coverage: results report `COMPLETE_FOR_STORE_INCARNATION`, meaning every
   record this store incarnation accepted at or before K is retained and was
   considered. It does not claim the physical/source stream had no missing
@@ -69,8 +73,9 @@ contains no simulator-specific vocabulary.
 > A read pinned to event horizon T and ingestion revision K never observes a sample
 > whose commit revision exceeds K or whose event time exceeds T.
 
-The reader-internal `InMemoryTimeSeriesStore._eligible` applies both cutoffs (and the binding filter)
-before sorting; `current`, `history`, counts and reduction only see that set.
+The reader-internal `InMemoryTimeSeriesStore._window`/`_last` apply both cutoffs (and the binding
+filter) through the event-time index before sorting; `current`, `history`, counts and
+reduction only see that set.
 Regression tests: an 8-minute sample committed at K=3 is invisible to a (T=10 min,
 K=2) snapshot, whose repeated reads stay equal and `repr`-identical; a 15-minute
 sample is never visible at T=10 min.
@@ -87,21 +92,20 @@ sample is never visible at T=10 min.
   evaluated; authorization arrives with application integration.
 - No multi-source resolution policy (callers select `source_id` explicitly), no
   quarantine store for conflicts (they are rejected), no derived state features.
-- No indexing: within the scan bound, reads filter the binding's K-committed prefix
-  linearly. The bound counts candidates committed at or before K, including those
-  later excluded by T or by the interval.
+- Indexing (P1.1C) is in-memory: commit-ordered blocks sorted by read order, with a
+  linear partial tail block; no durable or cross-process index.
 - No retention eviction, so coverage is always `COMPLETE_FOR_STORE_INCARNATION`;
   partial-coverage states arrive with retention policies.
 
 ## Why `ReferenceWorld.history` is unchanged
 
-The existing sanitized history path (`ReferenceWorld.history()`, `RunQueries.telemetry()`,
-Agent `get_history`) is current production behavior used by the desktop, D0
-benchmarks and Agent tools. P1.1A builds the canonical path in parallel so that it
-can be proven in isolation; migrating consumers through public P0/application
-queries is planned for later milestones (P1.1C for application reads, P1.5 for Agent
-tools; [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md)) and would change
-observable behavior.
+P1.1A built the canonical path in parallel so it could be proven in isolation. P1.1C
+then moved application reads (desktop, transport v1) onto it through public P0
+snapshot-bound reads
+([p1-1c-canonical-telemetry-integration.md](p1-1c-canonical-telemetry-integration.md)).
+`ReferenceWorld.history()`, P0 `TelemetryView` v0 (D0 surfaces, static E0) and Agent
+`get_history` stay unchanged until P1.5
+([ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md)).
 
 ## Next step
 

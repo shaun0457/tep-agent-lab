@@ -52,13 +52,25 @@ fn frozen_sidecar_via_shell_ext_and_application_ipc() {
         )
     };
     let pid = tauri::async_runtime::block_on(backend.process_id()).unwrap();
+    let opened = invoke(
+        "application_request",
+        json!({"method":"open_telemetry_snapshot","params":{}}),
+    )
+    .unwrap()
+    .deserialize::<Value>()
+    .unwrap();
+    assert_eq!(opened["ok"], true, "{opened}");
+    let snapshot = opened["result"].clone();
     for (i, (method, params)) in [
-        ("get_run", json!({})),
+        ("get_run", json!({"snapshot": snapshot.clone()})),
         ("get_entity", json!({"entity_id":"reactor"})),
-        ("get_signal", json!({"signal_id":"XMEAS(9)"})),
+        (
+            "get_signal",
+            json!({"signal_id":"reactor.temperature_measurement","snapshot":snapshot.clone()}),
+        ),
         (
             "get_signal_history",
-            json!({"signal_id":"XMEAS(7)","max_points":30}),
+            json!({"signal_id":"reactor.pressure_measurement","snapshot":snapshot.clone(),"max_points":30}),
         ),
     ]
     .into_iter()
@@ -73,7 +85,7 @@ fn frozen_sidecar_via_shell_ext_and_application_ipc() {
         .unwrap();
         assert_eq!(reply["ok"], true, "{reply}");
         assert_eq!(reply["protocol_version"], PROTOCOL);
-        assert_eq!(reply["request_id"], format!("desktop-{}", i + 1));
+        assert_eq!(reply["request_id"], format!("desktop-{}", i + 2));
         assert_eq!(
             tauri::async_runtime::block_on(backend.process_id()),
             Some(pid)

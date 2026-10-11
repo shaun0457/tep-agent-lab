@@ -9,10 +9,18 @@ from typing import BinaryIO
 
 from industrial_agent_runtime.serialization import canonical_json
 
-from .application_transport import ApplicationTransport, MAX_REQUEST_BYTES
+from .application_transport import (ApplicationTransport, ErrorCode, MAX_REQUEST_BYTES,
+                                    PROTOCOL_VERSION)
 from .application_views import ApplicationViewService
 from .e0_demo import DEFAULT_RUN_ID, run_demo
 from .playground import RunStatus
+
+
+# Fixed reply when a response cannot be encoded; never echoes the failed frame.
+_UNENCODABLE = (canonical_json({"protocol_version": PROTOCOL_VERSION, "request_id": None,
+                                "ok": False, "error": {"code": ErrorCode.INTERNAL_ERROR.value,
+                                                       "message": "internal error"}})
+                + "\n").encode("utf-8")
 
 
 def serve(transport: ApplicationTransport, source: BinaryIO, sink: BinaryIO) -> None:
@@ -38,7 +46,11 @@ def serve(transport: ApplicationTransport, source: BinaryIO, sink: BinaryIO) -> 
                     if not chunk or chunk.endswith(b"\n"):
                         break
         response = transport.dispatch_json(payload)
-        sink.write((canonical_json(response) + "\n").encode("utf-8"))
+        try:
+            frame = (canonical_json(response) + "\n").encode("utf-8")
+        except (UnicodeError, ValueError, TypeError):
+            frame = _UNENCODABLE
+        sink.write(frame)
         sink.flush()
 
 
