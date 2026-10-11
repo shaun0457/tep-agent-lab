@@ -108,8 +108,11 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   mentions to `CandidateBinding`. OPERATING_LIMIT and CONTROL_RELATION become
   `CandidateKnowledge` carrying a `literature_candidate` Rule that stays
   LITERATURE/NONE/REFERENCE. The other kinds become non-rule `CandidateKnowledge`,
-  and unknown kinds stay unclassified. `content_key` and `candidate_version` hash
-  NFC-normalized canonical JSON. A model retry keeps the key and changes the version.
+  and unknown kinds stay unclassified. `content_key`, `candidate_version`,
+  `fragment_id` and review `record_hash` hash the exact canonical JSON bytes, with no
+  Unicode normalization (the canonical_context checksum convention). An NFC and an NFD
+  spelling are different records with different hashes. A model retry keeps the key
+  and changes the version.
   `record()` is the complete immutable candidate and derivation record (content,
   alternatives, provenance with every influencing input and exact derived-input
   checksums, fragments); its hashes can be recomputed. Numbers are normalized to
@@ -139,8 +142,11 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   candidates and reviews more restrictive than the workspace are refused, so hidden
   activity can never move the log tail or change the checksum of a less restrictive
   revision. Use a separate workspace per visibility.
-- **Staging** (`stage_publication`): a plain `threading.Lock` is held from reading
-  the tail to the end of self-verification. The position is always the tail. Staging
+- **Staging** (`stage_publication`): the workspace `threading.RLock` is held from
+  reading the tail to the end of self-verification. Resolvers run under it and must
+  not modify the workspace: the lock is re-entrant, so a misbehaving resolver cannot
+  deadlock, and staging raises `PublicationError` if the review or candidate log
+  moved. The position is always the tail. Staging
   re-attests every session source and R0. Every considered candidate's
   `DerivedInput`s must resolve through `derived_input_resolver` to their exact bytes;
   an input with no resolver fails. Candidate-local failures become `Exclusion`s.
@@ -176,15 +182,20 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   - `_dependency_closure`: re-attest every session source; re-load R0 and its lineage
     from exact bytes, visible at the revision's visibility; resolve the parent; check
     the effective visibility of every review record and every stored candidate;
-    resolve the derived inputs of every stored candidate through a required resolver;
-    re-attest the sources and fragments of conflict dependencies; and limit the known
-    ids to stored candidates;
-  - `_decide` for every considered candidate;
+    check each conflict dependency's exact source integrity (sources, fragments,
+    influencing sources, derived inputs); and limit the known ids to stored candidates;
+  - `_decide` for every considered candidate. A candidate whose conflict partner fails
+    integrity is excluded as `DEPENDENCY_INVALID`, a candidate-level fail-closed: the
+    revision does not abort;
+  - derived-input resolution for the approved candidates only (an unresolved input
+    still fails the whole publication; excluded candidates need none);
   - `_build_bundle`.
 
-  Conflict dependencies are exactly the candidate-log entries that a selected
-  candidate names in `conflicting_candidate_ids`. They are stored as exact records but
-  not approved.
+  A conflict dependency is, for each candidate id that a selected candidate names in
+  `conflicting_candidate_ids` and that is not itself selected, the latest version of
+  that id in the anchored candidate log. Older versions, for example from an earlier
+  session, are not pulled in. Dependencies are stored as exact records but not
+  approved.
 - **`verify_publication(files, revision, session, *, anchor, derived_input_resolver,
   parent_resolver)`**:
   - Trusted inputs: the compile session over the revision's dependencies (its id must
@@ -195,9 +206,10 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   - It re-runs `PublicationRequest` on the revision's request metadata, rebuilds every
     candidate record exactly (duplicate rows are rejected), and calls the same
     `_stage_bundle`.
-  - Every re-staged artifact (revision, review log, candidates, R1) must equal the
-    bundle byte for byte, so the verifier performs every staging check, and only adds
-    checks to it.
+  - The bundle's file set must equal the re-staged file set exactly (an extra or a
+    missing file is rejected), and every re-staged artifact (revision, review log,
+    candidates, R1) must equal the bundle byte for byte. The verifier therefore
+    performs every staging check, and only adds checks to it.
 
 ### Field audit
 
@@ -227,7 +239,9 @@ every hash and expects rejection. It skips only the fields marked C.
 | review log | `records[*]` (every field, including `previous_hash`) | B | contiguous hash chain whose tail hash equals the anchor; each record is then used as staging input |
 | candidates | `schema_version` | A | constant |
 | candidates | `candidates[*]` (every field) | A + B | rebuilt exactly (content key, version, fragment ids recomputed). Membership comes from the anchored candidate log; approved items are re-validated against the exact sources and the plant index; exclusions are re-decided. Fragments of an excluded candidate are not attested, which is safe because an excluded candidate contributes nothing to the approved set |
-| candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log; sources, fragments and derived inputs are attested |
+| candidates | `dependencies[*]` (every field) | A | rebuilt exactly; the set is recomputed from the anchored candidate log (latest version per referenced id); sources, fragments and derived inputs are attested, and a failing partner excludes the claims citing it (`DEPENDENCY_INVALID`) |
+| bundle | set of file paths | A | must equal the re-staged set exactly |
+| all records | text fields used in identity hashes | A | hashed as exact canonical bytes; an NFC/NFD variant changes the hash and fails the anchor and the byte comparison |
 | R1 | every field | A | re-derived from R0 and the approved rules, byte-exact; visibility no more restricted than the revision |
 | head record | `schema_version`, `lineage_id`, `expected_parent`, `revision` | A | built by `StagedPublication` from the revision ref and the parent; P1.2D writes it |
 | staged metadata | `lineage_id`, refs, `review_log_position`, `expected_head`, `exclusions`, `document` | A | `StagedPublication.__post_init__` parses the revision and requires agreement |
@@ -264,7 +278,7 @@ review findings they cover.
 | 14 | partial: contract level; end-to-end demo in P1.2D |
 | 10 | partial: immutable, fully validated staged bundle; the atomic commit and head CAS are P1.2D |
 | 20 | partial: a written staged revision registers through a ContextSourceRef (tested); the repository commit is P1.2D and `RunManager.prepare` consumption comes later |
-| 21 | partial. The same `_stage_bundle` fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input, an unresolvable, foreign or hidden parent, a missing or fabricated conflict dependency, and a dependency fragment outside the inventory. Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
+| 21 | partial. The same `_stage_bundle` fails closed in staging and in verification. Tested cases: a changed source, changed R0 bytes, an unresolvable or mismatched derived input on an approved candidate, an unresolvable, foreign or hidden parent, a fabricated conflict dependency, and extra or missing bundle files. A conflict partner that fails integrity (for example a fragment outside the inventory, or an older session's version) excludes only the claims that cite it, as `DEPENDENCY_INVALID`. Ancestor rule sets are attested by content checksum only, and commit atomicity and crash safety are P1.2D |
 
 The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.2D.
 
@@ -284,6 +298,15 @@ The reproducible vertical-slice demo (spec §Initial P1.2 vertical slice) is P1.
 - The location kinds are BYTE_RANGE and JSON_POINTER. Semantic locators (section,
   table rows, procedure steps) arrive with the P1.2B parser policy.
 - Derived-input resolvers are caller-supplied until P1.2C defines model-call records.
+- Source content is re-read and re-attested on each validation call (`_dependency_closure`
+  and `_decide` do not share a per-call cache). This is fine for the small P1.2 corpus;
+  a shared per-call content cache is a follow-up if corpus size makes it matter.
+- Small validation helpers (`_ID`, `_SHA256`, `_exact_keys`-style checks) are
+  duplicated across `canonical_context`, `rule_sets` and `context_compiler`;
+  consolidating them is a P1.2B follow-up.
+- `strict_json_loads` (shared persistence helper) rejects duplicate keys and
+  non-finite numbers, `1e400` included. Integers stay exact and are bounded by Python's
+  integer string-conversion limit, which also raises `ValueError`.
 
 ## Next step
 
