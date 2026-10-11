@@ -24,6 +24,7 @@ from .telemetry import (ClockMismatch, ResourceLimitExceeded, SnapshotUnavailabl
 
 PROTOCOL_VERSION = "tep-agent-lab.application-transport/v1"
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_SAFE_INTEGER = 2**53 - 1
 # Correlation ids are bounded printable ASCII tokens, so responses always encode.
 _REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
@@ -153,16 +154,17 @@ def _validate(raw: Mapping[str, Any]) -> tuple[ErrorCode | None, dict[str, Any]]
     if code is not None:
         return code, {}
     params = dict(raw["params"])
-    if "snapshot" in params:
+    if "snapshot" in params and not (
+            raw["method"] == "get_run" and params["snapshot"] is None):
         try:
             params["snapshot"] = snapshot_from_json(params["snapshot"])
         except InvalidRequest:
             return ErrorCode.INVALID_REQUEST, {}
-    # The fixed snapshot shape is checked before traversing any client value.
-    try:
-        to_jsonable(params)
-    except (TypeError, ValueError, OverflowError, RecursionError):
-        return ErrorCode.INVALID_REQUEST, {}
+    if "snapshot" in params and params["snapshot"] is not None:
+        snapshot = params["snapshot"]
+        if (snapshot.ingest_sequence > MAX_SAFE_INTEGER
+                or snapshot.event_horizon_ticks > MAX_SAFE_INTEGER):
+            return ErrorCode.INVALID_REQUEST, {}
     return None, params
 
 
@@ -184,9 +186,10 @@ def _validate_shape(raw: Mapping[str, Any]) -> ErrorCode | None:
     for key, value in params.items():
         if key in _STRINGS and type(value) is not str:
             return ErrorCode.INVALID_REQUEST
-        if key in _INTEGERS and type(value) is not int:
+        if key in _INTEGERS and (type(value) is not int or abs(value) > MAX_SAFE_INTEGER):
             return ErrorCode.INVALID_REQUEST
-        if key in _NULLABLE_INTEGERS and value is not None and type(value) is not int:
+        if key in _NULLABLE_INTEGERS and value is not None and (
+                type(value) is not int or abs(value) > MAX_SAFE_INTEGER):
             return ErrorCode.INVALID_REQUEST
     return None
 

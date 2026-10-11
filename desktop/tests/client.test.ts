@@ -87,3 +87,31 @@ test("application failures, including the v1 telemetry codes, are safe and surfa
   const failed = createApplicationClient(async () => { throw new Error("sensitive stderr"); });
   await assert.rejects(failed.getRun(), { code: "BACKEND_IO_ERROR", message: "Application bridge unavailable" });
 });
+
+// Regression for F9: extract the actual presentation regex, not a copied test regex.
+test("presentation resolution grammar includes the Python 18-digit cap", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+  const literal = source.match(/^const RESOLUTION = (.+);$/m)![1];
+  const pattern = new RegExp(literal.slice(1, literal.lastIndexOf("/")));
+  for (const value of ["1/1", "1/100000000000000000", "999999999999999999/1"]) {
+    assert.equal(pattern.test(value), true, value);
+  }
+  for (const value of ["1/" + "9".repeat(19), "9".repeat(19) + "/1", "01/1", "1/01", "0/1", "1/0", "1/1\n", "1/1\r\n"]) {
+    assert.equal(pattern.test(value), false, value);
+  }
+});
+
+test("null run snapshot uses the same client request as an omitted snapshot", async () => {
+  const calls: unknown[] = [];
+  const client = createApplicationClient(async (_command, args) => {
+    calls.push(args);
+    return { protocol_version: PROTOCOL, request_id: "desktop-1", ok: true, result: {} };
+  });
+  await client.getRun();
+  // Runtime null from JSON follows the same path even though the TS API uses optional.
+  await client.getRun(null as unknown as typeof snapshot);
+  assert.deepEqual(calls, [
+    { method: "get_run", params: {} }, { method: "get_run", params: {} },
+  ]);
+});

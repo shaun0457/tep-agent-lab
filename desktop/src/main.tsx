@@ -17,7 +17,7 @@ const probes: Probe[] = [
 ];
 
 // Presentation only: ticks times the snapshot clock's exact seconds-per-tick, as hours.
-const RESOLUTION = /^([1-9][0-9]{0,8})\/([1-9][0-9]{0,8})$/;
+const RESOLUTION = /^([1-9][0-9]{0,17})\/([1-9][0-9]{0,17})$/;
 function hours(ticks: unknown, resolution: unknown): string {
   if (!Number.isSafeInteger(ticks) || typeof resolution !== "string") return "Unavailable";
   const match = RESOLUTION.exec(resolution);

@@ -17,7 +17,7 @@ from .canonical_context import ProjectionScope
 from .playground import RunStatus
 from .playground_views import RunQueries, VisibilityViolation
 from .telemetry import (ClockMismatch, ResourceLimitExceeded, SnapshotUnavailable,
-                        TelemetryError)
+                        TelemetryError, TelemetryRequestError)
 from .tep_world import leakage_findings
 
 MAX_HISTORY_POINTS = 1000
@@ -40,7 +40,7 @@ class AmbiguousSignal(ValueError):
 _ReadResult = TypeVar("_ReadResult")
 
 
-class _InvalidTelemetryRequest(InvalidRequest, TelemetryError):
+class _InvalidTelemetryRequest(InvalidRequest, TelemetryRequestError):
     """Read-boundary client validation; preserves the direct service exception family."""
 
 
@@ -50,7 +50,7 @@ def _telemetry_read(read: Callable[..., _ReadResult], *args: Any, **kwargs: Any)
         return read(*args, **kwargs)
     except (ClockMismatch, ResourceLimitExceeded):
         raise
-    except TelemetryError:
+    except TelemetryRequestError:
         raise _InvalidTelemetryRequest("invalid telemetry read arguments") from None
 
 
@@ -104,7 +104,11 @@ class ApplicationViewService:
         view = self._checked(_telemetry_read(
             queries.telemetry_snapshot, event_horizon_ticks=event_horizon_ticks,
             ingest_sequence=ingest_sequence), run_id)
-        return snapshot_from_view(run_id, view["snapshot"])
+        try:
+            return snapshot_from_view(run_id, view["snapshot"])
+        except InvalidRequest:
+            # This snapshot was produced by the server, not supplied by the client.
+            raise TelemetryError("invalid server telemetry snapshot") from None
 
     def get_run(self, run_id: str, *, snapshot: TelemetrySnapshot | None = None) -> Run:
         queries = self._queries(run_id)
@@ -161,10 +165,11 @@ class ApplicationViewService:
                    if binding["semantic_entity_id"] == signal_id]
         if not matches:
             raise UnknownSignal("unknown signal")
-        semantics = {(b.quantity, b.relation, b.unit, b.source_locator) for _, b in matches}
+        semantics = {(b.quantity, b.relation, b.unit) for _, b in matches}
         if len(semantics) != 1:
             raise AmbiguousSignal("inconsistent signal binding metadata")
-        return tuple(sorted({identity for identity, _ in matches})), matches[0][1]
+        binding = min(matches, key=lambda item: (item[0], item[1].source_locator))[1]
+        return tuple(sorted({identity for identity, _ in matches})), binding
 
     @staticmethod
     def _same_signal(view: Mapping[str, Any], signal_id: str) -> None:

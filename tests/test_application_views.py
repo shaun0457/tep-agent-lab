@@ -196,7 +196,7 @@ class ApplicationViewsTests(unittest.TestCase):
     def test_only_telemetry_read_validation_maps_to_invalid_request(self):
         from tep_agent_lab.application_transport import ApplicationTransport, ErrorCode, PROTOCOL_VERSION
         for target, expected in (("process_graph", ErrorCode.INTERNAL_ERROR),
-                                 ("telemetry_current", ErrorCode.INVALID_REQUEST)):
+                                 ("telemetry_current", ErrorCode.INTERNAL_ERROR)):
             queries, service = self.changed_queries()
             getattr(queries, target).side_effect = TelemetryError("private server detail")
             response = ApplicationTransport(service).dispatch({

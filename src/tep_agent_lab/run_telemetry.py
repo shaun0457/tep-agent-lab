@@ -28,7 +28,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
-import re
 import secrets
 import threading
 from typing import Any
@@ -40,7 +39,8 @@ from .canonical_context import ContextSourceRef
 from .telemetry import (TELEMETRY_CONTRACT_VERSION, AppendResult, ClockDescriptor, ClockKind,
                         InMemoryTimeSeriesStore, SignalSample, SnapshotUnavailable,
                         SourceObservation, StoreRef, TelemetryError, TelemetryIngestor,
-                        TelemetryReadSnapshot, TimePoint, TimeSeriesReader)
+                        TelemetryReadSnapshot, TelemetryRequestError, TimePoint, TimeSeriesReader,
+                        _checked_id, _checked_int, _coerce, parse_event_resolution)
 from .tep_telemetry import TEPSimulationSource
 
 TELEMETRY_STORE_ID = "p0-reference-telemetry"
@@ -50,7 +50,6 @@ CANONICAL_SOURCE = "P0 run-scoped canonical reference telemetry"
 INGEST_CLOCK = ClockDescriptor("p0-ingest-utc", ClockKind.UTC, Fraction(1, 1000),
                                "1970-01-01T00:00:00Z/utc")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_RESOLUTION = re.compile(r"[1-9][0-9]*/[1-9][0-9]*")
 SNAPSHOT_KEYS = frozenset({"contract", "store", "ingest_sequence", "event_horizon",
                            "event_clock", "context_ref", "visibility_policy_ref",
                            "snapshot_ref"})
@@ -66,6 +65,11 @@ class TelemetryReadPolicy:
     max_points_limit: int = 1000
     max_interval_ticks: int = 2_592_000      # 30 simulated days at 1 s/tick
     max_scan_records: int = 50_000
+
+    def __post_init__(self) -> None:
+        _checked_int("max_points_limit", self.max_points_limit, minimum=1)
+        _checked_int("max_interval_ticks", self.max_interval_ticks, minimum=0)
+        _checked_int("max_scan_records", self.max_scan_records, minimum=1)
 
 
 def context_ref_for(graph_source: ContextSourceRef) -> str:
@@ -106,14 +110,15 @@ def utc_ticks(timestamp: Any) -> int:
 
 def _exact(value: Any, keys: frozenset[str], name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != keys:
-        raise TelemetryError(f"snapshot {name} has an unexpected shape")
+        raise TelemetryRequestError(f"snapshot {name} has an unexpected shape")
     return value
 
 
-def _nonnegative(name: str, value: Any) -> int:
-    if type(value) is not int or value < 0:
-        raise TelemetryError(f"{name} must be a non-negative integer")
-    return value
+def _request_int(name: str, value: Any) -> int:
+    try:
+        return _checked_int(name, value, minimum=0)
+    except TelemetryError:
+        raise TelemetryRequestError(f"{name} must be a non-negative integer") from None
 
 
 class TelemetrySealed(TelemetryError):
@@ -204,11 +209,11 @@ class RunTelemetry:
         """Freeze (T, K) once. K defaults to now; T to the K frontier, or tick 0 if empty."""
         if ingest_sequence is None:
             ingest_sequence = self.store.current_ingest_sequence
-        _nonnegative("ingest_sequence", ingest_sequence)
+        _request_int("ingest_sequence", ingest_sequence)
         if event_horizon_ticks is None:
             frontier = self.store.event_frontier(ingest_sequence)
             event_horizon_ticks = 0 if frontier is None else frontier.ticks
-        _nonnegative("event_horizon_ticks", event_horizon_ticks)
+        _request_int("event_horizon_ticks", event_horizon_ticks)
         return self.store.snapshot(TimePoint(self.store.event_clock.clock_id,
                                              event_horizon_ticks), ingest_sequence)
 
@@ -220,26 +225,33 @@ class RunTelemetry:
         store = _exact(body["store"], _STORE_KEYS, "store")
         horizon = _exact(body["event_horizon"], _HORIZON_KEYS, "event_horizon")
         clock = _exact(body["event_clock"], _CLOCK_KEYS, "event_clock")
-        if not isinstance(clock["resolution"], str) or not _RESOLUTION.fullmatch(
-                clock["resolution"]):
-            raise TelemetryError("snapshot clock resolution must be an exact n/d fraction")
-        numerator, denominator = clock["resolution"].split("/")
-        resolution = Fraction(int(numerator), int(denominator))
-        if clock["resolution"] != f"{resolution.numerator}/{resolution.denominator}":
-            raise TelemetryError("snapshot clock resolution must be reduced")
-        _nonnegative("ingest_sequence", body["ingest_sequence"])
-        _nonnegative("event_horizon_ticks", horizon["ticks"])
+        resolution = parse_event_resolution(clock["resolution"])
+        # Validate client fields explicitly. Constructor/store invariant failures below
+        # are server faults and must never be reclassified by a broad base-class catch.
         try:
-            pinned = TelemetryReadSnapshot(
-                StoreRef(store["store_id"], store["incarnation"], store["namespace"]),
-                body["ingest_sequence"], TimePoint(horizon["clock_id"], horizon["ticks"]),
-                ClockDescriptor(clock["clock_id"], clock["kind"],
-                                resolution, clock["origin"]),
-                body["context_ref"], body["visibility_policy_ref"])
-        except (TypeError, ValueError) as error:
-            if isinstance(error, TelemetryError):
-                raise
-            raise TelemetryError("snapshot fields have invalid types") from None
+            for name in _STORE_KEYS:
+                _checked_id(name, store[name])
+            for name, value in (("clock_id", horizon["clock_id"]),
+                                ("clock_id", clock["clock_id"]),
+                                ("context_ref", body["context_ref"]),
+                                ("visibility_policy_ref", body["visibility_policy_ref"])):
+                _checked_id(name, value)
+            if not isinstance(clock["kind"], str):
+                raise TelemetryRequestError("snapshot clock kind must be a string")
+            kind = _coerce(ClockKind, "kind", clock["kind"])
+            if clock["origin"] is not None:
+                _checked_id("origin", clock["origin"])
+            elif kind in (ClockKind.SIMULATION, ClockKind.UTC):
+                raise TelemetryRequestError("snapshot clock requires an origin")
+            _checked_int("ingest_sequence", body["ingest_sequence"], minimum=0)
+            _checked_int("event_horizon_ticks", horizon["ticks"], minimum=0)
+        except TelemetryError:
+            raise TelemetryRequestError("invalid snapshot arguments") from None
+        pinned = TelemetryReadSnapshot(
+            StoreRef(store["store_id"], store["incarnation"], store["namespace"]),
+            body["ingest_sequence"], TimePoint(horizon["clock_id"], horizon["ticks"]),
+            ClockDescriptor(clock["clock_id"], kind, resolution, clock["origin"]),
+            body["context_ref"], body["visibility_policy_ref"])
         if body["snapshot_ref"] != pinned.snapshot_ref:
             raise SnapshotUnavailable("snapshot reference does not match its contents")
         return self.store.resolve(pinned)
@@ -248,7 +260,7 @@ class RunTelemetry:
                        event_end_ticks: Any) -> tuple[int, int]:
         """Default end = T and start = max(0, end - max_interval_ticks), resolved once."""
         end = (snapshot.event_horizon.ticks if event_end_ticks is None
-               else _nonnegative("event_end_ticks", event_end_ticks))
+               else _request_int("event_end_ticks", event_end_ticks))
         start = (max(0, end - self.policy.max_interval_ticks) if event_start_ticks is None
-                 else _nonnegative("event_start_ticks", event_start_ticks))
+                 else _request_int("event_start_ticks", event_start_ticks))
         return start, end

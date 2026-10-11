@@ -6,13 +6,12 @@ Owning contract: docs/specs/application-api-v1.md.
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from enum import StrEnum
-from math import gcd
-import re
 from typing import Any
 
 from industrial_agent_runtime import TaskStatus
 
 from .playground import RunStatus
+from .telemetry import TelemetryRequestError, parse_event_resolution
 
 
 class InvalidRequest(ValueError):
@@ -50,7 +49,6 @@ class TelemetrySnapshot:
 _INTEGER_FIELDS = frozenset({"ingest_sequence", "event_horizon_ticks"})
 SNAPSHOT_FIELDS = tuple(field.name for field in fields(TelemetrySnapshot))
 MAX_SNAPSHOT_TEXT = 256
-_RESOLUTION = re.compile(r"([1-9][0-9]{0,17})/([1-9][0-9]{0,17})")
 
 
 def snapshot_from_json(value: Any) -> TelemetrySnapshot:
@@ -75,9 +73,10 @@ def _validate_snapshot_fields(value: Mapping[str, Any]) -> None:
             valid = type(item) is str and 0 < len(item) <= MAX_SNAPSHOT_TEXT
         if not valid:
             raise InvalidRequest(f"snapshot field {name} is invalid")
-    match = _RESOLUTION.fullmatch(value["event_resolution"])
-    if match is None or gcd(int(match[1]), int(match[2])) != 1:
-        raise InvalidRequest("snapshot resolution must be a reduced positive fraction")
+    try:
+        parse_event_resolution(value["event_resolution"])
+    except TelemetryRequestError:
+        raise InvalidRequest("snapshot resolution must be a reduced positive fraction") from None
 
 
 def snapshot_from_view(run_id: str, body: Mapping[str, Any]) -> TelemetrySnapshot:

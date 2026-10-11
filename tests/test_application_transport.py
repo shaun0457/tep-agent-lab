@@ -108,8 +108,9 @@ class TransportSchemaTests(unittest.TestCase):
             with self.subTest(snapshot=snapshot):
                 self.assert_failure(envelope("get_signal", signal_id=TEMPERATURE,
                                              snapshot=snapshot), ErrorCode.INVALID_REQUEST)
-                self.assert_failure(envelope("get_run", snapshot=snapshot),
-                                    ErrorCode.INVALID_REQUEST)
+                if snapshot is not None:  # null is the optional no-telemetry read
+                    self.assert_failure(envelope("get_run", snapshot=snapshot),
+                                        ErrorCode.INVALID_REQUEST)
         for options in ({"event_start_ticks": True}, {"event_end_ticks": "1"},
                         {"event_start_ticks": 1.5}, {"max_points": True},
                         {"max_points": 2.0}, {"max_points": None}):

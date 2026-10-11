@@ -112,8 +112,10 @@ Results equal the P0 canonical views for the same snapshot and arguments.
 Service failures are typed: `UnknownEntity`, `UnknownSignal`, `AmbiguousSignal`,
 `ViewUnavailable`, `VisibilityViolation`, `SnapshotUnavailable`,
 `ResourceLimitExceeded`, `InvalidRequest` (a `ValueError`) for invalid client arguments,
-and `TelemetryError` for invalid snapshot, window or point bounds on a telemetry read.
-Any other `ValueError` is a server fault. Messages carry no counts, values, paths or hidden data. The service accepts
+and `TelemetryRequestError` (a `TelemetryError` subtype) for explicit validation of
+client-supplied snapshot, window or point bounds on a telemetry read. A base
+`TelemetryError` from store/snapshot construction or binding invariants is a server
+fault, as is a malformed server-produced snapshot. Any other `ValueError` is a server fault. Messages carry no counts, values, paths or hidden data. The service accepts
 AGENT-scope queries only, checks run identity and the P0 leakage screen before assembly,
 and never exposes evaluator overlays.
 
@@ -134,9 +136,13 @@ service invocation).
 | `get_signal` | `run_id`, `signal_id`, `snapshot` | none |
 | `get_signal_history` | `run_id`, `signal_id`, `snapshot` | `event_start_ticks`, `event_end_ticks` (integer or null), `max_points` (integer) |
 
-`snapshot` is a JSON object with exactly the `TelemetrySnapshot` keys and types
+For `get_run`, an omitted `snapshot` or `"snapshot": null` means no telemetry.
+The required snapshot of `get_signal` and `get_signal_history` cannot be null.
+Otherwise `snapshot` is a JSON object with exactly the `TelemetrySnapshot` keys and types
 (integers for `ingest_sequence` and `event_horizon_ticks`, strings otherwise). Integer
-parameters reject booleans and floats. A shape failure is `INVALID_REQUEST`, and the
+parameters reject booleans and floats, and all integer parameters (including snapshot
+T/K fields) must be in the safe JSON range `[-(2^53 - 1), 2^53 - 1]`.
+Snapshot T/K remain non-negative. A shape/range failure is `INVALID_REQUEST`, and the
 service is not called.
 
 | Failure | Code / fixed message |
@@ -148,7 +154,7 @@ service is not called.
 | `VisibilityViolation` | `VISIBILITY_VIOLATION` / visibility violation |
 | `SnapshotUnavailable`, clock mismatch | `SNAPSHOT_UNAVAILABLE` / snapshot unavailable |
 | `ResourceLimitExceeded` | `RESOURCE_LIMIT_EXCEEDED` / resource limit exceeded |
-| schema failure, `InvalidRequest`, `TelemetryError` from a telemetry read | `INVALID_REQUEST` / invalid request |
+| schema failure, `InvalidRequest`, explicit `TelemetryRequestError` validation | `INVALID_REQUEST` / invalid request |
 | method outside the five reads | `UNSUPPORTED_METHOD` / unsupported method |
 | version mismatch | `UNSUPPORTED_PROTOCOL_VERSION` / unsupported protocol version |
 | anything else | `INTERNAL_ERROR` / internal error |

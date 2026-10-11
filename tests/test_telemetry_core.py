@@ -398,8 +398,8 @@ class ResourceBoundTests(Fixture):
         narrow = reader.history(source_id="src-1", signal_id="sig-a", event_start=at(1),
                                 event_end=at(1), max_points=1, snapshot=snapshot)
         self.assertEqual(narrow.eligible_count, 1)
-        current = reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
-        self.assertEqual((current.sample.sequence, current.eligible_count), (4, 5))
+        with self.assertRaises(ResourceLimitExceeded):  # current also has five candidates
+            reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
         with self.assertRaises(TelemetryError):
             TimeSeriesReader(self.store, max_interval_ticks=60, max_scan_records=0)
 
@@ -480,7 +480,7 @@ class EventIndexTests(Fixture):
         self.ingest(*(obs(i, i / 60) for i in range(2000)))     # one record per second
         self.ingest(obs(5000, 50))                              # beyond T
         snapshot = self.store.snapshot(TimePoint(SIM.clock_id, 1500))
-        reader = self.reader_with(1)
+        reader = self.reader_with(1501)  # all eligible candidates are inside the limit
         with mock.patch.object(telemetry, "read_order", wraps=telemetry.read_order) as read:
             current = reader.current(source_id="src-1", signal_id="sig-a", snapshot=snapshot)
             last = reader.last_event_time(snapshot)
@@ -510,7 +510,7 @@ class EventIndexTests(Fixture):
         for bad in (-1, True, 1.0):
             with self.subTest(bad=bad), self.assertRaises(TelemetryError):
                 self.store.event_frontier(bad)
-        reader = self.reader_with(1)
+        reader = self.reader_with(4)  # store-wide slow path counts across bindings
         cases = ((at(30), 3, at(20)), (at(10), 3, at(9)), (at(8), 3, at(5)),
                  (at(4), 3, at(3)), (at(4), 1, None), (at(2), 3, None), (at(30), 0, None))
         for horizon, k, expected in cases:
@@ -767,7 +767,7 @@ class BoundaryTests(unittest.TestCase):
     SOURCE = Path(telemetry.__file__).read_text(encoding="utf-8")
     ALLOWED_IMPORTS = {"__future__", "bisect", "collections.abc", "dataclasses", "enum",
                        "fractions", "functools", "hashlib", "heapq", "json", "math", "secrets",
-                       "threading", "typing"}
+                       "threading", "typing", "re", "itertools"}
 
     def test_generic_module_imports_stdlib_only(self) -> None:
         imported = set()

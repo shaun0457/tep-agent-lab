@@ -382,6 +382,62 @@ plant-telemetry clause, it stops with `SPEC_CONFLICT` instead of adding a local 
   Live tests reach the trusted seam through `RunManager._runs[...].session`, as the
   existing P0 execution tests do.
 
+## Review findings F1-F10
+
+The review findings were implemented test-first. Regression coverage lives
+in `tests/test_p1_1c_review_regressions.py` (17 tests), with two added desktop tests in
+`desktop/tests/client.test.ts`. Existing tests were adjusted only where they expected
+unlimited current reads, base-class client error mapping or rejection of a null
+optional run snapshot. Frozen D0 fixtures/tests are unchanged.
+
+- **F2 — FIXED.** `current` and slow `last_event_time` now enforce the same eligible
+  candidate ceiling as history. Slow store-wide reads share the budget across bindings;
+  the O(1) frontier shortcut needs no scan. History counts/slices each block once and
+  stops on the first over-limit block/sample. Sparse windows also have bounded index
+  work: at most `max(max_scan_records, _INDEX_BLOCK)` block probes/tail checks, with a
+  one-block allowance for partial tails. K-visible full blocks are traversed lazily,
+  so snapshot capture does not first copy the entire prefix. Resource failures use the
+  fixed `ResourceLimitExceeded` family, never partial results. Within bounds, ordering,
+  values, identities, eligible counts and reduction remain unchanged.
+- **F3 — FIXED.** Repeated bindings agree on quantity, relation and unit only.
+  The displayed locator is chosen by the minimum `(entity_id, source_locator)` pair
+  in lexicographic order; graph/list traversal order cannot change the choice.
+- **F4 — FIXED.** Only explicit client validation raises `TelemetryRequestError`,
+  translated to `InvalidRequest` at application reads. Store/snapshot construction,
+  binding invariants and malformed server-produced snapshots return `INTERNAL_ERROR`.
+  Bad client intervals still return `INVALID_REQUEST`; existing clock, snapshot and
+  resource codes are preserved.
+- **F5 — FIXED.** Frozen `TelemetryReadPolicy` validates at construction: positive
+  integer point/scan limits, non-negative integer interval; booleans, floats and strings
+  are rejected. A zero-width interval remains valid, as in the core reader.
+- **F7 — FIXED.** Transport `get_run(snapshot=null)` invokes the no-telemetry read,
+  as omission does; required signal snapshots still reject null. The Rust bridge
+  already passes null through opaquely. The desktop client already treats null as
+  omission (verified with a regression); neither adapter needed a behavior change.
+- **F8 — FIXED.** Removed the duplicate store-wide `_all` index. Slow last-event reads
+  take the maximum over per-binding `_last_at_or_before` results with one shared budget.
+  History uses one count/slice pass.
+- **F9 — FIXED.** P0 and application resolution validation use one Python parser:
+  reduced positive `n/d`, no leading zeros, 1-18 digits per component. Desktop's
+  presentation regex uses the same digit grammar/cap. P0 integer checks reuse
+  `_checked_int` through an explicit client-validation wrapper.
+- **F10 — FIXED.** Removed the unused parameter serialization pass. Integer parameters
+  and snapshot T/K fields outside the safe JSON range fail `INVALID_REQUEST` before
+  service invocation; booleans/floats remain invalid.
+
+### Kept as specified
+
+- **F1 — kept: prepare fails closed.** A reference-history record that fails
+  canonical translation (nonfinite value, off-grid time, binding-set mismatch) fails
+  prepare. This follows playground-backend-v0 prepare atomicity and §Sources (fail
+  closed), the §Files row and `test_prepare_fails_closed_when_ingestion_fails`. A run
+  never reaches READY with partial or unavailable canonical telemetry.
+- **F6 — kept: fixed v1 point bounds.** application-api-v1 §Reads fixes the default
+  `max_points=500` and the range `[1, 1000]`. A host `TelemetryReadPolicy` with a point
+  limit below 500 rejects reads that omit `max_points` with `RESOURCE_LIMIT_EXCEEDED`
+  (explicit, never silent), and a limit above 1000 does not widen the v1 API. Hosts
+  serving application-api-v1 should allow at least 1000 points.
+
 ## Next step
 
 After merge, P1.4 reads live telemetry through these snapshot-bound reads;
