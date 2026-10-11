@@ -39,8 +39,8 @@ The portfolio wedge is context composition and evidence-backed investigation.
 P1 is not a P&ID/OCR product, document digitization product, generic ETL platform,
 or complete MES/ERP context platform. A verified engineering graph from an upstream
 system can feed Canonical Plant Context. P1 consumes validated structured context
-and does not own how every upstream graph is generated or depend on an Operon-like
-drawing/document extraction implementation.
+and does not own how every upstream graph is generated or depend on any specific
+engineering-document-to-plant-model platform's drawing/document extraction implementation.
 
 ## Decision
 
