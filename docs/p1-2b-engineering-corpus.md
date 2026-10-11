@@ -87,8 +87,9 @@ fragments, review records or a staged revision.
 
 ## S2 — Section and paragraph fragmenter, parser policy v1
 
-Owning contracts: context-compiler-v0 sections SourceFragmentRef, Exact source input
-and Incremental compilation. `markdown_fragments.fragment_markdown(ref, bytes)`
+Owning contracts: context-compiler-v0 sections SourceFragmentRef, Exact source input,
+Candidate identity and immutability, and Incremental compilation.
+`markdown_fragments.fragment_markdown(ref, bytes)`
 accepts the exact `ContextSourceRef` and bytes resolved by a trusted application
 from its frozen registry. It requires `text/markdown`, `sha256:bytes` and a matching
 whole-source checksum. It accepts no document path and does not register sources.
@@ -154,28 +155,38 @@ are forbidden on these legacy kinds.
 
 ### Identity and edit isolation
 
-For MARKDOWN only, `fragment_id` hashes the source namespace (repository, source id,
-path, kind, schema, checksum method and visibility), structured semantic locator,
-fragment kind, content checksum, policy and optional label. Whole-source checksum,
-git revision, source provenance and byte offsets are excluded from this content
-identity. The full immutable `source_ref` and exact offsets remain in every record
-and are verified independently; an id is never authority to substitute a source.
+`fragment_id` uses the same exact identity for every location kind: the full
+`source_ref` record (including git revision, whole-source checksum and provenance),
+the full location record (including byte start/end and structured section path and
+paragraph index), fragment kind, content checksum, policy and optional label.
+Identical exact refs, locations and policy yield identical ids and order. A new
+source revision changes every fragment id even for unchanged paragraph bytes;
+candidate content keys and versions therefore change through the existing P1.2A
+candidate API. Record reconstruction rejects a substituted source under the old id.
 
-Identical source bytes and policy yield identical ids and order. Replacing one
-paragraph, without changing headings or block structure, changes only that paragraph
-id and the containing section ids, including ancestors. Later fragments keep ids
-even when their offsets move, and new refs retain the new revision/checksum. Heading
-renames, paragraph insertion/deletion, or classification changes can change locators
-and therefore additional ids. New parser semantics require a new policy version.
+`markdown_fragments.diff_key(fragment)` is a separate **non-identity** comparison
+key: structured semantic locator (section path and paragraph index), fragment kind,
+policy and fragment content checksum. It excludes the source ref and byte offsets
+and is compared only within corresponding source namespaces. It is not persisted
+and is never used in candidate hashing, review binding or publication. Equal diff
+keys permit edit comparison only; they cannot reuse trust decisions or exact refs.
+
+Replacing one paragraph, without changing headings or block structure, changes
+exactly that paragraph's diff key and those of its enclosing sections, including
+ancestors: their exact byte slices contain the edited paragraph by design. Every
+other diff key stays unchanged even when later offsets move. Heading renames,
+paragraph insertion/deletion, or classification changes can change locators and
+therefore additional diff keys. New parser semantics require a new policy version.
 
 The corpus golden is strict JSON at `tests/markdown_fragments_golden.json`, with
 all 32 ids, kinds, displayed locators and byte ranges (6 procedure, 9 subsystem,
 8 tag-table, 9 troubleshooting fragments). `tests/test_markdown_fragments.py` was
 written first and failed initially because the module did not exist. It covers
-the full golden, repeated runs, length-changing paragraph edits across exact source
-revisions, exact re-extraction/checksums, empty sections, Unicode byte offsets,
-duplicate headings, unsupported blocks, LF rejection, strict persistence, legacy
-compatibility, generic code literals and subprocess demo output.
+the full golden, repeated runs, exact fragment/candidate identity changes across
+source revisions, substituted-source reconstruction rejection, exact diff-key edit
+isolation including ancestor sections, exact re-extraction/checksums, empty sections,
+Unicode byte offsets, duplicate headings, unsupported blocks, LF rejection, strict
+persistence, legacy compatibility, generic code literals and subprocess demo output.
 
 S3 owns table-row and procedure-step fragments; S4 owns typed extraction. Those
 blocks remain exact content inside their SECTION fragments but get no specialized

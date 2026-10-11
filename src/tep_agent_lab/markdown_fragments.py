@@ -14,6 +14,7 @@ import unicodedata
 
 from .canonical_context import BYTES_SHA256, ContextSourceRef
 from .context_compiler import CompilerError, FragmentLocation, LocationKind, SourceFragmentRef
+from .persistence import content_checksum as json_digest
 
 PARSER_POLICY = "markdown.sections-paragraphs@1"
 
@@ -187,6 +188,26 @@ def fragment_markdown(source_ref: ContextSourceRef, content: bytes) -> tuple[Sou
         content_checksum=hashlib.sha256(content[location.start:location.end]).hexdigest(),
         fragment_kind="SECTION" if location.paragraph_index is None else "PARAGRAPH",
         fragmentation_policy=PARSER_POLICY) for location in _locations(content))
+
+
+def diff_key(fragment: SourceFragmentRef) -> str:
+    """Non-identity comparison key for Markdown edits within one source namespace.
+
+    Revision/checksum/provenance of the source and byte offsets are excluded. Compare
+    only corresponding documents; this key never substitutes for an exact fragment
+    ref in candidate hashing, review binding or publication. Ancestor sections include
+    descendant bytes, so a paragraph edit changes their diff keys too. Not persisted.
+    """
+    if (not isinstance(fragment, SourceFragmentRef)
+            or fragment.location.kind is not LocationKind.MARKDOWN):
+        raise CompilerError("diff_key needs a MARKDOWN SourceFragmentRef")
+    return "diff-" + json_digest({
+        "location": {"section_path": list(fragment.location.section_path or ()),
+                     "paragraph_index": fragment.location.paragraph_index},
+        "fragment_kind": fragment.fragment_kind,
+        "fragmentation_policy": fragment.fragmentation_policy,
+        "content_checksum": fragment.content_checksum,
+    })
 
 
 def format_fragment_tree(fragments: Iterable[SourceFragmentRef]) -> tuple[str, ...]:

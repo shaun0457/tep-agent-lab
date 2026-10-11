@@ -305,23 +305,12 @@ class SourceFragmentRef:
         _pattern(self.fragment_kind, _KIND, "fragment_kind")
         _pattern(self.fragmentation_policy, _VERSIONED, "fragmentation_policy")
         _optional_text(self.label, "label")
-        identity = self._identity()
         if self.location.kind is LocationKind.MARKDOWN:
             from .markdown_fragments import PARSER_POLICY
             expected_kind = "SECTION" if self.location.paragraph_index is None else "PARAGRAPH"
             if self.fragmentation_policy != PARSER_POLICY or self.fragment_kind != expected_kind:
                 raise CompilerError("MARKDOWN kind/locator needs the supported parser policy")
-            # Stable content identity; the complete exact source and offsets remain in record().
-            ref = self.source_ref
-            identity = {**identity, "source_ref": {
-                "repository": ref.repository, "source_id": ref.source_id,
-                "path_or_ref": ref.path_or_ref, "kind": ref.kind,
-                "schema_version": ref.schema_version, "checksum_method": ref.checksum_method,
-                "visibility": ref.visibility.value},
-                "location": {"kind": self.location.kind.value,
-                             "section_path": list(self.location.section_path or ()),
-                             "paragraph_index": self.location.paragraph_index}}
-        object.__setattr__(self, "fragment_id", "frag-" + json_digest(identity))
+        object.__setattr__(self, "fragment_id", "frag-" + json_digest(self._identity()))
 
     def __hash__(self) -> int:  # ContextSourceRef holds unhashable frozen mappings
         return hash(self.fragment_id)

@@ -1,4 +1,4 @@
-"""S2 parser policy v1: exact anchors, stable content identities and corpus golden."""
+"""S2 parser policy v1: exact identities, non-identity diff keys and corpus golden."""
 
 from dataclasses import replace
 import hashlib
@@ -17,9 +17,13 @@ from tep_agent_lab.canonical_context import (
     BYTES_SHA256, CANONICAL_JSON_SHA256, ContextSourceRef, ProjectionScope,
 )
 from tep_agent_lab.context_compiler import (
-    CompilerError, FragmentLocation, LocationKind, SourceFragmentRef, _fragment_from_record,
+    CandidateBinding, CandidateKnowledge, CompilerError, DerivationProvenance,
+    ExtractionKind, FragmentLocation, LocationKind, SourceFragmentRef, TargetKind,
+    _fragment_from_record, candidate_from_record,
 )
-from tep_agent_lab.persistence import canonical_json, strict_json_loads
+from tep_agent_lab.persistence import (
+    canonical_json, content_checksum as json_digest, strict_json_loads,
+)
 
 
 def source(data: bytes, **changes) -> ContextSourceRef:
@@ -81,7 +85,7 @@ class MarkdownFragmentsTests(unittest.TestCase):
                     self.assertTrue(fragment.verify(item.content))
                     self.assertEqual(item.ref, fragment.source_ref)
 
-    def test_length_changing_paragraph_edit_isolated_across_new_revision(self) -> None:
+    def test_length_changing_paragraph_edit_diff_keys_isolated_across_new_revision(self) -> None:
         old = b"# Root\n\nIntro.\n\n## First\n\nEdit me.\n\nUnchanged.\n\n## Last\n\nAlso unchanged.\n"
         new = old.replace(b"Edit me.", b"A much longer replacement paragraph.")
         before = parse(old)
@@ -89,15 +93,19 @@ class MarkdownFragmentsTests(unittest.TestCase):
         changed = {"root", "root/first", "root/first/paragraph-1"}
         self.assertEqual([f.location.semantic_locator for f in before],
                          [f.location.semantic_locator for f in after])
+        self.assertEqual(changed, {a.location.semantic_locator
+                                  for a, b in zip(before, after, strict=True)
+                                  if markdown_fragments.diff_key(a) != markdown_fragments.diff_key(b)})
         for a, b in zip(before, after, strict=True):
-            self.assertEqual(a.fragment_id != b.fragment_id,
-                             a.location.semantic_locator in changed)
+            self.assertNotEqual(a.fragment_id, b.fragment_id)
             self.assertNotEqual(a.source_ref, b.source_ref)
             self.assertTrue(b.verify(new))
+        # Unchanged later paragraphs move in bytes while keeping their comparison key.
+        self.assertNotEqual(before[-1].location.start, after[-1].location.start)
         self.assertFalse(before[0].verify(new))
         self.assertFalse(after[0].verify(old))
 
-    def test_corpus_one_paragraph_edit_isolation(self) -> None:
+    def test_corpus_one_paragraph_edit_diff_keys_change_exact_ancestor_set(self) -> None:
         for item in self.corpus():
             old = markdown_fragments.fragment_markdown(item.ref, item.content)
             target = next(f for f in old if f.fragment_kind == "PARAGRAPH")
@@ -106,10 +114,98 @@ class MarkdownFragmentsTests(unittest.TestCase):
             ref = replace(item.ref, content_checksum=hashlib.sha256(new).hexdigest(),
                           git_revision="d" * 40, provenance={})
             after = markdown_fragments.fragment_markdown(ref, new)
-            for a, b in zip(old, after, strict=True):
-                affected = (a == target or (a.fragment_kind == "SECTION"
-                            and a.location.start <= loc.start < a.location.end))
-                self.assertEqual(affected, a.fragment_id != b.fragment_id)
+            self.assertEqual([f.location.semantic_locator for f in old],
+                             [f.location.semantic_locator for f in after])
+            expected = {f.location.semantic_locator for f in old
+                        if f == target or (f.fragment_kind == "SECTION"
+                                           and f.location.start <= loc.start
+                                           and loc.end <= f.location.end)}
+            actual = {a.location.semantic_locator for a, b in zip(old, after, strict=True)
+                      if markdown_fragments.diff_key(a) != markdown_fragments.diff_key(b)}
+            self.assertEqual(expected, actual)
+            self.assertTrue(all(a.fragment_id != b.fragment_id
+                                for a, b in zip(old, after, strict=True)))
+
+    def test_unchanged_paragraph_new_source_revision_changes_candidate_identity(self) -> None:
+        data = b"# A\n\nUnchanged.\n\nOther.\n"
+        first = parse(data)[1]
+        replacements = (
+            parse(data, git_revision="d" * 40)[1],
+            parse(data.replace(b"Other.", b"Edited other paragraph."), git_revision="d" * 40)[1],
+        )
+        provenance = DerivationProvenance(extraction_method="fixture-extractor@1",
+                                         grounding_method="exact-id@1")
+        candidates = (
+            CandidateBinding(candidate_id="mention", session_id="same-session",
+                             extraction_kind=ExtractionKind.ENTITY_MENTION,
+                             mention_fragment=first, mention_text="Unchanged.",
+                             target_kind=TargetKind.ENTITY, proposed_target=None,
+                             scope_refs=(), provenance=provenance),
+            CandidateKnowledge(candidate_id="guidance", session_id="same-session",
+                               extraction_kind=ExtractionKind.PROCEDURE_GUIDANCE,
+                               source_fragments=(first,), scope_refs=(), provenance=provenance),
+        )
+        for other in replacements:
+            self.assertEqual(first.content_checksum, other.content_checksum)
+            self.assertEqual(first.location, other.location)
+            self.assertEqual(markdown_fragments.diff_key(first), markdown_fragments.diff_key(other))
+            self.assertNotEqual(first.fragment_id, other.fragment_id)
+            for candidate in candidates:
+                with self.subTest(candidate=type(candidate).__name__, source=other.source_ref):
+                    fields = ({"mention_fragment": other} if isinstance(candidate, CandidateBinding)
+                              else {"source_fragments": (other,)})
+                    revised = replace(candidate, **fields)
+                    self.assertNotEqual(candidate.content_key, revised.content_key)
+                    self.assertNotEqual(candidate.candidate_version, revised.candidate_version)
+                    self.assertNotEqual(candidate.content_key,
+                                        replace(revised, session_id="another-session").content_key)
+                    self.assertEqual(candidate, candidate_from_record(candidate.record()))
+                    self.assertEqual(revised, candidate_from_record(revised.record()))
+                    fragment_record = first.record()
+                    fragment_record["source_ref"] = other.source_ref.record()
+                    with self.assertRaisesRegex(CompilerError, "fragment record does not reconstruct"):
+                        _fragment_from_record(fragment_record)
+                    record = candidate.record()
+                    record["fragments"][0]["source_ref"] = other.source_ref.record()
+                    with self.assertRaises(CompilerError):
+                        candidate_from_record(record)
+                    # Replacing even the exact fragment id cannot preserve candidate hashes.
+                    record["fragments"] = [other.record()]
+                    if isinstance(candidate, CandidateBinding):
+                        record["content"]["mention_fragment"] = other.fragment_id
+                    else:
+                        record["content"]["source_fragments"] = [other.fragment_id]
+                    with self.assertRaisesRegex(CompilerError, "candidate record does not reconstruct"):
+                        candidate_from_record(record)
+
+    def test_markdown_identity_hashes_full_exact_ref_and_location_record(self) -> None:
+        first = parse(b"# A\n\nText.\n")[1]
+        identity = {key: value for key, value in first.record().items() if key != "fragment_id"}
+        self.assertEqual("frag-" + json_digest(identity), first.fragment_id)
+        for fields in ({"git_revision": "d" * 40}, {"content_checksum": "0" * 64},
+                       {"provenance": {"revision": "new"}}):
+            other = replace(first, source_ref=replace(first.source_ref, **fields))
+            self.assertNotEqual(first.fragment_id, other.fragment_id)
+            self.assertEqual(markdown_fragments.diff_key(first), markdown_fragments.diff_key(other))
+        for fields in ({"start": first.location.start + 1}, {"end": first.location.end + 1},
+                       {"section_path": ("other",)}, {"paragraph_index": 2}):
+            other = replace(first, location=replace(first.location, **fields))
+            self.assertNotEqual(first.fragment_id, other.fragment_id)
+        self.assertNotIn("diff_key", first.record())
+
+    def test_diff_key_uses_structured_locator_and_rejects_legacy_fragments(self) -> None:
+        # Display strings can coincide; structured section/paragraph locators cannot.
+        data = b"# A\n\nText.\n\n## Paragraph-1\n"
+        paragraph, section = parse(data)[1:]
+        self.assertEqual(paragraph.location.semantic_locator, section.location.semantic_locator)
+        section = replace(section, content_checksum=paragraph.content_checksum)
+        self.assertNotEqual(markdown_fragments.diff_key(paragraph), markdown_fragments.diff_key(section))
+        legacy = SourceFragmentRef.from_content(
+            source(data), data, FragmentLocation.byte_range(0, 2), fragment_kind="TEXT",
+            fragmentation_policy="legacy@1")
+        for invalid in (legacy, "docs/manual.md", None):
+            with self.assertRaises(CompilerError):
+                markdown_fragments.diff_key(invalid)
 
     def test_source_namespace_and_policy_are_part_of_identity(self) -> None:
         data = b"# Heading\n\nText.\n"

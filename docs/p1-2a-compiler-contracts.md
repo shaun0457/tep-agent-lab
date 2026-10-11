@@ -107,10 +107,15 @@ ContextSourceRefs -> CompileSession.prepare        own frozen CanonicalContextRe
   S2 adds `LocationKind.MARKDOWN`: a section path and optional positive paragraph
   index anchored to an exact BYTE_RANGE under `markdown.sections-paragraphs@1`.
   It requires byte checksums, strict kind-specific record keys and a reparse matching
-  semantics to offsets. Its content id excludes source revision/checksum/provenance
-  and offsets, while its record and validation retain the full exact source ref;
-  paragraph edits therefore preserve unaffected ids. Legacy kinds keep their record
-  shapes and hashes. Policy and identity details: [S2 note](p1-2b-engineering-corpus.md#s2--section-and-paragraph-fragmenter-parser-policy-v1).
+  semantics to offsets. Its fragment id hashes the full exact source ref, including
+  revision/checksum/provenance, and the full location record, including offsets and
+  semantic fields, just like legacy kinds. A source revision change therefore changes
+  fragment and candidate identities even for unchanged paragraphs. The separate
+  non-identity `markdown_fragments.diff_key` supports edit comparison: a paragraph
+  edit changes its key and those of enclosing sections, including ancestors, while
+  other keys stay unchanged. It is never used in candidate hashing, review binding
+  or publication. Legacy kinds keep their record shapes and hashes. Policy and
+  identity details: [S2 note](p1-2b-engineering-corpus.md#s2--section-and-paragraph-fragmenter-parser-policy-v1).
 - **Candidates**: the versioned routing (`ROUTING_POLICY`) sends ENTITY/SIGNAL
   mentions to `CandidateBinding`. OPERATING_LIMIT and CONTROL_RELATION become
   `CandidateKnowledge` carrying a `literature_candidate` Rule that stays
