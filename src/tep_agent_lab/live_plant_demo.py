@@ -2,16 +2,17 @@
 
 import argparse
 from pathlib import Path
-import subprocess
 import tempfile
 
 from industrial_agent_runtime import Budget
 
 from .application_views import ApplicationViewService
 from .canonical_context import ProjectionScope, inventory_checksum
+from .e0_demo import git_revision
 from .live_plant import LivePlantPolicy, LivePlantState
 from .playground import (ModelSpec, RunManager, RunRequest, SourceRevisions, WorldSpec,
                          load_dependency_pins, pinned_tep_sim_sources)
+from .sidecar_resources import dependency_pins_path, packaged_lab_revision
 
 
 class _UnusedProvider:
@@ -24,10 +25,8 @@ def main() -> int:
     parser.add_argument("mode", choices=("live",))
     parser.parse_args()
     root = Path(__file__).resolve().parents[2]
-    pins = load_dependency_pins(root / "dependency-pins.json")
-    lab_revision = subprocess.check_output(
-        ["git", "-c", f"safe.directory={root.as_posix()}", "-C", str(root),
-         "rev-parse", "HEAD"], text=True).strip()
+    pins = load_dependency_pins(dependency_pins_path())
+    lab_revision = packaged_lab_revision() or git_revision(root)
     policy = LivePlantPolicy()
     # Temporary run artifacts are removed on exit; nothing is logged to the repo.
     with tempfile.TemporaryDirectory(prefix="live-plant-demo-") as directory:

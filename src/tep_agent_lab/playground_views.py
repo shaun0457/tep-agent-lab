@@ -171,8 +171,11 @@ class RunQueries:
             except ViewUnavailable:
                 pass
         session = run.session
+        live = None if session is None else session._live_plant
+        released = (session is not None and
+                    (live.physics_closed if live is not None else session.closed))
         body["resources"] = {"session": ("NONE" if session is None else
-                                         "RELEASED" if session.closed else "LIVE")}
+                                         "RELEASED" if released else "LIVE")}
         if run.outcome is not None:
             body["outcome"] = self._outcome(run.outcome, scope)
         return self._view("RunSummaryView", scope, body)
@@ -257,6 +260,8 @@ class RunQueries:
     def telemetry(self, *, variables: tuple[str, ...] | None = None,
                   max_records: int = 120) -> Any:
         """Bounded sanitized reference history; dense data stays artifact-backed."""
+        if self._run.live_provenance_checksum is not None:
+            raise ViewUnavailable("legacy telemetry is unavailable for live runs; use snapshot reads")
         scope = self.scope
         if type(max_records) is not int or not 1 <= max_records <= MAX_TELEMETRY_RECORDS:
             raise ValueError(f"max_records must be in [1, {MAX_TELEMETRY_RECORDS}]")

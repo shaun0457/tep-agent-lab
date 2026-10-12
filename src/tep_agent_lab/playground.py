@@ -584,6 +584,7 @@ class _Run:
     attempts: int = 0
     session_dir: Path | None = None
     manifest_checksum: str | None = None
+    live_provenance_checksum: str | None = None
     session: RunSession | None = None
     outcome: RunOutcome | None = None
     owner: str | None = None
@@ -692,6 +693,7 @@ class RunManager:
                     raise LifecycleError("lifecycle log names an invalid session directory")
                 run.status, run.session_dir = RunStatus.READY, directory / payload["session"]
                 run.manifest_checksum = payload["manifest_checksum"]
+                run.live_provenance_checksum = payload.get("live_provenance_checksum")
             elif event["type"] == "RUN_STARTED":
                 run.status, run.owner = RunStatus.RUNNING, payload["owner"]
             elif event["type"] in ("RUN_COMPLETED", "RUN_FAILED"):
@@ -768,18 +770,25 @@ class RunManager:
         try:
             session, manifest = self._assemble(run, attempt, provider, tuple(context_sources),
                                                case_setup, benchmark or BenchmarkRefs(), live_policy)
+            live_checksum = None
             if session._live_plant is not None:
+                data = canonical_json(to_jsonable(session._live_plant.provenance))
                 _write_once(session.directory / "live-session-provenance.json",
-                            canonical_json(to_jsonable(session._live_plant.provenance)))
+                            data)
+                live_checksum = hashlib.sha256(data).hexdigest()
             _write_once(session.directory / "manifest.json",
                         canonical_json(manifest.record()))
             with self._lock:
-                run.lifecycle.append("RUN_READY", {
+                ready = {
                     "at": manifest.prepared_at, "session": attempt,
                     "manifest_checksum": manifest.checksum(),
-                    "agent_manifest_checksum": checksum(manifest.agent_projection())})
+                    "agent_manifest_checksum": checksum(manifest.agent_projection())}
+                if live_checksum is not None:
+                    ready["live_provenance_checksum"] = live_checksum
+                run.lifecycle.append("RUN_READY", ready)
                 run.status, run.session, run.session_dir = RunStatus.READY, session, session.directory
                 run.manifest_checksum = manifest.checksum()
+                run.live_provenance_checksum = live_checksum
             return manifest
         except BaseException as exc:
             if session is not None:
@@ -934,7 +943,10 @@ class RunManager:
             return LivePlantSession(
                 session_id=session_id, telemetry=telemetry, policy=policy, initial=initial,
                 advance=lambda: sanitize_observation(environment.step().observation),
-                close_physics=environment.close)
+                close_physics=environment.close,
+                history=RunLog(run.directory / "lifecycle" / f"live-{session_id}",
+                               {"run_id": run.run_id, "session_id": session_id,
+                                "record": "tep-agent-lab.live-plant-lifecycle/v0"}))
         except BaseException:
             environment.close()
             raise
@@ -946,6 +958,7 @@ class RunManager:
             live = None if run.session is None else run.session._live_plant
             if run.status != RunStatus.READY or live is None:
                 raise LifecycleError("run has no retained live attachment")
+            self._read_live_provenance(run)
             return live
 
     def start_live(self, run_id: str) -> None:
@@ -1164,6 +1177,18 @@ class RunManager:
                         "runtime_task_status_owner": "RcaStateStore (runtime TaskStateStore)"})
 
     # -- durable reads ------------------------------------------------------------------
+    @staticmethod
+    def _read_live_provenance(run: _Run) -> Mapping[str, Any] | None:
+        if run.live_provenance_checksum is None:
+            return None
+        try:
+            data = (run.session_dir / "live-session-provenance.json").read_bytes()
+        except OSError as exc:
+            raise LifecycleError("published live provenance is unavailable") from exc
+        if hashlib.sha256(data).hexdigest() != run.live_provenance_checksum:
+            raise LifecycleError("live provenance bytes differ from the checksum published at READY")
+        return freeze_json(json.loads(data))
+
     def _read_outcome(self, run: _Run, expected: str) -> RunOutcome:
         data = (run.session_dir / "outcome.json").read_bytes()
         if hashlib.sha256(data).hexdigest() != expected:
@@ -1183,6 +1208,7 @@ class RunManager:
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != run.manifest_checksum:
             raise LifecycleError("manifest bytes differ from the checksum published at READY")
+        self._read_live_provenance(run)
         return RunManifest.from_record(json.loads(data))
 
     def queries(self, run_id: str, scope: ProjectionScope = ProjectionScope.AGENT):

@@ -36,6 +36,7 @@ neither READY nor a partial run manifest. Trusted `live-session-provenance.json`
 pins lifecycle/provenance versions, manifest/inventory checksums, repository and
 numerical revisions, configuration/seed, bindings, source/clock/store identities,
 reader/delivery/resource policies and exact context selections.
+Its byte checksum is bound into RUN_READY and verified alongside manifest reads.
 
 The live append store is selected once as `RunSession.telemetry` at preparation.
 It never reopens the separate sealed `RunSession._telemetry` P0 store. Shared
@@ -61,6 +62,14 @@ reason and trusted diagnostic category/pending checksum. It implements no retry,
 recovery or restart policy. P0 `RunStatus`, Coordinator start, RunOutcome and
 COMPLETED meanings stay unchanged; Coordinator start is rejected for a live
 attachment. Agent tools and projections are unchanged.
+Every live lifecycle event is persisted in a separate trusted append-only RunLog
+under the run's lifecycle directory, with last successful step/K, pending batch
+checksum and exact diagnostic artifact checksum. Failed preparation history stays
+there even when its unpublished session directory is removed. Reasons distinguish
+source availability, cadence, ingest/translation and resource close; raw exception
+text and these trusted records never enter public views. RunSummaryView reports
+the live physics attachment's resource state; legacy telemetry history explicitly
+returns unavailable for live runs, which use snapshot-bound canonical reads.
 
 ## Proposed OD-6 demonstration policy
 
@@ -81,6 +90,7 @@ exact parameter checksum recorded in session provenance.
 | Indexed accepted records | 16,000 | One store identity entry and one indexed reference per accepted record, bounded by retention; no duplicate all-record index. Commit frontier has at most 301 entries; at most 53 binding indices. |
 | Commit association size | 1,024 bytes | Step/tick/sequence/K and checksum are finite; preparation reserves the worst final association. |
 | Lifecycle events / event size | 3 / 1,024 bytes | PREPARED, ACTIVE and terminal; terminal room is reserved before start. |
+| Trusted diagnostic artifacts / artifact size | At most 2 / 1,024 bytes | A producer failure and a possible close failure; terminal events cite exact checksums, and a close diagnostic retains the preceding diagnostic ref. |
 | Lab-owned simulator history / rollout artifacts | 0 / 0 | Use public step observations immediately; never call ReferenceWorld.advance/history or rollout for live delivery. Simulator calls are bounded by 300. |
 | Retained live sessions per RunManager | 1 | Bound producers and retained stores together; STOPPED still occupies this slot. |
 
@@ -89,8 +99,9 @@ before admitting steps. The final all-prefix current read has only 301 eligible
 points per binding, within the existing 50,000-point candidate limit; even a
 store-wide slow last-event read has only 15,953 points. The full history fits the
 1,000 returned-point limit and the 2,592,000-tick interval bound. Smaller host
-reader limits fail preparation if they cannot serve the trajectory's current
-prefix. Resource metadata is bounded by the declared record/commit/event counts;
+reader limits fail preparation if they cannot serve the per-signal current
+prefix, store-wide last-event scan, full returned history or full interval.
+Resource metadata is bounded by the declared record/commit/event counts;
 no infinite producer loop, lifecycle log, world history or rollout accumulation
 exists. Dynamic capacity-stop is deliberately left to LOS-B-S3.
 
@@ -104,8 +115,19 @@ wall-clock sleep to decide correctness. The tests cover independent multi-batch
 delivery, changing values/increasing T/K, whole batches, identical historical
 results, duplicate start rejection, no read-driven step, failed preparation,
 reserved reader/storage bounds, the full 300-step retained history, immutable
-manifest/inventory, frozen registration and the separate sealed P0 store. The D0
-test invokes the required diff gate without opening fixture contents.
+manifest/inventory, frozen registration and the separate sealed P0 store.
+The D0 diff remains a coordinator/verifier command outside the unit suite, so
+tests need no remote Git refs and continue to work with shallow checkouts.
+
+## Known limitations
+
+- The per-manager live slot is released only on prepare failure. An unstarted
+  PREPARED live session retains its TEPEnvironment until the run is closed.
+  Disposal and new preparation after STOPPED/FAILED belong to LOS-B-S3 (#38).
+- Live preparation builds the full P0 investigation assembly and closes it before
+  creating the live physics environment. This initializes the simulator twice and
+  leaves orphaned world/state/trace artifacts. A later slice should let assembly
+  skip the investigation path in live mode.
 
 Reads retain all committed prefixes for the lifetime of the in-process attachment.
 The stored manifest/provenance alone do not recover its telemetry after process
