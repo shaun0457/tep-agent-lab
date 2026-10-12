@@ -93,8 +93,7 @@ reproducible from exact refs or reported unavailable.
 8. As a knowledge reviewer, I want composition to check that every scope I approved resolves in the selected plant revision, so that approved knowledge is never attached to a non-existent or wrong target.
 9. As a knowledge reviewer, I want a scope that names the wrong kind of target (an entity id used as a signal) to be rejected, so that kind confusion cannot slip through.
 10. As a knowledge reviewer, I want a scope that cites a different plant source than the selected revision projects to be rejected unless an explicit validated mapping exists, so that knowledge reviewed against another plant model is not reused by accident.
-11. As a knowledge reviewer, I want an empty scope to be rejected unless the revision explicitly declares plant-wide applicability, so that "applies to nothing" is never read as "applies to everything".
-12. As a knowledge reviewer, I want the rule scope bindings published with a Rule-routed item to be validated the same way, so that a limit rule cannot be scoped to a signal that does not exist.
+11. As a knowledge reviewer, I want an empty scope to be rejected, so that "applies to nothing" is never read as "applies to everything" (v0 has no explicit plant-wide carrier).12. As a knowledge reviewer, I want the rule scope bindings published with a Rule-routed item to be validated the same way, so that a limit rule cannot be scoped to a signal that does not exist.
 13. As a knowledge reviewer, I want a failed resolution to report every failing scope with a typed reason, so that I can fix the revision in one review pass.
 14. As an operations engineer, I want to look up a signal and see the approved limits, procedures and documents that apply to it, so that I can interpret its current value.
 15. As an operations engineer, I want applicability results to cite exact KnowledgeRef, DocumentRef and RuleRef versions, so that I can open the source text behind each one.
@@ -127,6 +126,8 @@ reproducible from exact refs or reported unavailable.
 42. As a developer, I want the composition core testable as pure functions over pinned inputs, without starting a simulator, so that tests stay fast and deterministic.
 43. As a developer, I want golden checksums for the TEP PlantContextRevision and composed view, so that accidental changes to projection or policies are caught.
 44. As a developer, I want every policy (projection, grouping, reachability, applicability) versioned and part of the derived identity, so that changing a policy changes the identity.
+45. As an operations engineer, I want an entity-scoped limit to apply only to the signal it actually limits, so that a pressure limit is never shown against the temperature signal of the same unit.
+46. As a run operator, I want each stream incarnation registered against the shared plant revision, so that runs share one plant identity while every sample still names its own stream.
 
 ## Implementation Decisions
 
@@ -164,8 +165,10 @@ reproducible from exact refs or reported unavailable.
   Relationships express topology and association, not inferred dynamics; a directed
   edge does not prove flow.
 - SignalDescriptor: `signal_id` = ProcessGraph binding semantic entity id (the P1.1
-  `signal_id`); `source_binding` = the TEP simulation source id and the runtime variable
-  id as an opaque locator; `entity_refs` with an association role (`MEASURED_AT` or
+  `signal_id`); `source_binding` = the **source definition** id of the process-pack
+  adapter (for example `tep-simulation-source/<adapter version>`) and the runtime
+  variable id as an opaque adapter-native locator (see §Source definitions and stream
+  registration); `entity_refs` with an association role (`MEASURED_AT` or
   `ACTUATED_AT` on an entity, or `ON_RELATIONSHIP` on an edge, which also lists the edge
   endpoints with role `RELATIONSHIP_ENDPOINT`); `quantity`; `unit` (explicit unit or
   explicit unknown marker, never implied); `value_kind` numeric; `capability` READ
@@ -182,6 +185,32 @@ reproducible from exact refs or reported unavailable.
   not pinned and human-verified, has duplicate or colliding ids, or has a binding whose
   attached target does not exist.
 
+### Source definitions and stream registration
+
+plant-telemetry §Canonical Plant Context requires `source_binding` to identify a
+`source_id`, and §Identity treats a `source_id` as one stream incarnation. Existing P0 and
+live stream source ids embed run and session tokens, so an incarnation id cannot sit in
+a PlantContextRevision that P0 and live runs over the same graph share. The same
+section also states that "source binding changes require versioned bindings and stream
+registration". This spec applies that rule in two levels, without changing either
+owning definition:
+
+- **Static level (in the PlantContextRevision):** `source_binding` names a source
+  *definition*: the versioned process-pack adapter that can produce the signal, plus
+  the opaque locator. It is identical for every run over the same pinned graph and
+  adapter version.
+- **Incarnation level (at stream registration, outside the revision):** when a run or
+  live session registers a telemetry stream, it records an immutable
+  StreamRegistration: incarnation `source_id`, source definition id, the
+  `plant_context_ref`, and the registered signal ids. Every registered signal must exist
+  in the revision with that source definition; otherwise registration fails. The
+  StreamRegistration is retained in the run's RUN_READY provenance (P0) or the live
+  session provenance bound to RUN_READY (live), and accepted records keep the incarnation
+  `source_id` exactly as today.
+
+A consumer that needs the incarnation for a signal resolves it through the
+StreamRegistration of the exact run, never through the revision or "latest" metadata.
+
 ### Scope resolution
 
 - Inputs: one PlantContextRevision and an explicit, ordered selection of
@@ -197,15 +226,28 @@ reproducible from exact refs or reported unavailable.
 - Rule scope bindings published with Rule-routed items are resolved the same way, and
   their exact `Rule.scope` strings must exist in the cited rule set revision. Registry
   matching is not changed.
+- **Typed inputs.** A Rule-routed item also names the plant ids its claim is about
+  (the `variables_entities` of its existing extraction-metadata carrier; for an
+  operating limit, the limited signal). Each such id must resolve to exactly one
+  entity, signal or relationship of the revision, and must lie inside the item's
+  resolved scope: an entity in scope, a relationship incident to an entity in scope,
+  or a signal attached to either. These are the "scope-to-rule/input versioned binding
+  provenance" of plant-telemetry §Engineering Context; resolution validates them and
+  never rewrites them.
 - Typed failure reasons: `SOURCE_MISMATCH`, `UNKNOWN_TARGET`, `KIND_MISMATCH`,
-  `EMPTY_SCOPE` (empty without an explicit plant-wide declaration),
-  `UNKNOWN_RULE_SCOPE`, `UNVERIFIED_REVISION` (the revision fails its own publication
-  verification).
+  `EMPTY_SCOPE`, `UNKNOWN_RULE_SCOPE`, `UNKNOWN_INPUT`, `AMBIGUOUS_INPUT` (an input id
+  matches more than one record kind), `INPUT_OUT_OF_SCOPE`, `UNVERIFIED_REVISION` (the
+  revision fails its own publication verification).
 - The result is a ScopeResolutionReport listing every scope ref with RESOLVED or its
   failure reason. Any failure rejects the whole selection; no partial composed view is
   produced, and preparation fails.
-- Plant-wide applicability must be declared explicitly by the revision's scope policy.
-  It is never inferred from an empty scope.
+- **Plant-wide applicability is not supported in v0.** plant-telemetry and
+  context-compiler-v0 require it to be declared explicitly, and the v0 compiler records
+  (scope refs of kind ENTITY, SIGNAL or RELATIONSHIP) have no carrier for such a
+  declaration. P1.3 v0 therefore rejects every empty scope with `EMPTY_SCOPE` and never
+  infers plant-wide applicability. Adding it requires a compiler amendment that defines
+  an explicit plant-wide scope ref and its review semantics, followed by a version of
+  this spec that expands it.
 
 ### Composed view
 
@@ -214,9 +256,15 @@ reproducible from exact refs or reported unavailable.
   versions of the applicability, grouping and reachability policies. It is never an
   input to scope resolution and is never written back as a canonical record.
 - **Applicability** (`tep-agent-lab.applicability-index/v0`): for each entity, signal and
-  relationship, the sorted KnowledgeRef, DocumentRef and RuleRef entries whose resolved
-  scope names it, each with its association and exact version. It carries refs only,
-  never document or knowledge bodies. Only items in the selected revisions appear;
+  relationship, the sorted KnowledgeRef, DocumentRef and RuleRef entries that apply to
+  it, each with its association kind and exact version. The v0 policy has exactly two
+  association kinds:
+  - `SCOPED_TO`: the target appears in the item's resolved scope;
+  - `CLAIM_SUBJECT`: the target is one of a Rule-routed item's resolved typed inputs.
+
+  Nothing is inherited beyond these two: an entity-scoped limit does not apply to every
+  signal of that entity, only to the signal it names. It carries refs only, never
+  document or knowledge bodies. Only items in the selected revisions appear;
   rejected or unreviewed candidates are absent by construction.
 - **Grouping** (`tep-agent-lab.topology-grouping/v0`, owner decision): a group is
   derived from a process-pack definition `(group id, anchor entity, included
@@ -302,12 +350,16 @@ reproducible from exact refs or reported unavailable.
   rejected.
 - **PCC-2 Fail-closed scope resolution.** The P1.2B staged revision resolves fully.
   Mutated revisions produce exactly the expected typed failures: wrong source, unknown
-  id, kind mismatch, empty scope without plant-wide declaration, unknown rule scope.
-  Any failure rejects the whole selection and produces no composed view.
+  id, kind mismatch, empty scope, unknown rule scope, unknown input, and an input outside
+  the item's scope (for example a reactor-scoped limit whose input is a separator
+  signal). Any failure rejects the whole selection and produces no composed view.
 - **PCC-3 Applicability.** The reactor temperature signal lists exactly the approved
-  150 degC normal upper and 175 degC shutdown limits with exact refs; the rejected
-  145 degC limit and the rejected RCW-IN-TT mention are absent. No bodies are copied.
-  An empty selection yields empty applicability, recorded as such.
+  150 degC normal upper and 175 degC shutdown limits as `CLAIM_SUBJECT` with exact refs;
+  the reactor pressure signal lists exactly the 2895 and 3000 kPa limits; neither signal
+  lists the other's limits, although all four are scoped to the reactor entity. The
+  reactor entity lists all four as `SCOPED_TO`. The rejected 145 degC limit and the
+  rejected RCW-IN-TT mention are absent. No bodies are copied. An empty selection
+  yields empty applicability, recorded as such.
 - **PCC-4 Grouping.** `reactor-cooling` contains exactly `reactor`, the reactor cooling
   water inlet and outlet relationships, their supply and return entities, and exactly
   the six signals attached to them: reactor pressure, level and temperature
@@ -326,7 +378,9 @@ reproducible from exact refs or reported unavailable.
   all four feed supplies; bounds are enforced and
   disclosed; every result is labelled `TOPOLOGY_ONLY`.
 - **PCC-6 Run integration and re-keying.** A prepared P0 run and a prepared live run over
-  the same graph pin the same `plant_context_ref`; snapshot reads report it as
+  the same graph pin the same `plant_context_ref`, while each records its own
+  StreamRegistration with its distinct incarnation `source_id`; registering a signal
+  absent from the revision fails; snapshot reads report it as
   `context_ref`; an unresolved selection fails preparation and no READY event exists;
   an explicitly empty selection is recorded; the interim ref maps through the explicit
   mapping record; frozen D0 fixtures and tests are byte-identical (D0 gate command).
@@ -369,11 +423,13 @@ reproducible from exact refs or reported unavailable.
 | PCC-S2 | Scope resolution and ScopeResolutionReport against the P1.2B staged revision and rule scope bindings | PCC-2 | PCC-S1 |
 | PCC-S3 | Composed view: applicability and grouping | PCC-3, PCC-4 | PCC-S2 |
 | PCC-S4 | Composed view: bounded topology reachability with cycles | PCC-5 | PCC-S1 |
-| PCC-S5 | Run integration: prepare-time derivation, RUN_READY pinning, telemetry re-keying for P0 and live runs, interim mapping, D0 gate | PCC-6 | PCC-S3 |
+| PCC-S5 | Run integration: prepare-time derivation, RUN_READY pinning, StreamRegistration, telemetry re-keying for P0 and live runs, interim mapping, D0 gate | PCC-6 | PCC-S3, PCC-S4 |
 | PCC-S6 | End-to-end evidence over a P1.2D canonical publication | PCC-7 | PCC-S5, P1.2D |
 
-PCC-S3 and PCC-S4 can proceed in parallel after their blockers. LOS-A-S2 (#41) needs
-PCC-S5 and P1.2D; LOS-A-S3 (#42) needs PCC-S3 grouping and PCC-S5.
+PCC-S3 and PCC-S4 can proceed in parallel after their blockers; PCC-S5 needs both,
+because the composed view pinned at READY includes applicability, grouping and
+reachability. LOS-A-S2 (#41) needs PCC-S5 and P1.2D; LOS-A-S3 (#42) needs PCC-S3
+grouping and PCC-S5, and still inherits its own LOS-A-S2 dependency.
 
 ## Owner decisions (2026-10-12)
 
