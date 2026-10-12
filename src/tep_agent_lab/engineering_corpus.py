@@ -21,8 +21,13 @@ from industrial_agent_runtime import Visibility
 from industrial_agent_runtime.serialization import freeze_json
 
 from .canonical_context import (
-    BYTES_SHA256, CanonicalContextRegistry, ContextSourceRef,
+    BYTES_SHA256, CANONICAL_JSON_SHA256, CanonicalContextRegistry, ContextSourceRef,
     PackageSourceMaterializer, ProjectionScope, SourceMaterializer, checked_relative_path,
+    content_checksum,
+)
+from .context_compiler import CompileSession, CompilerPolicies, CandidateBinding
+from .deterministic_extraction import (
+    ExtractionRuleSet, extract_candidates, load_rules, status_flags,
 )
 from .persistence import canonical_json, strict_json_loads
 from .markdown_fragments import (
@@ -184,19 +189,73 @@ def register_corpus(*, repository: str, git_revision: str,
     return registry
 
 
+def prepare_candidate_demo(*, repository: str, git_revision: str,
+                           plant_git_revision: str | None = None
+                           ) -> tuple[CompileSession, ExtractionRuleSet]:
+    """Source-only demo over the pinned packaged plant and an in-memory empty R0.
+
+    R0 is a trusted demo fixture, not a repository publication. The caller attests
+    the lab/plant revisions as in S1; production supplies its own CompileSession.
+    """
+    from tep_sim import build_process_graph
+    from tep_sim.process import GRAPH_SCHEMA_VERSION, PACKAGED_GRAPH_FIXTURE
+    from .rule_sets import RULE_SET_KIND, RULE_SET_SCHEMA_VERSION, RuleSetRevision
+    from .rules import RuleRegistry
+
+    materializer = PackageSourceMaterializer("tep_agent_lab")
+    registry = register_corpus(repository=repository, git_revision=git_revision,
+                               materializer=materializer)
+    rule_path = str(PurePosixPath(DEFAULT_MANIFEST).with_name("extraction-rules.json"))
+    rules = load_rules(materializer.read_bytes(rule_path))
+    if plant_git_revision is None:
+        pins = strict_json_loads((Path(__file__).resolve().parents[2] /
+                                 "dependency-pins.json").read_bytes())
+        plant_git_revision = pins["tep-sim"]
+    plant_repository = "shaun0457/tep-sim"
+    graph_materializer = PackageSourceMaterializer("tep_sim")
+    graph_path = "src/tep_sim/fixtures/" + PACKAGED_GRAPH_FIXTURE
+    graph_bytes = graph_materializer.read_bytes(graph_path)
+    graph_ref = ContextSourceRef(
+        source_id="compiler-demo.plant", repository=plant_repository,
+        git_revision=plant_git_revision, path_or_ref=graph_path,
+        content_checksum=content_checksum(graph_bytes, CANONICAL_JSON_SHA256),
+        kind="PROCESS_GRAPH", schema_version=GRAPH_SCHEMA_VERSION, visibility=Visibility.AGENT)
+    empty = RuleSetRevision(RuleRegistry(()), Visibility.AGENT)
+    r0_path = "context/compiler-demo/empty-input-rule-set.json"
+    r0_ref = ContextSourceRef(
+        source_id="compiler-demo.empty-r0", repository=repository, git_revision=git_revision,
+        path_or_ref=r0_path, content_checksum=empty.checksum, kind=RULE_SET_KIND,
+        schema_version=RULE_SET_SCHEMA_VERSION, visibility=Visibility.AGENT,
+        provenance={"demo_only": True, "in_memory": True})
+
+    class DemoMaterializer:
+        def read_bytes(self, path: str) -> bytes:
+            return empty.serialize() if path == r0_path else materializer.read_bytes(path)
+
+    session = CompileSession.prepare(
+        {repository: git_revision, plant_repository: plant_git_revision},
+        {repository: DemoMaterializer(), plant_repository: graph_materializer},
+        (*registry.inventory(ProjectionScope.AGENT), graph_ref, r0_ref),
+        process_graph_source_id=graph_ref.source_id, input_rule_set_source_id=r0_ref.source_id,
+        plant_graph_loader=build_process_graph,
+        policies=CompilerPolicies(review_policy="compiler-demo.no-review@1"))
+    return session, rules
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("list", "fragments", "rows"))
+    parser.add_argument("command", choices=("list", "fragments", "rows", "candidates"))
     parser.add_argument("source_id", nargs="?", help="registered source id for fragments/rows")
     parser.add_argument("--policy", choices=(PARSER_POLICY, TABLES_STEPS_POLICY),
                         default=TABLES_STEPS_POLICY)
     parser.add_argument("--repository", default="shaun0457/tep-agent-lab")
     parser.add_argument("--git-revision", help="trusted exact revision (required outside a checkout)")
+    parser.add_argument("--plant-git-revision", help="trusted pinned graph repository revision")
     args = parser.parse_args(argv)
     if (args.command in ("fragments", "rows")) != (args.source_id is not None):
-        parser.error("fragments/rows requires one source-id; list takes none")
-    if args.command == "rows" and args.policy != TABLES_STEPS_POLICY:
-        parser.error("rows requires the tables/steps parser policy")
+        parser.error("fragments/rows requires one source-id; list/candidates takes none")
+    if args.command in ("rows", "candidates") and args.policy != TABLES_STEPS_POLICY:
+        parser.error("rows/candidates requires the tables/steps parser policy")
     try:
         revision = args.git_revision
         if revision is None:
@@ -205,7 +264,31 @@ def main(argv: list[str] | None = None) -> int:
                 ["git", "-c", f"safe.directory={root.as_posix()}", "-C", str(root),
                  "rev-parse", "HEAD"], text=True, stderr=subprocess.PIPE).strip()
         registry = register_corpus(repository=args.repository, git_revision=revision)
-        if args.command in ("fragments", "rows"):
+        if args.command == "candidates":
+            session, rules = prepare_candidate_demo(
+                repository=args.repository, git_revision=revision,
+                plant_git_revision=args.plant_git_revision)
+            result = extract_candidates(session, rules)
+            for candidate in result.candidates:
+                if isinstance(candidate, CandidateBinding):
+                    target = (candidate.proposed_target.target_id if candidate.proposed_target
+                              else "unresolved")
+                    if candidate.alternative_targets:
+                        target += " alternatives=" + ",".join(
+                            t.target_id for t in candidate.alternative_targets)
+                    detail = f"{candidate.mention_text!r} -> {target}"
+                else:
+                    detail = repr(candidate.rule.extraction.claim)
+                citations = "; ".join(
+                    f"{f.source_ref.source_id}:{f.location.semantic_locator} "
+                    f"fragment:{f.fragment_id[:15]}" for f in candidate.fragments())
+                flags = ",".join(status_flags(session, candidate))
+                print(f"{candidate.extraction_kind.value} {detail} [{flags}] {citations}")
+            for item in result.unsupported:
+                print(f"UNSUPPORTED {item.reason} {item.fragment.source_ref.source_id}:"
+                      f"{item.fragment.location.semantic_locator} cell={item.cell!r} "
+                      f"text={item.text!r} fragment:{item.fragment.fragment_id[:15]}")
+        elif args.command in ("fragments", "rows"):
             resolved = registry.resolve(args.source_id, ProjectionScope.AGENT)
             fragments = fragment_markdown(resolved.ref, resolved.content, policy=args.policy)
             if args.command == "fragments":

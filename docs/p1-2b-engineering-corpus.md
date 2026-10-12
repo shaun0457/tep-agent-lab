@@ -303,9 +303,159 @@ S2 output. The rows demo requires the new policy and prints each data row's loca
 exact byte range, SHA-256 prefix and canonical-JSON cells. Registration and revision
 attestation retain the S1 limitations described above.
 
+## S4 — Deterministic table extraction to typed candidates
+
+Owning contracts: context-compiler-v0 sections Typed extraction, Candidate identity
+and immutability, Confidence semantics, Benchmark use and Initial P1.2 vertical slice.
+The generic `deterministic_extraction` engine uses the existing P1.2A candidate API.
+Domain tags, selected plant ids and source locators live in the corpus's packaged
+`extraction-rules.json`, not in engine code. The four registered Markdown documents
+and their manifest/checksums remain unchanged.
+
+```text
+[frozen CompileSession] -- exact source refs + re-attested bytes --> [S3 fragments / cells]
+[versioned extraction rule data] -- table patterns / exact phrases --> [deterministic engine]
+[S3 fragments / cells] -- exact citations --> [deterministic engine]
+[deterministic engine] -- P1.2A routing + provenance --> [unreviewed Binding / inert Rule candidates]
+[deterministic engine] -- unmatched rows, cells and prose --> [unsupported report]
+```
+
+Deterministic rules precede P1.2C to establish inspectable source grounding,
+unsupported behavior, identity and conflict evidence before model extraction shares
+the same candidate contracts. They provide a small reproducible example, not an
+arbitrary-document parser, a diagnosis or a capability result. Confidence is omitted;
+any future confidence remains review-routing metadata only.
+
+### Strict rule-set schema
+
+The top-level record has exactly `schema_version`, `rule_set_id`, `version`,
+`authored_at`, `units` and `rules`. This corpus selects
+`deterministic-extraction-rules/v1` and
+`tep-reactor-cooling.deterministic-extraction@1`. The date is fixed authoring metadata,
+never extraction wall-clock time. `units` is the explicit supported-unit vocabulary.
+Unknown keys, duplicate JSON keys, NaN/Infinity, wrong types, invalid dates/versions,
+duplicate rule ids, duplicate targets/scopes and invalid regex syntax fail loading.
+The validated rule data is deeply immutable. Semantic rule changes require a new
+rule-set version; changing even formatting changes the exact derived-input checksum.
+
+Every rule has exactly `id`, `form`, `source_id`, `locator`, `item`, plus the field
+specific to its form:
+
+| Form | Selection and extraction |
+| --- | --- |
+| `table` | `locator` names a TABLE under the S3 policy. `matches` maps exact header names to regex patterns applied with `fullmatch` to each TABLE_ROW's verified cells. A binding consumes `mention_column`; a limit consumes `number_column` and `unit_column`, with exactly the named capture `value` on the number pattern. Each rule emits one typed item per matching row. |
+| `phrase` | `locator` names one PARAGRAPH or PROCEDURE_STEP. The exact UTF-8 `phrase`, including line breaks, must occur inside that fragment. One matching rule emits one item. A missing phrase, missing source/locator or wrong anchor kind aborts the whole batch without returning partial candidates. |
+
+`item` has an explicit nonempty `scope` array of exact `{kind, id}` plant targets.
+Its remaining keys are discriminated by kind and form:
+
+- ENTITY_MENTION / SIGNAL_MENTION: `target_kind`, `targets`, plus `mention_column`
+  for table rules. Exactly one existing target becomes `proposed_target`; multiple
+  existing targets become alternatives with no chosen proposal; none stays unresolved.
+  The engine never invents a canonical entity or fallback alias.
+- OPERATING_LIMIT: `variable`, `constraint`, `conditions`, `uncertainties`, plus the
+  two table column names or phrase `value_text`. The latter must occur in `phrase`.
+  Decimal number syntax and the declared unit are parsed through P1.2A `TypedValue`;
+  unsupported units, non-finite values and inexact oversized integers are refused.
+  The resulting value/unit and constraint remain in the existing Rule carrier's
+  descriptive extraction claim and units; there is no second numeric Rule schema.
+- CONTROL_RELATION: phrase rules only, with `variables`, `conditions`,
+  `uncertainties` and `units`. The exact phrase becomes the Rule claim, without
+  paraphrasing. Claim variables and scopes must exist in the selected plant index.
+
+Bindings use P1.2A `ROUTING_POLICY`; limits and control relations use
+`CandidateKnowledge` carrying `literature_candidate(...)` and `ExtractionMetadata`.
+Every Rule remains `LITERATURE / NONE / REFERENCE`, status `candidate`, behavior
+`ANNOTATE`. Extraction creates no review decision or execution permission.
+
+### Provenance, identities and conflict handling
+
+Each candidate cites its exact S3 SourceFragmentRef, selected PROCESS_GRAPH and
+every source involved in a conflict. Its `extraction_method` is the rule-set
+`id@version`, `grounding_method` is `exact-selected-plant-ids@1`, and routing is the
+existing P1.2A version. `DerivedInput` records the rule-set method ref and SHA-256 of
+the exact JSON bytes. A future publication caller must resolve those same bytes
+through the existing derived-input resolver; S4 does not stage them.
+
+The candidate id hashes the rule id and exact fragment id. The existing P1.2A API
+computes `content_key` and `candidate_version`; no alternate candidate identity or
+model is introduced. With the same exact corpus/session and rule-set bytes, records
+and ids are byte-identical. Changing only the rule-set version preserves ids and
+content keys while changing candidate versions. A source revision still changes
+fragment identities and therefore candidate identities, as specified in S2/S3.
+
+Limits with the same variable, constraint, unit, conditions and scope but different
+values receive bidirectional `conflicting_candidate_ids` and exact
+`conflicting_fragments`. This is the existing P1.2A conflict mechanism. Normal upper
+and shutdown high have distinct constraint/condition keys, so 150 and 175 degC are
+not treated as a conflict. Neither conflicting value silently replaces the other.
+
+### Corpus items and demo
+
+The eight table rules produce four SIGNAL_MENTION bindings and four limits:
+
+| Source row | Binding | Normal upper | Shutdown high |
+| --- | --- | --- | --- |
+| XMEAS(7) | `reactor.pressure_measurement` | 2895 kPa gauge | 3000 kPa gauge |
+| XMEAS(9) | `reactor.temperature_measurement` | 150 degC | 175 degC |
+| XMEAS(21) | `reactor_cooling.outlet_temperature` | unsupported | unsupported |
+| XMV(10) | `reactor_cooling.flow_actuator` | unsupported | unsupported |
+
+The four phrase rules produce the remaining items:
+
+| Exact source locator (below its document heading) | Output |
+| --- | --- |
+| operating-procedure: `review-steps/list-1/step-4` | `reactor-side temperature`: unresolved proposal, two existing alternatives, ambiguous and needs review |
+| subsystem: `control-relation/paragraph-1` | CONTROL_RELATION preserving the exact cooling-flow / heat-removal claim and stated utility/thermal conditions |
+| troubleshooting: `intentional-competing-limit/paragraph-1` | 145 degC normal upper limit, linked to the table's competing 150 degC candidate |
+| troubleshooting: `unverified-instrumentation-proposal/paragraph-1` | RCW-IN-TT mention, no existing registered signal, unresolved and visibly `no-matching-signal` |
+
+```console
+python -m tep_agent_lab.engineering_corpus candidates
+```
+
+Each candidate line prints kind, mention/target or claim/value, derived status flags,
+all cited source locators and fragment id prefixes. The 12 candidates are all
+`unreviewed`; ambiguity and missing signals also produce blocking existing validator
+findings. These flags are display metadata, never mutable review state or acceptance.
+The demo's compile session uses the pinned packaged ProcessGraph and a trusted,
+in-memory empty input RuleSetRevision (R0), labelled demo-only; it writes no R0 or
+publication artifact. Lab revision attestation retains S1's working-tree limitation.
+Outside a checkout, also supply `--plant-git-revision <trusted-pinned-revision>`.
+Production extraction accepts the application's own exact frozen CompileSession.
+
+The report has 20 unsupported entries: six unmatched cells from table rows 3/4 and
+14 unselected paragraphs/steps. Unknown rows are additionally reported as
+`unmatched-row`, with their unmatched cells retained independently. Unselected
+prose is `no-phrase-rule`. Container sections/tables are not extraction items.
+Matched patterns consume whole cells; base values recognized inside a limit pattern
+are not separately emitted. A selected phrase produces just its declared item,
+not claims from surrounding prose. No base value, unspecified alarm, command range,
+unsupported unit, unknown row or unselected procedure guidance is inferred.
+
+### Evidence and limits
+
+`tests/test_deterministic_extraction.py` was written and executed first; it initially
+failed on the absent extraction module. Its 17 tests cover the complete strict
+golden, candidate record reconstruction, source-byte re-verification, provenance and
+route, unambiguous and ambiguous bindings, missing signal refusal, linked competing
+limits, separate shutdown limit, CONTROL_RELATION, ENTITY_MENTION routing, unknown
+rows/cells, invalid numbers/units, missing phrase/locator failure, exact-byte tampering,
+version identity layers, repeated-run determinism, immutable records, strict schema,
+generic engine literal guards and the CLI demo. The canonical JSON golden at
+`tests/deterministic_extraction_golden.json` pins all 12 full candidate records plus
+all 20 unsupported records under a fixed test repository revision.
+`.gitattributes` fixes this golden to LF so checkout conversion preserves the exact
+canonical JSON bytes checked by the test, including the final LF.
+
+This engine intentionally supports only the two declared forms and bounded typed
+vocabulary above. It has no model/provider calls, Agent tools, confidence-based
+acceptance, review records, staging or publication. Reviewed Rule and rejection
+publication evidence belong to S5; the repository transaction remains P1.2D. No
+benchmark/scorer/evaluator sources or existing test fixtures were consulted.
+
 ## Remaining slices
 
-- S4: deterministic typed table extraction with fragment provenance and existing inert Rules.
 - S5: end-to-end test-principal review and reproducible non-canonical staged revision.
 
 The repository publication transaction and head CAS remain P1.2D.
