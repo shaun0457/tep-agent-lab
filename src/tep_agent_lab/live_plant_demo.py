@@ -3,14 +3,15 @@
 import argparse
 from pathlib import Path
 import tempfile
+import sys
 
 from industrial_agent_runtime import Budget
 
 from .application_views import ApplicationViewService
 from .canonical_context import ProjectionScope, inventory_checksum
 from .e0_demo import git_revision
-from .live_plant import (LIVE_POLICY_V1, LivePacingMode, LivePacingPolicy,
-                         LivePlantPolicy, LivePlantState)
+from .live_plant import (LivePacingMode, LivePacingPolicy,
+                         LivePlantPolicy, LivePlantPolicyV1, LivePlantState)
 from .playground import (ModelSpec, RunManager, RunRequest, SourceRevisions, WorldSpec,
                          load_dependency_pins, pinned_tep_sim_sources)
 from .sidecar_resources import dependency_pins_path, packaged_lab_revision
@@ -21,18 +22,43 @@ class _UnusedProvider:
         raise RuntimeError("the live demonstration has no model turns")
 
 
+def commit_timeout(pacing: LivePacingPolicy, step_gap: int) -> float:
+    """Delivery interval plus 30 seconds of preparation/physics/scheduling margin."""
+    return 30 + step_gap * pacing.seconds_per_tick
+
+
+def cleanup_live(live, *, suppress_errors: bool) -> None:
+    """Idempotent trusted close; always join and preserve an original exception."""
+    error = None
+    try:
+        live.close_prepared()
+    except BaseException as exc:
+        error = exc
+    finally:
+        try:
+            live.wait()
+        except BaseException as exc:
+            error = error or exc
+    if error is not None and not suppress_errors:
+        raise error
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="clean deterministic simulated stream")
     parser.add_argument("mode", choices=("live", "lifecycle"))
-    parser.add_argument("--pacing", choices=tuple(m.value for m in LivePacingMode))
+    parser.add_argument("--pacing", choices=tuple(m.value for m in LivePacingMode),
+                        help="live: all modes, milestone timeout scales with pacing; "
+                             "lifecycle: ACCELERATED (default) or REAL_TIME only")
     args = parser.parse_args()
+    if args.mode == "lifecycle" and args.pacing == "DETERMINISTIC":
+        parser.error("lifecycle requires ACCELERATED or REAL_TIME pacing")
     root = Path(__file__).resolve().parents[2]
     pins = load_dependency_pins(dependency_pins_path())
     lab_revision = packaged_lab_revision() or git_revision(root)
     pacing = LivePacingPolicy(mode=LivePacingMode(args.pacing or (
         "ACCELERATED" if args.mode == "lifecycle" else "DETERMINISTIC")))
-    policy = (LivePlantPolicy(version=LIVE_POLICY_V1, session_event_cap=35, pacing=pacing)
-              if args.mode == "lifecycle" else LivePlantPolicy(pacing=pacing))
+    policy = (LivePlantPolicy() if args.mode == "live" and pacing.mode == LivePacingMode.DETERMINISTIC
+              else LivePlantPolicyV1(pacing=pacing))
     # Temporary run artifacts are removed on exit; nothing is logged to the repo.
     with tempfile.TemporaryDirectory(prefix="live-plant-demo-") as directory:
         manager = RunManager(directory, dependency_pins=pins,
@@ -58,8 +84,10 @@ def main() -> int:
         try:
             # Supervise committed milestones and open exact accepted prefixes. No
             # read/printing grants permission to step; the producer never waits on us.
+            previous_k = 1
             for k in ((1, 11) if args.mode == "lifecycle" else (1, 101, 201, 301)):
-                live.wait_for_commit(k)
+                live.wait_for_commit(k, timeout=commit_timeout(pacing, k - previous_k))
+                previous_k = k
                 snapshot = app.open_telemetry_snapshot("live-demo", ingest_sequence=k)
                 values = [app.get_signal("live-demo", signal, snapshot=snapshot).current.value
                           for signal in signals]
@@ -73,7 +101,7 @@ def main() -> int:
                 print(f"pause read 2: T={second.event_horizon_ticks} K={second.ingest_sequence}")
                 print(f"paused T/K frozen: {first == second}")
                 manager.resume_live("live-demo", owner=owner)
-                live.wait_for_commit(first.ingest_sequence + 10)
+                live.wait_for_commit(first.ingest_sequence + 10, timeout=commit_timeout(pacing, 10))
                 resumed = app.open_telemetry_snapshot("live-demo")
                 print(f"resumed: T={resumed.event_horizon_ticks} K={resumed.ingest_sequence}")
                 manager.stop_live("live-demo", owner=owner)
@@ -81,9 +109,7 @@ def main() -> int:
                 print(f"stopped retained: T={retained.event_horizon_ticks} K={retained.ingest_sequence}")
                 print(f"stop reason: {live.events[-1]['reason']}")
         finally:
-            if args.mode == "lifecycle" and live.owner is not None:
-                manager.stop_live("live-demo", owner=owner)
-            live.wait(timeout=30 + policy.step_count * pacing.seconds_per_tick)
+            cleanup_live(live, suppress_errors=sys.exc_info()[0] is not None)
         after = manager.manifest("live-demo")
         inventory = inventory_checksum(manager.queries("live-demo").registry()
                                        .inventory(ProjectionScope.EVALUATOR))

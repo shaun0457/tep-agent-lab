@@ -2,20 +2,23 @@
 
 from dataclasses import replace
 import ast
+import contextlib
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from industrial_agent_runtime import Budget, checksum, to_jsonable
 
 from tep_agent_lab.application_views import ApplicationViewService
 from tep_agent_lab.canonical_context import ContextSourceError, inventory_checksum, ProjectionScope
 from tep_agent_lab.live_plant import (LIVE_POLICY_V1, LivePacingMode, LivePacingPolicy,
-                                    LivePlantError, LivePlantPolicy, LivePlantState)
+                                    LivePlantError, LivePlantPolicy, LivePlantPolicyV1,
+                                    LivePlantState, LivePlantSuperseded)
 from tep_agent_lab.persistence import RunLog, canonical_json
 from tep_agent_lab.playground_views import ViewUnavailable
 from tep_agent_lab.playground import (LifecycleError, ModelSpec, PrepareError, RunManager,
@@ -88,8 +91,285 @@ class LivePlantTests(unittest.TestCase):
         return manifest, live
 
     def lifecycle_policy(self, **kwargs):
-        return LivePlantPolicy(version=LIVE_POLICY_V1, session_event_cap=35,
-                               step_count=4, **kwargs)
+        return LivePlantPolicyV1(step_count=4, **kwargs)
+
+    def test_v0_checksum_and_delivery_match_main_5e5bd64(self):
+        # Computed from LivePlantPolicy() at main 5e5bd64 (PR #44).
+        self.assertEqual(checksum(LivePlantPolicy()),
+                         "683ed7f5ae0131504097a1bceaed927e03fee83344d7a2e375b38a43b998ce15")
+        self.assertNotIn("pacing", to_jsonable(LivePlantPolicy()))
+        _, live = self.prepare()
+        self.assertEqual(live.provenance["delivery"], "synchronous-deterministic/v0")
+        self.assertNotIn("pacing", live.provenance)
+        self.assertNotIn("pacing_checksum", live.provenance)
+
+    def test_policy_versions_bind_event_cap_and_pacing(self):
+        for policy, changes in ((LivePlantPolicy, {"session_event_cap": 35}),
+                                (LivePlantPolicy, {"version": LIVE_POLICY_V1}),
+                                (LivePlantPolicyV1, {"session_event_cap": 3}),
+                                (LivePlantPolicyV1, {"version": LivePlantPolicy().version})):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                policy(**changes)
+        with self.assertRaises(TypeError):
+            LivePlantPolicy(pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME))
+        self.assertEqual(LivePlantPolicy().pacing.seconds_per_tick, 0)
+        self.assertEqual(LivePlantPolicyV1().session_event_cap, 35)
+
+    def test_invalid_lifecycle_timeouts_never_arm_a_request(self):
+        wall = HeldWall()
+        self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
+        _, live = self.prepare(self.lifecycle_policy(
+            pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME)))
+        owner = live.start()
+        try:
+            self.assertTrue(wall.entered.wait(10))
+            for timeout in (-1, float("nan"), float("inf"), threading.TIMEOUT_MAX * 2):
+                for method in (live.pause, live.stop):
+                    with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                        method(owner=owner, timeout=timeout)
+                    self.assertIsNone(live._request)
+                    self.assertFalse(live._wake.is_set())
+                    self.assertEqual(live.state, LivePlantState.ACTIVE)
+        finally:
+            live.close_prepared()
+
+    def test_wait_exceptions_withdraw_unacknowledged_requests(self):
+        _, live = self.prepare(self.lifecycle_policy())
+        entered, release = threading.Event(), threading.Event()
+        advance = live._advance
+        def blocked():
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("advance barrier timed out")
+            return advance()
+        with patch.object(live, "_advance", side_effect=blocked):
+            owner = live.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                for error in (KeyboardInterrupt, OverflowError):
+                    for method in (live.pause, live.stop):
+                        with patch.object(live._condition, "wait_for", side_effect=error), \
+                                self.assertRaises(error):
+                            method(owner=owner)
+                        self.assertIsNone(live._request)
+                        self.assertFalse(live._wake.is_set())
+                        self.assertEqual(live.state, LivePlantState.ACTIVE)
+            finally:
+                release.set()
+                live.close_prepared()
+
+    def test_stop_supersedes_pending_pause_after_inflight_commit(self):
+        _, live = self.prepare(self.lifecycle_policy())
+        entered, release = threading.Event(), threading.Event()
+        commit = live.telemetry.commit_batch
+        def blocked(batch):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("commit barrier timed out")
+            return commit(batch)
+        pause_errors, stop_errors = [], []
+        def invoke(method, errors):
+            try:
+                method(owner=owner)
+            except BaseException as exc:
+                errors.append(exc)
+        with patch.object(live.telemetry, "commit_batch", side_effect=blocked):
+            owner = live.start()
+            pauser = threading.Thread(target=invoke, args=(live.pause, pause_errors))
+            stopper = threading.Thread(target=invoke, args=(live.stop, stop_errors))
+            try:
+                self.assertTrue(entered.wait(10))
+                pauser.start()
+                with live._condition:
+                    self.assertTrue(live._condition.wait_for(lambda: live._request == "pause", 10))
+                with self.assertRaises(LivePlantError):
+                    live.resume(owner=owner)
+                stopper.start()
+                with live._condition:
+                    self.assertTrue(live._condition.wait_for(lambda: live._request == "stop", 10))
+                pauser.join(10)
+                self.assertFalse(pauser.is_alive())
+                self.assertEqual(len(pause_errors), 1)
+                self.assertIsInstance(pause_errors[0], LivePlantSuperseded)
+                self.assertEqual(live.last_step, 0)
+                release.set()
+                stopper.join(10)
+                self.assertFalse(stopper.is_alive())
+                self.assertEqual(stop_errors, [])
+                self.assertEqual(live.last_step, 1)
+                self.assertEqual(live.state, LivePlantState.STOPPED)
+            finally:
+                release.set()
+                live.close_prepared()
+                for worker in (pauser, stopper):
+                    if worker.ident is not None:
+                        worker.join(10)
+
+    def test_run_close_stops_active_and_paused_producer_retaining_reads(self):
+        for pause in (False, True):
+            with self.subTest(pause=pause):
+                wall = HeldWall()
+                self.manager = RunManager(
+                    Path(self.temp.name) / str(pause), revisions=self.manager.revisions,
+                    dependency_pins=self.manager.dependency_pins,
+                    live_monotonic=wall.monotonic, live_sleeper=wall.sleep)
+                self.manager.create("live-test", self.request)
+                _, live = self.prepare(self.lifecycle_policy(
+                    pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME)))
+                owner = live.start()
+                try:
+                    self.assertTrue(wall.entered.wait(10))
+                    if pause:
+                        live.pause(owner=owner)
+                    before = self.manager.queries("live-test").telemetry_snapshot()
+                    self.manager._runs["live-test"].session.close()
+                    self.assertEqual(live.state, LivePlantState.STOPPED)
+                    self.assertEqual(live.events[-1]["reason"], "host_close")
+                    self.assertFalse(live._thread.is_alive())
+                    self.assertIsNone(live.owner)
+                    self.assertTrue(live.physics_closed)
+                    self.assertEqual(before, self.manager.queries("live-test").telemetry_snapshot())
+                    self.manager._runs["live-test"].session.close()
+                finally:
+                    live.close_prepared()
+
+    def test_pacing_bounds_reject_platform_overflow(self):
+        from tep_agent_lab.live_plant import MAX_WALL_SECONDS_PER_TICK
+        for value in (MAX_WALL_SECONDS_PER_TICK + 1, threading.TIMEOUT_MAX * 2):
+            for mode in LivePacingMode:
+                with self.subTest(value=value, mode=mode), self.assertRaises(ValueError):
+                    LivePacingPolicy(mode=mode, real_time_seconds_per_sim_second=value)
+        self.assertLessEqual(LivePacingPolicy(mode=LivePacingMode.REAL_TIME,
+                                            real_time_seconds_per_sim_second=3600).seconds_per_tick,
+                             threading.TIMEOUT_MAX)
+
+    def test_sleeper_clock_faults_have_distinct_pacing_reason(self):
+        for fault in ("clock", "nonfinite_clock", "sleeper"):
+            self.manager = RunManager(
+                Path(self.temp.name) / fault, revisions=self.manager.revisions,
+                dependency_pins=self.manager.dependency_pins)
+            self.manager.create("live-test", self.request)
+            _, live = self.prepare(self.lifecycle_policy(
+                pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME)))
+            clock = (Mock(side_effect=[0, RuntimeError("clock fault")]) if fault == "clock"
+                     else Mock(side_effect=[0, float("nan")]) if fault == "nonfinite_clock"
+                     else lambda: 0)
+            with patch.object(live, "_monotonic", clock), \
+                    patch.object(live, "_sleeper", side_effect=RuntimeError("sleeper fault")):
+                live.start()
+                live.wait()
+            self.assertEqual(live.state, LivePlantState.FAILED)
+            self.assertEqual(live.events[-1]["reason"], "pacing_error")
+            self.assertEqual(live.last_step, 0)
+
+    def test_start_clock_failure_closes_without_leaving_owner_armed(self):
+        _, live = self.prepare(self.lifecycle_policy())
+        with patch.object(live, "_monotonic", side_effect=RuntimeError("clock fault")), \
+                self.assertRaises(RuntimeError):
+            live.start()
+        self.assertEqual(live.events[-1]["reason"], "pacing_error")
+        self.assertEqual(live.state, LivePlantState.FAILED)
+        self.assertIsNone(live.owner)
+        self.assertTrue(live.physics_closed)
+
+    def test_withdrawn_pause_bursts_never_advance_before_deadline(self):
+        wall = FakeWall()
+        entered = [threading.Event(), threading.Event()]
+        release = [threading.Event(), threading.Event()]
+        def sleep(seconds, wake):
+            index = len(wall.delays)
+            wall.delays.append(seconds)
+            entered[index].set()
+            if not release[index].wait(10):
+                raise AssertionError("fake sleeper barrier timed out")
+        self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, sleep
+        _, live = self.prepare(LivePlantPolicyV1(step_count=1,
+            pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME)))
+        advance = Mock(wraps=live._advance)
+        delivered = []
+        commit = live.telemetry.commit_batch
+        def capture(batch):
+            delivered.append(wall.elapsed)
+            return commit(batch)
+        with patch.object(live, "_advance", advance), \
+                patch.object(live.telemetry, "commit_batch", side_effect=capture):
+            owner = live.start()
+            try:
+                self.assertTrue(entered[0].wait(10))
+                for _ in range(20):
+                    with self.assertRaisesRegex(LivePlantError, "boundary has not resolved"):
+                        live.pause(owner=owner, timeout=0)
+                release[0].set()
+                self.assertTrue(entered[1].wait(10))
+                advance.assert_not_called()
+                self.assertIsNone(live._pending)
+                self.assertEqual(live.telemetry.source.next_sequence, 1)
+                self.assertEqual(live.last_step, 0)
+                self.assertEqual(wall.delays, [1, 1])
+                wall.elapsed = 1
+                release[1].set()
+                live.wait()
+                self.assertEqual(delivered, [1])
+                self.assertEqual([c.source_sequence for c in live.commits], [0, 1])
+            finally:
+                for barrier in release:
+                    barrier.set()
+                live.close_prepared()
+
+    def test_pacing_has_no_derived_step_anchor(self):
+        _, live = self.prepare(self.lifecycle_policy())
+        self.assertFalse(hasattr(live, "_anchor_step"))
+
+    def test_pause_during_pacing_acknowledges_without_advancing(self):
+        wall = HeldWall()
+        self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
+        _, live = self.prepare(self.lifecycle_policy(
+            pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME)))
+        owner = live.start()
+        try:
+            self.assertTrue(wall.entered.wait(10))
+            live.pause(owner=owner)
+            self.assertEqual(live.last_step, 0)
+            self.assertEqual(live.telemetry.source.next_sequence, 1)
+            self.assertIsNone(live._pending)
+            wall.elapsed += 100
+            wall.entered.clear()
+            live.resume(owner=owner)
+            self.assertTrue(wall.entered.wait(10))
+            self.assertEqual(wall.delays, [1, 1])
+            self.assertEqual(live.last_step, 0)
+        finally:
+            live.close_prepared()
+
+    def test_demo_real_time_milestone_timeout_covers_gap(self):
+        from tep_agent_lab.live_plant_demo import commit_timeout
+        pacing = LivePacingPolicy(mode=LivePacingMode.REAL_TIME)
+        self.assertEqual(commit_timeout(pacing, 100), 130)
+        self.assertEqual(commit_timeout(LivePacingPolicy(), 100), 30)
+
+    def test_demo_rejects_deterministic_lifecycle_before_preparation(self):
+        from tep_agent_lab import live_plant_demo
+        with patch.object(sys, "argv", ["live-demo", "lifecycle", "--pacing", "DETERMINISTIC"]), \
+                patch.object(live_plant_demo, "RunManager") as manager, \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exit:
+            live_plant_demo.main()
+        self.assertEqual(exit.exception.code, 2)
+        manager.assert_not_called()
+
+    def test_demo_cleanup_always_joins_preserves_original_error_and_is_idempotent(self):
+        from tep_agent_lab.live_plant_demo import cleanup_live
+        live = Mock()
+        live.close_prepared.side_effect = LivePlantError("already ended")
+        cleanup_live(live, suppress_errors=True)
+        live.wait.assert_called_once_with()
+        live.close_prepared.side_effect = None
+        cleanup_live(live, suppress_errors=False)
+        cleanup_live(live, suppress_errors=False)
+        self.assertEqual(live.wait.call_count, 3)
+        live.close_prepared.side_effect = LivePlantError("close failed")
+        live.wait.side_effect = LivePlantError("join failed")
+        cleanup_live(live, suppress_errors=True)
+        self.assertEqual(live.wait.call_count, 4)
 
     def test_pacing_replays_identical_prepared_inputs_and_order(self):
         trajectories, delays = [], []
@@ -160,7 +440,7 @@ class LivePlantTests(unittest.TestCase):
                 self.assertEqual(live.last_step, 0)
                 self.assertEqual(before, old_reads())
                 with self.assertRaises(LifecycleError):
-                    self.manager.stop_live("live-test", owner=owner)
+                    self.manager.resume_live("live-test", owner=owner)
             finally:
                 release.set()
                 worker.join(10)
@@ -233,7 +513,7 @@ class LivePlantTests(unittest.TestCase):
                 patch.object(live.telemetry, "commit_batch", side_effect=capture):
             self.manager.start_live("live-test")
             live.wait()
-        self.assertEqual(delivered, [5, 6, 7, 8])
+        self.assertEqual(delivered, [6, 7, 8, 9])
         self.assertEqual([c.event_ticks for c in live.commits], [0, 1, 2, 3, 4])
         self.assertEqual([c.source_sequence for c in live.commits], [0, 1, 2, 3, 4])
 
@@ -282,12 +562,12 @@ class LivePlantTests(unittest.TestCase):
         self.assertEqual(LivePlantPolicy().session_event_cap, 3)
         wall = HeldWall()
         self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
-        policy = replace(self.lifecycle_policy(), session_event_cap=7,
-                         pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME))
+        policy = self.lifecycle_policy(
+            pacing=LivePacingPolicy(mode=LivePacingMode.REAL_TIME))
         _, live = self.prepare(policy)
         owner = self.manager.start_live("live-test")
         try:
-            for _ in range(2):
+            for _ in range(16):
                 self.assertTrue(wall.entered.wait(10))
                 self.manager.pause_live("live-test", owner=owner)
                 wall.entered.clear()
@@ -300,8 +580,8 @@ class LivePlantTests(unittest.TestCase):
             self.assertEqual(live.state, LivePlantState.ACTIVE)
         finally:
             self.manager.stop_live("live-test", owner=owner)
-        self.assertEqual(len(live.events), 7)
-        self.assertEqual(len(RunLog(live.history.directory).events()), 7)
+        self.assertEqual(len(live.events), 35)
+        self.assertEqual(len(RunLog(live.history.directory).events()), 35)
         self.assertEqual(live.events[-1]["reason"], "operator_stop")
 
     def test_unresolved_batch_never_acknowledges_pause(self):
