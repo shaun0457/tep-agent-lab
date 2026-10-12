@@ -71,10 +71,9 @@ text and these trusted records never enter public views. RunSummaryView reports
 the live physics attachment's resource state; legacy telemetry history explicitly
 returns unavailable for live runs, which use snapshot-bound canonical reads.
 
-## Proposed OD-6 demonstration policy
+## OD-6 demonstration policy v0 (confirmed in PR #44)
 
-These numbers are proposed for owner confirmation through this slice's review,
-not a claim that confirmation has already occurred. They are typed immutable
+The owner confirmed these S1 numbers in PR #44. They are typed immutable
 `LivePlantPolicy` values under `tep-agent-lab.live-plant-demo-policy/v0`, with their
 exact parameter checksum recorded in session provenance.
 
@@ -131,9 +130,9 @@ tests need no remote Git refs and continue to work with shallow checkouts.
 
 Reads retain all committed prefixes for the lifetime of the in-process attachment.
 The stored manifest/provenance alone do not recover its telemetry after process
-loss. No rolling eviction, durable restart, alternate pacing, pause/resume,
-interactive stop, backpressure retry, detailed failure/restart lifecycle or
-disturbance timeline is implemented. LOS-B-S2 (#37) owns pacing and pause/resume;
+loss. S1 implemented no rolling eviction, durable restart, alternate pacing,
+pause/resume, interactive stop, backpressure retry, detailed failure/restart
+lifecycle or disturbance timeline. LOS-B-S2 (#37) below adds pacing and lifecycle;
 LOS-B-S3 (#38) owns capacity-stop, retry, failure and restart; LOS-B-S4 (#39) owns
 the scheduled timeline. New UI panels, Operational State features and investigation
 handoff retain their existing owners. No upstream repository changes are required.
@@ -172,3 +171,100 @@ manifest unchanged: True
 inventory unchanged: True
 P0 status: READY; outcome=None
 ```
+
+## LOS-B-S2 (issue #37)
+
+This slice delivers pacing, trusted ownership and explicit pause/resume/stop under
+Live Operational State v0 §Live plant session (OD-4), §Clock and pacing, LOS-B2
+and the lifecycle part of LOS-B5. It leaves the S1 telemetry attachment and public
+read assembly intact. The P0 and runtime status enums keep their existing meanings.
+
+```text
+[PREPARED] -- trusted start, return owner token --> [ACTIVE]
+[ACTIVE] -- commit in-flight batch, acknowledge pause --> [PAUSED]
+[PAUSED] -- same owner resume, reset wall anchor --> [ACTIVE]
+[ACTIVE / PAUSED] -- resolve batch, close physics, release owner --> [STOPPED]
+[ACTIVE] -- configured steps reached, close physics --> [STOPPED]
+[retained committed telemetry] -- exact old T/K --> [unchanged public reads]
+```
+
+`RunManager.start_live()` returns an opaque stepping-owner token. Trusted
+`pause_live`, `resume_live`, `stop_live` and the live handle require that token.
+One producer alone calls the prepared advance callback; no external step operation
+exists. A condition protects transitions and a nonblocking operation lock rejects
+overlapping lifecycle requests. Duplicate starts, wrong owners and illegal states
+raise `LifecycleError` on RunManager or `LivePlantError` on the handle. No lifecycle
+operation is added to RunQueries, ApplicationViewService, transport or Agent tools.
+The token is an in-process trusted-host capability, not enterprise authentication.
+
+Pause and stop interrupt a pacing wait, then resolve the already assigned batch
+without retranslation before acknowledgment. An unresolved delivery cannot be
+acknowledged; a supervision timeout raises a typed error and withdraws that request.
+PAUSED retains ownership, simulation origin, source/clock/store identities and cursor;
+the producer waits without stepping, translating or committing. Resume continues
+the next fixed integration step from that cursor. Stop from ACTIVE or PAUSED closes
+physics, drops environment callbacks and releases the stepping owner, while retaining
+all committed reads in process. Trusted terminal reasons distinguish `operator_stop`
+and `configured_steps_reached`; neither sets a P0 outcome or COMPLETED status.
+
+### Proposed pacing and lifecycle policy values
+
+Pacing is selected in immutable `LivePlantPolicy.pacing` at preparation. Its version
+`tep-agent-lab.live-plant-pacing/v0`, mode, resolved parameters and checksum are pinned
+in session provenance before READY. These new concrete values require owner confirmation
+in this slice's review; implementation does not assert that confirmation occurred.
+
+| Mode / bound | Proposed value | Rationale |
+|---|---:|---|
+| DETERMINISTIC | No wall delay | Preserve the existing fast offline `live` demonstration. |
+| REAL_TIME | 1 wall second / simulated second | Direct elapsed-time interpretation, with no simulation-to-UTC mapping. |
+| ACCELERATED | Factor 20, hence 0.05 wall second / simulated second | The 300-step stream takes at least 15 wall seconds, enough to supervise lifecycle interactively. |
+| v1 lifecycle event cap | 35 events, 1,024 bytes each | PREPARED + initial ACTIVE + 16 pause/resume pairs + terminal; bounded at 35 KiB of event payload. |
+
+Production uses `time.monotonic` and an interruptible Event wait. Trusted composition
+can inject a monotonic clock and sleeper; tests advance a fake clock without real
+sleeps. The UTC acceptance clock remains separate, including if UTC reverses.
+Simulation time alone assigns T; cadence remains one integration second and one source
+batch per step for every mode. Pacing waits between translation and atomic delivery.
+After each actual commit it anchors the next interval at monotonic now: a late delivery
+slows the stream instead of accumulating catch-up debt, bursting, dropping samples or
+jumping T. Pause and resume reset only that wall anchor, never the simulation origin.
+
+`tep-agent-lab.live-plant-demo-policy/v0` keeps its confirmed three-event default.
+The lifecycle demo explicitly selects `tep-agent-lab.live-plant-demo-policy/v1` with
+35 events; all other OD-6 resource defaults stay the same. Every nonterminal event
+reserves terminal capacity. Pause additionally reserves its matching resume; exhaustion
+rejects that operation without changing state and still permits stop. This is lifecycle
+admission only; dynamic telemetry capacity-stop belongs to S3. Each transition appends
+to the existing durable trusted RunLog with last committed step and K.
+
+### Evidence, demo and remaining scope
+
+The focused suite replays the pinned simulator config/seed/cadence with identical
+source/clock/store identities under all three modes. Entire assigned batches and commit
+associations agree; wall delays differ. Event barriers prove pause/stop acknowledgment
+after commit, rejection while unresolved, stable T/K/sequence during a fake 100-second
+pause, continued simulation ticks after UTC reversal, slow-delivery reanchoring,
+owner enforcement, terminal event reservation and durable lifecycle cursors. Old
+snapshot current/history bytes agree during run, pause, resume and stop. Existing
+S1 tests retain full 300-step reads and frozen manifest/inventory evidence.
+
+Run the existing `live` command unchanged, or use the same dependency setup above:
+
+```powershell
+py -3.13 -m tep_agent_lab.live_plant_demo lifecycle
+py -3.13 -m tep_agent_lab.live_plant_demo lifecycle --pacing REAL_TIME
+```
+
+The lifecycle demo defaults to ACCELERATED, opens two frozen reads after pause,
+resumes until K grows by at least 10, then requests an operator stop. Its final T/K
+may include an in-flight batch resolved by pause or stop, so scheduling can affect
+which committed boundary appears; simulation values at an exact prefix reproduce.
+Both commands use automatically cleaned temporary artifacts.
+
+No capacity-stop, backpressure retry, new failure/restart policy, disposal or slot
+release is implemented here; these belong to LOS-B-S3 (#38). STOPPED still occupies
+the existing retained-session slot. The S1 fail-closed guard remains. The scheduled
+disturbance timeline belongs to LOS-B-S4 (#39). Retention lasts only in process;
+no durable telemetry recovery, rolling eviction, new UI or investigation handoff is
+claimed. No upstream repository, specs, ADRs, AGENTS.md or D0 surfaces are changed.

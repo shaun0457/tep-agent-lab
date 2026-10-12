@@ -1,17 +1,19 @@
 """Versioned trusted live delivery lifecycle, beside P0 and runtime lifecycles.
 
-LOS-B-S1 runs a finite producer thread, independently of public reads. Pause,
-pacing alternatives, capacity-stop, retry and restart belong to later slices.
+Finite delivery runs independently of reads, with trusted pacing and lifecycle.
+Capacity-stop, retry, restart and disposal belong to LOS-B-S3.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 import hashlib
+import math
 import secrets
 import threading
+import time
 from typing import Any
 
 from industrial_agent_runtime import checksum, to_jsonable
@@ -24,12 +26,54 @@ from .telemetry import SourceObservation
 LIVE_LIFECYCLE_VERSION = "tep-agent-lab.live-plant-lifecycle/v0"
 LIVE_PROVENANCE_VERSION = "tep-agent-lab.live-plant-provenance/v0"
 LIVE_POLICY_VERSION = "tep-agent-lab.live-plant-demo-policy/v0"
+LIVE_POLICY_V1 = "tep-agent-lab.live-plant-demo-policy/v1"
+LIVE_PACING_VERSION = "tep-agent-lab.live-plant-pacing/v0"
+
+
+class LivePacingMode(StrEnum):
+    DETERMINISTIC = "DETERMINISTIC"
+    ACCELERATED = "ACCELERATED"
+    REAL_TIME = "REAL_TIME"
+
+
+@dataclass(frozen=True)
+class LivePacingPolicy:
+    """Proposed wall delivery parameters; never used as physics input."""
+
+    version: str = LIVE_PACING_VERSION
+    mode: LivePacingMode = LivePacingMode.DETERMINISTIC
+    real_time_seconds_per_sim_second: float = 1.0
+    acceleration_factor: float = 20.0
+
+    def __post_init__(self) -> None:
+        if self.version != LIVE_PACING_VERSION or not isinstance(self.mode, LivePacingMode):
+            raise ValueError("unsupported live pacing policy")
+        for value in (self.real_time_seconds_per_sim_second, self.acceleration_factor):
+            if (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
+                raise ValueError("pacing values must be positive finite numbers")
+        if self.acceleration_factor < 1:
+            raise ValueError("acceleration factor must be >= 1")
+
+    @property
+    def seconds_per_tick(self) -> float:
+        if self.mode == LivePacingMode.DETERMINISTIC:
+            return 0.0
+        period = self.real_time_seconds_per_sim_second
+        return period / self.acceleration_factor if self.mode == LivePacingMode.ACCELERATED else period
+
+
+# The event makes production waits interruptible by trusted lifecycle requests.
+LiveSleeper = Callable[[float, threading.Event], Any]
+
+
+def interruptible_wait(seconds: float, wake: threading.Event) -> None:
+    wake.wait(seconds)
 
 
 class LivePlantState(StrEnum):
     PREPARED = "PREPARED"
     ACTIVE = "ACTIVE"
-    PAUSED = "PAUSED"  # reserved by the owning v0 lifecycle; no S1 transition
+    PAUSED = "PAUSED"
     STOPPED = "STOPPED"
     FAILED = "FAILED"
 
@@ -62,19 +106,22 @@ class LivePlantPolicy:
     simulator_history_cap: int = 0
     rollout_artifact_cap: int = 0
     session_cap: int = 1
+    pacing: LivePacingPolicy = field(default_factory=LivePacingPolicy)
 
     def __post_init__(self) -> None:
-        if self.version != LIVE_POLICY_VERSION:
+        if self.version not in (LIVE_POLICY_VERSION, LIVE_POLICY_V1):
             raise ValueError("unsupported live policy version")
+        if not isinstance(self.pacing, LivePacingPolicy):
+            raise TypeError("LivePacingPolicy required")
         for name in self.__dataclass_fields__:
-            if name != "version":
+            if name not in ("version", "pacing"):
                 value = getattr(self, name)
                 minimum = 0 if name in ("simulator_history_cap", "rollout_artifact_cap") else 1
                 if type(value) is not int or value < minimum:
                     raise ValueError(f"{name} must be an integer >= {minimum}")
         if (self.cadence_ticks != 1 or self.pending_batch_cap != 1 or self.session_cap != 1
                 or self.simulator_history_cap != 0 or self.rollout_artifact_cap != 0):
-            raise ValueError("unsupported S1 delivery/resource policy")
+            raise ValueError("unsupported live delivery/resource policy")
 
     def reserve(self, telemetry: LiveTelemetry) -> None:
         """Check whole trajectory bounds before any physics step or initial commit."""
@@ -132,13 +179,21 @@ class LivePlantSession:
 
     def __init__(self, *, session_id: str, telemetry: LiveTelemetry, policy: LivePlantPolicy,
                  initial: Mapping[str, Any], advance: Callable[[], Mapping[str, Any]],
-                 close_physics: Callable[[], None], history: RunLog) -> None:
+                 close_physics: Callable[[], None], history: RunLog,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 sleeper: LiveSleeper = interruptible_wait) -> None:
         # The host reserves before initializing physics; do not reserve twice.
         self.session_id, self.telemetry, self.policy = session_id, telemetry, policy
         self.history = history
         self._advance: Callable[[], Mapping[str, Any]] | None = advance
         self._close_physics: Callable[[], None] | None = close_physics
         self._condition = threading.Condition()
+        self._operation = threading.Lock()
+        self._wake = threading.Event()
+        self._request: str | None = None
+        self._monotonic, self._sleeper = monotonic, sleeper
+        self._anchor = 0.0
+        self._anchor_step = 0
         self._state = LivePlantState.PREPARED
         self._owner: str | None = None
         self._thread: threading.Thread | None = None
@@ -217,7 +272,9 @@ class LivePlantSession:
             "clock": self.telemetry.source.event_clock.as_json(),
             "store": self.telemetry.store.ref.as_json(),
             "reader_policy": to_jsonable(self.telemetry.policy),
-            "delivery": "synchronous-deterministic/v0",
+            "delivery": "synchronous-paced/v0",
+            "pacing": to_jsonable(self.policy.pacing),
+            "pacing_checksum": checksum(to_jsonable(self.policy.pacing)),
             "policy": to_jsonable(self.policy), "policy_checksum": checksum(to_jsonable(self.policy)),
             "read_lifetime": "retained in this process; no eviction or durable recovery"})
         if len(canonical_json(to_jsonable(self._provenance))) > self.policy.batch_byte_cap:
@@ -236,6 +293,11 @@ class LivePlantSession:
         # Separate trusted RunLog: never included in public lifecycle/event views.
         self.history.append(state.value, to_jsonable(event))
         self._events.append(event)
+
+    def _reserve_events(self, count: int) -> None:
+        # Always preserve terminal capacity; pause also reserves a resume.
+        if len(self._events) + count + 1 > self.policy.session_event_cap:
+            raise LivePlantError("lifecycle event capacity reserved for terminal outcome")
 
     def _record_diagnostic(self, exc: BaseException, reason: str) -> None:
         self._diagnostic = freeze_json({
@@ -267,6 +329,8 @@ class LivePlantSession:
         self._failure_reason = "ingest_translation_error"
         if len(encoded) > self.policy.batch_byte_cap:
             raise LivePlantError("source batch exceeds reserved frame size")
+        if step:
+            self._pace(step)
         result = self.telemetry.commit_batch(batch)
         association = LiveCommit(step, batch[0].sequence, expected_tick,
                                  result.ingest_sequence, self._pending_checksum)
@@ -276,16 +340,37 @@ class LivePlantSession:
             self._commits.append(association)
             self._pending = None
             self._pending_checksum = None
+            if step:
+                # A late commit starts a fresh wall interval. Never burst/drop to
+                # catch up with a missed schedule, or substitute wall time for T.
+                self._anchor, self._anchor_step = self._monotonic(), step
             self._condition.notify_all()
 
-    def start(self) -> None:
+    def _pace(self, step: int) -> None:
+        period = self.policy.pacing.seconds_per_tick
+        if not period:
+            return
+        deadline = self._anchor + (step - self._anchor_step) * self.policy.cadence_ticks * period
+        while True:
+            with self._condition:
+                if self._request is not None:
+                    return  # Resolve the assigned batch before acknowledgment.
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    return
+            self._sleeper(remaining, self._wake)
+
+    def start(self) -> str:
         """Acquire one owner and launch; public reads never call this operation."""
         with self._condition:
             if self._state != LivePlantState.PREPARED or self._owner is not None:
                 raise LivePlantError("live start requires an unowned PREPARED session")
             if self._provenance is None:
                 raise LivePlantError("live attachment has not been attested")
+            self._reserve_events(1)
             self._owner = secrets.token_hex(16)
+            owner = self._owner
+            self._anchor, self._anchor_step = self._monotonic(), self.last_step
             self._state = LivePlantState.ACTIVE
             self._event(self._state, "trusted_start")
             self._thread = threading.Thread(target=self._produce, name="live-plant", daemon=False)
@@ -296,15 +381,88 @@ class LivePlantSession:
                 self._record_diagnostic(exc, "source_unavailable")
                 self._finish(LivePlantState.FAILED, "source_unavailable")
                 raise
+            return owner
+
+    def _lifecycle(self, operation: str, owner: str, timeout: float) -> None:
+        if not self._operation.acquire(blocking=False):
+            raise LivePlantError("another trusted lifecycle operation is in flight")
+        try:
+            with self._condition:
+                if self._owner is None or not isinstance(owner, str) or owner != self._owner:
+                    raise LivePlantError("lifecycle operation requires the stepping owner")
+                allowed = {"pause": (LivePlantState.ACTIVE,),
+                           "resume": (LivePlantState.PAUSED,),
+                           "stop": (LivePlantState.ACTIVE, LivePlantState.PAUSED)}
+                if self._state not in allowed[operation]:
+                    raise LivePlantError("illegal live lifecycle transition")
+                if operation == "resume":
+                    self._reserve_events(1)
+                    self._event(LivePlantState.ACTIVE, "trusted_resume")
+                    self._anchor, self._anchor_step = self._monotonic(), self.last_step
+                    self._state = LivePlantState.ACTIVE
+                    self._condition.notify_all()
+                    return
+                if operation == "pause":
+                    self._reserve_events(2)
+                self._request = operation
+                self._wake.set()
+                self._condition.notify_all()
+                target = LivePlantState.PAUSED if operation == "pause" else LivePlantState.STOPPED
+                ready = self._condition.wait_for(
+                    lambda: self._state in (target, LivePlantState.STOPPED, LivePlantState.FAILED),
+                    timeout)
+                if not ready:
+                    # No acknowledgment and no invented resolution of a pending
+                    # batch. Withdraw the request; S3 owns retry/failure policy.
+                    self._request = None
+                    self._wake.clear()
+                    raise LivePlantError("lifecycle boundary has not resolved")
+                if self._state != target:
+                    raise LivePlantError("requested lifecycle transition unavailable")
+        finally:
+            self._operation.release()
+
+    def pause(self, *, owner: str, timeout: float = 30) -> None:
+        self._lifecycle("pause", owner, timeout)
+
+    def resume(self, *, owner: str) -> None:
+        self._lifecycle("resume", owner, 0)
+
+    def stop(self, *, owner: str, timeout: float = 30) -> None:
+        self._lifecycle("stop", owner, timeout)
+        self.wait(timeout)
+
+    def _boundary(self) -> bool:
+        """Only the producer acknowledges requests, with no unresolved batch."""
+        with self._condition:
+            if self._pending is not None:
+                raise LivePlantError("unresolved source batch at lifecycle boundary")
+            if self._request == "pause":
+                self._event(LivePlantState.PAUSED, "trusted_pause")
+                self._state = LivePlantState.PAUSED
+                self._anchor, self._anchor_step = self._monotonic(), self.last_step
+                self._request = None
+                self._wake.clear()
+                self._condition.notify_all()
+            self._condition.wait_for(lambda: self._state != LivePlantState.PAUSED
+                                     or self._request == "stop")
+            return self._request != "stop"
 
     def _produce(self) -> None:
         state, reason = LivePlantState.STOPPED, "configured_steps_reached"
         try:
             for step in range(1, self.policy.step_count + 1):
+                if not self._boundary():
+                    reason = "operator_stop"
+                    break
                 self._failure_reason = "source_unavailable"
                 if self._advance is None:
                     raise LivePlantError("producer resource unavailable")
                 self._deliver(step, self._advance())
+            else:
+                # Resolve requests that arrived during the final commit too.
+                if not self._boundary():
+                    reason = "operator_stop"
         except BaseException as exc:
             # Minimal fail-closed guard, no retry/recovery/failure policy from S3.
             # Retain type only, never copy raw simulator text into public logs.
@@ -330,6 +488,7 @@ class LivePlantSession:
         with self._condition:
             self._physics_closed = closed
             self._owner = None
+            self._request = None
             self._state = state
             self._event(state, reason)
             self._condition.notify_all()
@@ -354,7 +513,7 @@ class LivePlantSession:
                 raise LivePlantError("live producer has not ended")
 
     def close_prepared(self) -> None:
-        """Release an unstarted preparation; active stop arrives in LOS-B-S2."""
+        """Release an unstarted preparation; retained reads remain attached."""
         with self._condition:
             if self._state == LivePlantState.PREPARED:
                 self._finish(LivePlantState.STOPPED, "preparation_closed")

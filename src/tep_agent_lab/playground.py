@@ -29,6 +29,7 @@ import platform
 import re
 import shutil
 import threading
+import time
 from typing import Any
 
 import numpy
@@ -48,7 +49,8 @@ from .canonical_context import (_SHA256, CANONICAL_JSON_SHA256, RESERVED_NAMES,
 from .investigation import (RcaResultIngestor, RcaState, RcaStateStore,
                             readiness_deficiencies)
 from .persistence import RunLog, canonical_json
-from .live_plant import LivePlantError, LivePlantPolicy, LivePlantSession
+from .live_plant import (LivePlantError, LivePlantPolicy, LivePlantSession,
+                         LiveSleeper, interruptible_wait)
 from .run_telemetry import LiveTelemetry, RunTelemetry, TelemetryReadPolicy
 from .tep_world import ArtifactStore, ReferenceWorld, sanitize_observation
 from .tool_bridge import BRIDGE_VERSION, AnalysisToolBridge, BridgedToolSurface
@@ -636,7 +638,9 @@ class RunManager:
                  dependency_pins: Mapping[str, str],
                  materializers: Mapping[str, SourceMaterializer] | None = None,
                  clock: Callable[[], str] | None = None,
-                 telemetry_policy: TelemetryReadPolicy | None = None) -> None:
+                 telemetry_policy: TelemetryReadPolicy | None = None,
+                 live_monotonic: Callable[[], float] | None = None,
+                 live_sleeper: LiveSleeper = interruptible_wait) -> None:
         if not isinstance(revisions, SourceRevisions):
             raise TypeError("SourceRevisions required")
         if telemetry_policy is not None and not isinstance(telemetry_policy,
@@ -651,6 +655,8 @@ class RunManager:
         self.materializers = dict(materializers if materializers is not None else
                                   {TEP_SIM_REPOSITORY: PackageSourceMaterializer("tep_sim")})
         self.clock = clock or _now
+        self.live_monotonic = live_monotonic or time.monotonic
+        self.live_sleeper = live_sleeper
         self._lock = threading.Lock()
         self._runs: dict[str, _Run] = {}
         # OD-6 S1 retains one live attachment per manager, including stopped data.
@@ -944,6 +950,7 @@ class RunManager:
                 session_id=session_id, telemetry=telemetry, policy=policy, initial=initial,
                 advance=lambda: sanitize_observation(environment.step().observation),
                 close_physics=environment.close,
+                monotonic=self.live_monotonic, sleeper=self.live_sleeper,
                 history=RunLog(run.directory / "lifecycle" / f"live-{session_id}",
                                {"run_id": run.run_id, "session_id": session_id,
                                 "record": "tep-agent-lab.live-plant-lifecycle/v0"}))
@@ -961,11 +968,32 @@ class RunManager:
             self._read_live_provenance(run)
             return live
 
-    def start_live(self, run_id: str) -> None:
+    def start_live(self, run_id: str) -> str:
         """Explicit trusted producer start, distinct from Coordinator start."""
         live = self.live_session(run_id)
         try:
-            live.start()
+            return live.start()
+        except LivePlantError as exc:
+            raise LifecycleError(str(exc)) from exc
+
+    def pause_live(self, run_id: str, *, owner: str, timeout: float = 30) -> None:
+        """Trusted owner request, acknowledged only after a complete batch."""
+        try:
+            self.live_session(run_id).pause(owner=owner, timeout=timeout)
+        except LivePlantError as exc:
+            raise LifecycleError(str(exc)) from exc
+
+    def resume_live(self, run_id: str, *, owner: str) -> None:
+        """Continue the exact retained incarnation and committed cursor."""
+        try:
+            self.live_session(run_id).resume(owner=owner)
+        except LivePlantError as exc:
+            raise LifecycleError(str(exc)) from exc
+
+    def stop_live(self, run_id: str, *, owner: str, timeout: float = 30) -> None:
+        """Close producer physics after resolving its batch; preserve reads."""
+        try:
+            self.live_session(run_id).stop(owner=owner, timeout=timeout)
         except LivePlantError as exc:
             raise LifecycleError(str(exc)) from exc
 
