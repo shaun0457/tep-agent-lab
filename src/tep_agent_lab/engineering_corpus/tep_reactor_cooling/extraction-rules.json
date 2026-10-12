@@ -1,0 +1,298 @@
+{
+  "schema_version": "deterministic-extraction-rules/v1",
+  "rule_set_id": "tep-reactor-cooling.deterministic-extraction",
+  "version": "1",
+  "authored_at": "2026-10-11",
+  "units": [
+    "degC",
+    "kPa gauge",
+    "% command"
+  ],
+  "rules": [
+    {
+      "id": "tag-1",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(7\\)",
+        "Description": "Reactor pressure"
+      },
+      "item": {
+        "kind": "SIGNAL_MENTION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "target_kind": "SIGNAL",
+        "targets": [
+          "reactor.pressure_measurement"
+        ],
+        "mention_column": "Description"
+      }
+    },
+    {
+      "id": "limit-1-normal-upper",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(7\\)",
+        "Unit": "kPa gauge",
+        "Normal value/range": "Base [0-9]+(?:\\.[0-9]+)?; normal upper limit (?P<value>[0-9]+(?:\\.[0-9]+)?)"
+      },
+      "item": {
+        "kind": "OPERATING_LIMIT",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "variable": "reactor.pressure_measurement",
+        "constraint": "normal_upper",
+        "conditions": "normal operation",
+        "uncertainties": "Source extraction only; not engineering verification.",
+        "number_column": "Normal value/range",
+        "unit_column": "Unit"
+      }
+    },
+    {
+      "id": "limit-1-shutdown-high",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(7\\)",
+        "Unit": "kPa gauge",
+        "Alarm/shutdown limits": "Alarm unspecified; shutdown high (?P<value>[0-9]+(?:\\.[0-9]+)?)"
+      },
+      "item": {
+        "kind": "OPERATING_LIMIT",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "variable": "reactor.pressure_measurement",
+        "constraint": "shutdown_high",
+        "conditions": "shutdown constraint",
+        "uncertainties": "Source extraction only; not engineering verification.",
+        "number_column": "Alarm/shutdown limits",
+        "unit_column": "Unit"
+      }
+    },
+    {
+      "id": "tag-2",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(9\\)",
+        "Description": "Reactor process temperature"
+      },
+      "item": {
+        "kind": "SIGNAL_MENTION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "target_kind": "SIGNAL",
+        "targets": [
+          "reactor.temperature_measurement"
+        ],
+        "mention_column": "Description"
+      }
+    },
+    {
+      "id": "limit-2-normal-upper",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(9\\)",
+        "Unit": "degC",
+        "Normal value/range": "Base [0-9]+(?:\\.[0-9]+)?; normal upper limit (?P<value>[0-9]+(?:\\.[0-9]+)?)"
+      },
+      "item": {
+        "kind": "OPERATING_LIMIT",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "variable": "reactor.temperature_measurement",
+        "constraint": "normal_upper",
+        "conditions": "normal operation",
+        "uncertainties": "Source extraction only; not engineering verification.",
+        "number_column": "Normal value/range",
+        "unit_column": "Unit"
+      }
+    },
+    {
+      "id": "limit-2-shutdown-high",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(9\\)",
+        "Unit": "degC",
+        "Alarm/shutdown limits": "Alarm unspecified; shutdown high (?P<value>[0-9]+(?:\\.[0-9]+)?)"
+      },
+      "item": {
+        "kind": "OPERATING_LIMIT",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "variable": "reactor.temperature_measurement",
+        "constraint": "shutdown_high",
+        "conditions": "shutdown constraint",
+        "uncertainties": "Source extraction only; not engineering verification.",
+        "number_column": "Alarm/shutdown limits",
+        "unit_column": "Unit"
+      }
+    },
+    {
+      "id": "tag-3",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMEAS\\(21\\)",
+        "Description": "Reactor cooling-water outlet temperature"
+      },
+      "item": {
+        "kind": "SIGNAL_MENTION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "target_kind": "SIGNAL",
+        "targets": [
+          "reactor_cooling.outlet_temperature"
+        ],
+        "mention_column": "Description"
+      }
+    },
+    {
+      "id": "tag-4",
+      "form": "table",
+      "source_id": "tep-reactor-cooling.tags-and-limits",
+      "locator": "reactor-tag-and-limit-table/tags-and-constraints/table-1",
+      "matches": {
+        "Tag": "XMV\\(10\\)",
+        "Description": "Reactor cooling-water flow manipulation"
+      },
+      "item": {
+        "kind": "SIGNAL_MENTION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "target_kind": "SIGNAL",
+        "targets": [
+          "reactor_cooling.flow_actuator"
+        ],
+        "mention_column": "Description"
+      }
+    },
+    {
+      "id": "ambiguous-temperature",
+      "form": "phrase",
+      "source_id": "tep-reactor-cooling.operating-procedure",
+      "locator": "reactor-cooling-review-procedure/review-steps/list-1/step-4",
+      "phrase": "reactor-side temperature",
+      "item": {
+        "kind": "SIGNAL_MENTION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "target_kind": "SIGNAL",
+        "targets": [
+          "reactor.temperature_measurement",
+          "reactor_cooling.outlet_temperature"
+        ]
+      }
+    },
+    {
+      "id": "control-relation",
+      "form": "phrase",
+      "source_id": "tep-reactor-cooling.subsystem",
+      "locator": "reactor-and-cooling-water-loop/control-relation/paragraph-1",
+      "phrase": "XMV(10) manipulates reactor cooling-water flow. Increasing cooling flow is a\nmeans of increasing heat removal, subject to the thermal state and available\nutility conditions.",
+      "item": {
+        "kind": "CONTROL_RELATION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "variables": [
+          "reactor_cooling.flow_actuator",
+          "reactor"
+        ],
+        "conditions": "Subject to the thermal state and available utility conditions.",
+        "uncertainties": "Qualitative relation only; no controller tuning specified.",
+        "units": "qualitative"
+      }
+    },
+    {
+      "id": "competing-normal-limit",
+      "form": "phrase",
+      "source_id": "tep-reactor-cooling.troubleshooting",
+      "locator": "reactor-cooling-troubleshooting-note/intentional-competing-limit/paragraph-1",
+      "phrase": "The normal upper reactor process-temperature limit is 145 degC.",
+      "item": {
+        "kind": "OPERATING_LIMIT",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "variable": "reactor.temperature_measurement",
+        "constraint": "normal_upper",
+        "conditions": "normal operation",
+        "uncertainties": "Deliberate authored discrepancy; explicit review required.",
+        "value_text": "145 degC"
+      }
+    },
+    {
+      "id": "unverified-inlet-tag",
+      "form": "phrase",
+      "source_id": "tep-reactor-cooling.troubleshooting",
+      "locator": "reactor-cooling-troubleshooting-note/unverified-instrumentation-proposal/paragraph-1",
+      "phrase": "RCW-IN-TT is a reactor cooling-water inlet temperature\ntransmitter.",
+      "item": {
+        "kind": "SIGNAL_MENTION",
+        "scope": [
+          {
+            "kind": "ENTITY",
+            "id": "reactor"
+          }
+        ],
+        "target_kind": "SIGNAL",
+        "targets": [
+          "RCW-IN-TT"
+        ]
+      }
+    }
+  ]
+}
