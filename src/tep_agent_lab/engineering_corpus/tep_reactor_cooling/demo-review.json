@@ -1,0 +1,187 @@
+{
+  "schema_version": "recorded-demo-review/v1",
+  "visibility": "AGENT",
+  "input_revisions": {
+    "shaun0457/tep-agent-lab": "2b35d4604fea6054fc318cd97585ee89ae69b0dd",
+    "shaun0457/tep-sim": "ea0b7304090017b14ac13665595b6f5e9d195250"
+  },
+  "session_id": "cs-f0d46cb54f622ef32d73c14f6b22d6b5587e42d68e47e614c0e83d5d5bdb78e7",
+  "review_policy": "compiler-demo.recorded-human@1",
+  "principal": {
+    "kind": "HUMAN",
+    "identifier": "Demo reviewer Lin (human test principal)"
+  },
+  "reviewed_at": "2026-10-12T00:00:00Z",
+  "published_at": "2026-10-12T00:00:00Z",
+  "workspace_id": "recorded-human-demo",
+  "lineage_id": "reactor-cooling-demo",
+  "decisions": [
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-4610a483388a569759c5ba17b0812584d93c9f0972006173822ff4860dcde5b6",
+        "candidate_version": "219f11b99fea634d1a74179bf36f76dcfedf0ba9fb6f1dbff72f5fbc2fc20bcd"
+      },
+      "review_id": "demo-human-review-01",
+      "decision": "APPROVE",
+      "reason": "Accept the unambiguous reactor pressure table binding.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-c0f910f8b0623f212a306ce3610c752846578c50dc79bbfa150005a3bd28476e",
+        "candidate_version": "7e0b216a21f7b9dade6d7eb7fec53eae1dcc32291bd492106338e7022e6b9a26"
+      },
+      "review_id": "demo-human-review-02",
+      "decision": "APPROVE",
+      "reason": "Accept the table normal upper pressure limit as extracted literature reference knowledge.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-edebfc1c01b16c1ed449ab6a4afb4d229768124266a1bc8830528eac0444a24a",
+        "candidate_version": "412d5755732621070ea1ff2bd39f472099b207ecfef94276b58e5c2a76c04ec3"
+      },
+      "review_id": "demo-human-review-03",
+      "decision": "APPROVE",
+      "reason": "Accept the table shutdown pressure limit as extracted literature reference knowledge.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-2ac8e4897e8dcb432ab825a8af87f1c6164b24b764b3e0000ab43248954c2344",
+        "candidate_version": "db708a6a2367a6f21d0c75ee1cc81af5f69ea71c128f64f1751d4c78484ebb6f"
+      },
+      "review_id": "demo-human-review-04",
+      "decision": "APPROVE",
+      "reason": "Accept the unambiguous reactor process-temperature table binding.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-57edc3e306174dc0f6f49577fc21f1581645493fbdec4e6293225f525dea48ad",
+        "candidate_version": "9e998415e221f60c0ce38821981e5c7cb7dbf02c757b05019fa75a9b349e0bb1"
+      },
+      "review_id": "demo-human-review-05",
+      "decision": "APPROVE",
+      "reason": "Accept the 150 degC table normal upper limit; the competing 145 degC note is an intentional authored discrepancy and is rejected. Acceptance verifies extraction fidelity only.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-dbdcdc02c5e3972d55449d830c0926f0fd49c1cba3877981aaf2ebcde3891a32",
+        "candidate_version": "3f8415fff634fb5a62a93226c00a99d7324d85e2ce77443fda523d604f55c817"
+      },
+      "review_id": "demo-human-review-06",
+      "decision": "APPROVE",
+      "reason": "Accept the 175 degC table shutdown limit as extracted literature reference knowledge.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-7df57fcab8df76d01f61088eb4ef44c354e348bde0c50eddbadd31d6f543dd0f",
+        "candidate_version": "5015791a4d157a7cbad2aabbd2413e28d13095808791a0cce3a9be6590617edc"
+      },
+      "review_id": "demo-human-review-07",
+      "decision": "APPROVE",
+      "reason": "Accept the unambiguous XMEAS(21) reactor cooling-water outlet temperature binding.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-f429deff7de361498c5ac578d4c92bac3f8d2c253d6c2c82316257322e8bb8af",
+        "candidate_version": "70381de7d03f4605a3904fb8c62f07f2311e9f848dd31a780ae189f3f57109ac"
+      },
+      "review_id": "demo-human-review-08",
+      "decision": "APPROVE",
+      "reason": "Accept the unambiguous cooling-water flow manipulation table binding.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-6ed27c767ef869ad771b6b6d89d1a052a83c1b7a33e3ef643c810d443f215431",
+        "candidate_version": "668ea6d58f86f7650c7186c8c967f9fafbb61892bc8544475c240e47e63d691a"
+      },
+      "review_id": "demo-human-review-09",
+      "decision": "REMAP",
+      "reason": "For this recorded human demo, select reactor process temperature for this mention only, retaining reactor scope. The original phrase is ambiguous; this explicit choice is not a global alias or proof of source intent.",
+      "selected_target": {
+        "plant_context": {
+          "source_id": "compiler-demo.plant",
+          "repository": "shaun0457/tep-sim",
+          "git_revision": "ea0b7304090017b14ac13665595b6f5e9d195250",
+          "path_or_ref": "src/tep_sim/fixtures/tep_process_graph_v0_2_0.json",
+          "content_checksum": "edd41ae4dd7473d2a350ab5f11b694d651d241872ed2ea757f2a38d49426fe09",
+          "kind": "PROCESS_GRAPH",
+          "schema_version": "tep-sim.process-graph/v0",
+          "visibility": "AGENT",
+          "checksum_method": "sha256:canonical-json",
+          "provenance": {},
+          "governance": {}
+        },
+        "kind": "SIGNAL",
+        "target_id": "reactor.temperature_measurement"
+      },
+      "selected_scope_refs": [
+        {
+          "plant_context": {
+            "source_id": "compiler-demo.plant",
+            "repository": "shaun0457/tep-sim",
+            "git_revision": "ea0b7304090017b14ac13665595b6f5e9d195250",
+            "path_or_ref": "src/tep_sim/fixtures/tep_process_graph_v0_2_0.json",
+            "content_checksum": "edd41ae4dd7473d2a350ab5f11b694d651d241872ed2ea757f2a38d49426fe09",
+            "kind": "PROCESS_GRAPH",
+            "schema_version": "tep-sim.process-graph/v0",
+            "visibility": "AGENT",
+            "checksum_method": "sha256:canonical-json",
+            "provenance": {},
+            "governance": {}
+          },
+          "kind": "ENTITY",
+          "target_id": "reactor"
+        }
+      ]
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-b9f85eb5f106e6b64bd23ff7c6e89ddc098257b3d197703e963e854605814615",
+        "candidate_version": "5972d5352b9269259f035eab8d010f77081be4c9d8370fdc1c50950102859027"
+      },
+      "review_id": "demo-human-review-10",
+      "decision": "APPROVE",
+      "reason": "Accept the qualitative CONTROL_RELATION as literature reference knowledge under its stated thermal and utility conditions; no execution authority is promoted.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-0d19c3a3b061cdbd72c4503c34b62de9d2a8680d98ae102c067561b43af35d14",
+        "candidate_version": "85efaa04b4d8f116a1579c48dfd96b087e7660e8391619e2bc136599ad622431"
+      },
+      "review_id": "demo-human-review-11",
+      "decision": "REJECT",
+      "reason": "Reject the competing 145 degC normal upper limit: the table gives 150 degC and the note declares an intentional authored discrepancy. Preserve the conflict and both exact citations for audit.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    },
+    {
+      "candidate_ref": {
+        "candidate_id": "dc-420efb050ad19d89dfa49ff58c61396778631d1ced57667255ca2eac26a85ecd",
+        "candidate_version": "e9ee90080113c90213b3d65fd1cc07b677746083cc6d27aa8ed95c0ad1c68096"
+      },
+      "review_id": "demo-human-review-12",
+      "decision": "REJECT",
+      "reason": "Reject RCW-IN-TT: no matching signal exists in the pinned plant context; do not create an identity.",
+      "selected_target": null,
+      "selected_scope_refs": null
+    }
+  ],
+  "deferred": []
+}

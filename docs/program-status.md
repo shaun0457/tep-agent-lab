@@ -28,9 +28,9 @@ and the test constants. A NumPy bump edits only the JSON.
 
 | Question | Answer |
 |---|---|
-| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B/C, P1.2A compiler contracts, E0.2 desktop shell on application transport v1). No L1 exit criterion is fully met. |
+| Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B/C, P1.2A compiler contracts, P1.2B deterministic corpus-to-staged-revision path, E0.2 desktop shell on application transport v1). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
-| Current product milestone | P1.2B deterministic parser / fixture corpus: not started, unblocked (P1.2A merged) |
+| Current product milestone | P1.2C model-assisted extraction / semantic grounding: next, unblocked (P1.2B S1–S5 merged) |
 | Parallel product milestone | P1.1C canonical telemetry integration: merged; P1.4 can read live telemetry through snapshot-bound P0/application reads once its owning spec exists |
 | Current research milestone | D0.2C and D1 paused (owner decision 2026-10-11); D0.2C1 not started (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
@@ -51,7 +51,7 @@ Product track (P1 sequencing per ADR-004):
 | ADR-004 P1 re-baseline | merged (adds this file) |
 | ADR-005 context-layer product positioning | merged (accepted) |
 | P1.1C canonical telemetry integration | merged: event-time-bounded scans, run-scoped P0 ingestion, snapshot-bound P0 views, Application API v1 / transport v1 (desktop, Rust bridge, sidecar); note `docs/p1-1c-canonical-telemetry-integration.md`, spec `docs/specs/application-api-v1.md` |
-| P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B next, then P1.2C; P1.2D adds the repository transaction (one git commit, head CAS) and the review demo |
+| P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B merged (S1–S5, PRs #30–#33 plus the S5 completion PR): deterministic corpus, fragments, extraction, recorded human demo review and verified staged revision ([note](p1-2b-engineering-corpus.md)); P1.2C next; P1.2D adds the real review workflow and repository transaction (one git commit, head CAS) |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4A serving + Operational State | owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12; implementation not started; first slice LOS-A-S1; P1.4 split by owner decision 2026-10-11 |
 | P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; implementation not started; first slice LOS-B-S1; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
@@ -88,12 +88,13 @@ None.
 
 ## Next implementation gates
 
-- **P1.2B** can start now: a deterministic parser and fixture path for one small
-  engineering corpus that emits P1.2A `SourceFragmentRef`s, with the corpus authoring
-  provenance that context-compiler-v0 §Benchmark use requires. P1.2C (model-assisted
-  extraction and grounding) and P1.2D (review workflow, the repository publication
-  transaction that commits a P1.2A `StagedPublication`, and the revision demo) follow
-  (context-compiler-v0 §Recommended implementation split).
+- **P1.2B** is merged (S1–S5, PRs #30–#33 plus the S5 completion PR): exact corpus
+  registration, deterministic fragments/extraction and recorded human demo review
+  through verified non-canonical staging. **P1.2C** is next: model-assisted
+  extraction and grounding behind the same contracts. P1.2D follows with the real
+  review workflow and repository publication transaction that commits a P1.2A
+  `StagedPublication` with head CAS (context-compiler-v0 §Recommended implementation
+  split, §Publication; [P1.2B completion note](p1-2b-engineering-corpus.md)).
 - Write the **P1.3 owning spec** early, alongside P1.2B. The **P1.4 owning spec**
   [live-operational-state-v0.md](specs/live-operational-state-v0.md) is accepted,
   covering **P1.4A** (serving + Operational State) and **P1.4B** (live plant mode).

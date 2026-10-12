@@ -190,7 +190,8 @@ def register_corpus(*, repository: str, git_revision: str,
 
 
 def prepare_candidate_demo(*, repository: str, git_revision: str,
-                           plant_git_revision: str | None = None
+                           plant_git_revision: str | None = None,
+                           review_policy: str = "compiler-demo.no-review@1"
                            ) -> tuple[CompileSession, ExtractionRuleSet]:
     """Source-only demo over the pinned packaged plant and an in-memory empty R0.
 
@@ -238,13 +239,13 @@ def prepare_candidate_demo(*, repository: str, git_revision: str,
         (*registry.inventory(ProjectionScope.AGENT), graph_ref, r0_ref),
         process_graph_source_id=graph_ref.source_id, input_rule_set_source_id=r0_ref.source_id,
         plant_graph_loader=build_process_graph,
-        policies=CompilerPolicies(review_policy="compiler-demo.no-review@1"))
+        policies=CompilerPolicies(review_policy=review_policy))
     return session, rules
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("list", "fragments", "rows", "candidates"))
+    parser.add_argument("command", choices=("list", "fragments", "rows", "candidates", "stage"))
     parser.add_argument("source_id", nargs="?", help="registered source id for fragments/rows")
     parser.add_argument("--policy", choices=(PARSER_POLICY, TABLES_STEPS_POLICY),
                         default=TABLES_STEPS_POLICY)
@@ -253,10 +254,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plant-git-revision", help="trusted pinned graph repository revision")
     args = parser.parse_args(argv)
     if (args.command in ("fragments", "rows")) != (args.source_id is not None):
-        parser.error("fragments/rows requires one source-id; list/candidates takes none")
-    if args.command in ("rows", "candidates") and args.policy != TABLES_STEPS_POLICY:
-        parser.error("rows/candidates requires the tables/steps parser policy")
+        parser.error("fragments/rows requires one source-id; list/candidates/stage takes none")
+    if args.command in ("rows", "candidates", "stage") and args.policy != TABLES_STEPS_POLICY:
+        parser.error("rows/candidates/stage requires the tables/steps parser policy")
     try:
+        if args.command == "stage":
+            from .staged_revision_demo import (
+                format_stage_summary, load_recorded_review, stage_revision,
+            )
+            review_path = str(PurePosixPath(DEFAULT_MANIFEST).with_name("demo-review.json"))
+            raw = PackageSourceMaterializer("tep_agent_lab").read_bytes(review_path)
+            review = load_recorded_review(raw)
+            if args.repository not in review["input_revisions"]:
+                raise CorpusError("stage repository is not pinned by the recorded review")
+            # Recorded decisions pin sources; HEAD never implicitly carries reviews forward.
+            revision = review["input_revisions"][args.repository]
+            plant_revision = review["input_revisions"]["shaun0457/tep-sim"]
+            if ((args.git_revision is not None and args.git_revision != revision)
+                    or (args.plant_git_revision is not None
+                        and args.plant_git_revision != plant_revision)):
+                raise CorpusError("stage revision overrides conflict with recorded review inputs")
+            session, rules = prepare_candidate_demo(
+                repository=args.repository, git_revision=revision,
+                plant_git_revision=plant_revision, review_policy=review["review_policy"])
+            staged, summary = stage_revision(session, rules, raw)
+            for line in format_stage_summary(staged, summary):
+                print(line)
+            return 0
         revision = args.git_revision
         if revision is None:
             root = Path(__file__).resolve().parents[2]
