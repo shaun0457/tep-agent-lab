@@ -6,11 +6,13 @@ import inspect
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from industrial_agent_runtime import Visibility
 from industrial_agent_runtime.serialization import to_jsonable
 
 from tep_agent_lab import staged_revision_demo as pipeline
+from tep_agent_lab import context_compiler
 from tep_agent_lab.context_compiler import (
     PublicationError, candidate_from_record, verify_publication,
 )
@@ -88,18 +90,21 @@ class StagedRevisionDemoTests(unittest.TestCase):
         self.assertIsNone(candidate.proposed_target)
         self.assertEqual(len(candidate.alternative_targets), 2)
         self.assertEqual(row["validation"]["passed"], True)
-        self.assertEqual(next(item for item in summary.approved
-                              if item["decision"] == "REMAP")["decision"], "REMAP")
+        displayed = next(item for item in summary.approved if item["decision"] == "REMAP")
+        self.assertEqual(displayed["target"], row["validation"]["selected_target"])
+        self.assertEqual(displayed["scope_refs"], row["validation"]["selected_scope_refs"])
 
     def test_explicit_deferred_never_enters_approved_content(self):
         data = copy.deepcopy(self.data)
         row = next(row for row in data["decisions"] if row["decision"] == "REMAP")
         data["decisions"].remove(row)
         data["deferred"].append({"candidate_ref": row["candidate_ref"],
+                                 "review_id": "demo-deferred-01",
                                  "reason": "Await a further human source review."})
         staged, summary = self.stage(data)
         self.verify(staged, summary)
         self.assertEqual(len(summary.deferred), 1)
+        self.assertEqual(summary.deferred[0]["decision"], "DEFERRED")
         self.assertFalse(any(item["candidate_ref"] == row["candidate_ref"]
                              for item in self.items(staged)))
 
@@ -108,7 +113,9 @@ class StagedRevisionDemoTests(unittest.TestCase):
         row = next(row for row in data["decisions"] if row["decision"] == "REMAP")
         row.update(decision="KEEP_CANDIDATE", selected_target=None, selected_scope_refs=None)
         staged, summary = self.stage(data)
-        self.assertEqual(len(summary.deferred), 1)
+        self.assertEqual(len(summary.deferred), 0)
+        self.assertEqual(summary.excluded[0]["decision"], "KEEP_CANDIDATE")
+        self.assertEqual(summary.excluded[0]["exclusion"]["reason"], "KEEP_CANDIDATE")
         self.assertFalse(any(item["candidate_ref"] == row["candidate_ref"]
                              for item in self.items(staged)))
 
@@ -171,6 +178,7 @@ class StagedRevisionDemoTests(unittest.TestCase):
                 data["decisions"].append(copy.deepcopy(row))
             else:
                 data["deferred"].append({"candidate_ref": row["candidate_ref"],
+                                         "review_id": "demo-deferred-01",
                                          "reason": "Deferred."})
             with self.subTest(mode=mode), self.assertRaises(pipeline.RecordedReviewError):
                 self.stage(data)
@@ -202,6 +210,7 @@ class StagedRevisionDemoTests(unittest.TestCase):
         data = copy.deepcopy(self.data)
         row = data["decisions"].pop(8)
         data["deferred"].append({"candidate_ref": row["candidate_ref"],
+                                 "review_id": "demo-deferred-01",
                                  "reason": "Await human clarification."})
         first, summary = self.stage(data)
         log = strict_json_loads(dict(first.files)[first.review_log.path])
@@ -227,7 +236,106 @@ class StagedRevisionDemoTests(unittest.TestCase):
         self.verify(staged, summary)
         self.assertFalse(any(item["candidate_ref"] == row["candidate_ref"]
                              for item in self.items(staged)))
-        self.assertEqual(summary.deferred[0]["exclusion"]["reason"], "REMAP_INVALID")
+        self.assertEqual(len(summary.deferred), 0)
+        excluded = summary.excluded[0]
+        self.assertEqual(excluded["decision"], "REMAP")
+        self.assertEqual(excluded["exclusion"]["reason"], "REMAP_INVALID")
+        self.assertIsNone(excluded["target"])
+        text = "\n".join(pipeline.format_stage_summary(staged, summary))
+        self.assertIn("EXCLUDED: 1", text)
+        self.assertNotIn("-> nonexistent-signal", text)
+        self.assertIn("excluded: REMAP_INVALID", text)
+        self.assertIn("requested target: nonexistent-signal", text)
+
+    def test_approve_validation_failure_is_excluded(self):
+        data = copy.deepcopy(self.data)
+        row = next(r for r in data["decisions"] if r["decision"] == "REMAP")
+        row.update(decision="APPROVE", selected_target=None, selected_scope_refs=None)
+        staged, summary = self.stage(data)
+        self.assertEqual(len(summary.deferred), 0)
+        self.assertEqual(summary.excluded[0]["decision"], "APPROVE")
+        self.assertEqual(summary.excluded[0]["exclusion"]["reason"], "VALIDATION_FAILED")
+        self.assertFalse(any(item["candidate_ref"] == row["candidate_ref"]
+                             for item in self.items(staged)))
+
+    def test_knowledge_remap_displays_validated_scope(self):
+        data = copy.deepcopy(self.data)
+        row = next(r for r in data["decisions"] if r["review_id"] == "demo-human-review-02")
+        remap = next(r for r in data["decisions"] if r["decision"] == "REMAP")
+        row.update(decision="REMAP", selected_target=None,
+                   selected_scope_refs=[copy.deepcopy(remap["selected_target"])])
+        staged, summary = self.stage(data)
+        item = next(i for i in self.items(staged) if i["candidate_ref"] == row["candidate_ref"])
+        displayed = next(i for i in summary.approved if i["candidate_ref"] == row["candidate_ref"])
+        self.assertIsNone(displayed["target"])
+        self.assertEqual(displayed["scope_refs"], item["validation"]["selected_scope_refs"])
+        text = "\n".join(pipeline.format_stage_summary(staged, summary))
+        self.assertIn("REMAP OPERATING_LIMIT reactor.pressure_measurement normal_upper <= "
+                      "2895 kPa gauge scope: reactor.temperature_measurement", text)
+
+    def deferred_data(self):
+        data = copy.deepcopy(self.data)
+        for index in range(2):
+            row = data["decisions"].pop(0)
+            data["deferred"].append({"candidate_ref": row["candidate_ref"],
+                                     "review_id": f"demo-deferred-{index + 1}",
+                                     "reason": "Await human clarification."})
+        return data
+
+    def test_deferred_ids_required_and_unique_at_load_time(self):
+        for mode in ("missing", "duplicate-deferred", "duplicate-decision"):
+            data = self.deferred_data()
+            if mode == "missing":
+                del data["deferred"][0]["review_id"]
+            else:
+                data["deferred"][0]["review_id"] = (
+                    data["deferred"][1]["review_id"] if mode == "duplicate-deferred"
+                    else data["decisions"][0]["review_id"])
+            message = "schema keys" if mode == "missing" else "duplicate review id"
+            with self.subTest(mode=mode), self.assertRaisesRegex(pipeline.RecordedReviewError, message):
+                pipeline.load_recorded_review(canonical_json(data))
+
+    def test_deferred_order_does_not_change_revision(self):
+        data = self.deferred_data()
+        first, summary = self.stage(data)
+        data["deferred"].reverse()
+        second, other = self.stage(data)
+        self.assertEqual(first.files, second.files)
+        self.assertEqual(first.revision, second.revision)
+        self.assertEqual(summary.record(), other.record())
+
+    def test_stage_verifies_exactly_once_and_propagates_failure(self):
+        with patch.object(context_compiler, "verify_publication", wraps=verify_publication) as verify:
+            with patch.object(pipeline, "verify_publication", verify, create=True):
+                _, summary = self.stage()
+        self.assertEqual(verify.call_count, 1)
+        self.assertEqual(summary.verification, "PASS")
+        with patch.object(context_compiler, "verify_publication",
+                          side_effect=PublicationError("verification failed")):
+            with self.assertRaises(PublicationError):
+                self.stage()
+
+    def test_stage_cli_loads_review_once(self):
+        import contextlib
+        import io
+        from tep_agent_lab.engineering_corpus import main
+        with patch.object(pipeline, "load_recorded_review", wraps=pipeline.load_recorded_review) as load:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["stage"]), 0)
+        self.assertEqual(load.call_count, 1)
+
+    def test_stage_cli_rejects_non_corpus_repository(self):
+        import contextlib
+        import io
+        from tep_agent_lab.engineering_corpus import main
+        for repository in (PLANT_REPOSITORY, "other/corpus"):
+            output = io.StringIO()
+            with self.subTest(repository=repository), contextlib.redirect_stderr(output):
+                with self.assertRaises(SystemExit) as exit:
+                    main(["stage", "--repository", repository])
+                self.assertEqual(exit.exception.code, 1)
+                self.assertIn("stage requires corpus repository shaun0457/tep-agent-lab",
+                              output.getvalue())
 
     def test_generic_pipeline_has_no_domain_tag_literals(self):
         source = inspect.getsource(pipeline)
@@ -242,10 +350,18 @@ class StagedRevisionDemoTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             self.assertEqual(main(["stage"]), 0)
         text = output.getvalue()
-        for marker in ("APPROVE", "REMAP", "REJECT", "DEFERRED", "145", "RCW-IN-TT",
-                       "fragment:", "revision_id=", "checksum=", "verify_publication: PASS",
-                       "canonical=False"):
-            self.assertIn(marker, text)
+        rejected = text.split("REJECTED: 2\n", 1)[1].split("EXCLUDED: 0\n", 1)[0]
+        limit, signal = rejected.split("  REJECT SIGNAL_MENTION ", 1)
+        self.assertIn("  REJECT OPERATING_LIMIT reactor.temperature_measurement "
+                      "normal_upper <= 145 degC\n", limit)
+        self.assertIn("    excluded: REJECTED effective review status REJECTED\n", limit)
+        self.assertTrue(signal.startswith("RCW-IN-TT is a reactor cooling-water inlet temperature\n"))
+        self.assertIn("    excluded: REJECTED effective review status REJECTED\n", signal)
+        self.assertIn("  REMAP SIGNAL_MENTION reactor-side temperature -> "
+                      "reactor.temperature_measurement\n", text)
+        self.assertIn("DEFERRED: 0\n", text)
+        self.assertIn("staged files=4; canonical=False\n", text)
+        self.assertIn("verify_publication: PASS (stage_publication internal verification)\n", text)
 
 
 if __name__ == "__main__":

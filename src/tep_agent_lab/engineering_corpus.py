@@ -37,6 +37,8 @@ from .markdown_fragments import (
 DEFAULT_MANIFEST = (
     "src/tep_agent_lab/engineering_corpus/tep_reactor_cooling/manifest.json"
 )
+CORPUS_REPOSITORY = "shaun0457/tep-agent-lab"
+PLANT_REPOSITORY = "shaun0457/tep-sim"
 _CORPUS_ROOT = "src/tep_agent_lab/engineering_corpus/"
 _MANIFEST_KEYS = frozenset({"corpus_id", "version", "subsystem", "author", "authored_at",
                             "inputs_consulted", "leakage_statement", "documents",
@@ -212,12 +214,11 @@ def prepare_candidate_demo(*, repository: str, git_revision: str,
         pins = strict_json_loads((Path(__file__).resolve().parents[2] /
                                  "dependency-pins.json").read_bytes())
         plant_git_revision = pins["tep-sim"]
-    plant_repository = "shaun0457/tep-sim"
     graph_materializer = PackageSourceMaterializer("tep_sim")
     graph_path = "src/tep_sim/fixtures/" + PACKAGED_GRAPH_FIXTURE
     graph_bytes = graph_materializer.read_bytes(graph_path)
     graph_ref = ContextSourceRef(
-        source_id="compiler-demo.plant", repository=plant_repository,
+        source_id="compiler-demo.plant", repository=PLANT_REPOSITORY,
         git_revision=plant_git_revision, path_or_ref=graph_path,
         content_checksum=content_checksum(graph_bytes, CANONICAL_JSON_SHA256),
         kind="PROCESS_GRAPH", schema_version=GRAPH_SCHEMA_VERSION, visibility=Visibility.AGENT)
@@ -234,8 +235,8 @@ def prepare_candidate_demo(*, repository: str, git_revision: str,
             return empty.serialize() if path == r0_path else materializer.read_bytes(path)
 
     session = CompileSession.prepare(
-        {repository: git_revision, plant_repository: plant_git_revision},
-        {repository: DemoMaterializer(), plant_repository: graph_materializer},
+        {repository: git_revision, PLANT_REPOSITORY: plant_git_revision},
+        {repository: DemoMaterializer(), PLANT_REPOSITORY: graph_materializer},
         (*registry.inventory(ProjectionScope.AGENT), graph_ref, r0_ref),
         process_graph_source_id=graph_ref.source_id, input_rule_set_source_id=r0_ref.source_id,
         plant_graph_loader=build_process_graph,
@@ -249,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("source_id", nargs="?", help="registered source id for fragments/rows")
     parser.add_argument("--policy", choices=(PARSER_POLICY, TABLES_STEPS_POLICY),
                         default=TABLES_STEPS_POLICY)
-    parser.add_argument("--repository", default="shaun0457/tep-agent-lab")
+    parser.add_argument("--repository", default=CORPUS_REPOSITORY)
     parser.add_argument("--git-revision", help="trusted exact revision (required outside a checkout)")
     parser.add_argument("--plant-git-revision", help="trusted pinned graph repository revision")
     args = parser.parse_args(argv)
@@ -259,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("rows/candidates/stage requires the tables/steps parser policy")
     try:
         if args.command == "stage":
+            if args.repository != CORPUS_REPOSITORY:
+                raise CorpusError(f"stage requires corpus repository {CORPUS_REPOSITORY}")
             from .staged_revision_demo import (
                 format_stage_summary, load_recorded_review, stage_revision,
             )
@@ -269,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise CorpusError("stage repository is not pinned by the recorded review")
             # Recorded decisions pin sources; HEAD never implicitly carries reviews forward.
             revision = review["input_revisions"][args.repository]
-            plant_revision = review["input_revisions"]["shaun0457/tep-sim"]
+            plant_revision = review["input_revisions"][PLANT_REPOSITORY]
             if ((args.git_revision is not None and args.git_revision != revision)
                     or (args.plant_git_revision is not None
                         and args.plant_git_revision != plant_revision)):
@@ -277,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             session, rules = prepare_candidate_demo(
                 repository=args.repository, git_revision=revision,
                 plant_git_revision=plant_revision, review_policy=review["review_policy"])
-            staged, summary = stage_revision(session, rules, raw)
+            staged, summary = stage_revision(session, rules, review)
             for line in format_stage_summary(staged, summary):
                 print(line)
             return 0

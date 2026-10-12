@@ -18,7 +18,6 @@ from .context_compiler import (
     CandidateBinding, CandidateRef, CompileSession, CompilerError, CompilerPolicies,
     CompilerWorkspace, DerivedInput, FragmentLocation, PlantTargetRef, PrincipalKind,
     PublicationRequest, ReviewDecision, ReviewPrincipal, StagedPublication, WorkspaceAnchor,
-    verify_publication,
 )
 from .deterministic_extraction import ExtractionRuleSet, extract_candidates
 from .persistence import strict_json_loads
@@ -81,18 +80,18 @@ def load_recorded_review(raw: bytes) -> Mapping[str, Any]:
                 raise RecordedReviewError("decisions and deferred must be arrays")
             for row in data[field]:
                 _keys(row, _DECISION_FIELDS if field == "decisions"
-                      else {"candidate_ref", "reason"})
+                      else {"candidate_ref", "review_id", "reason"})
                 ref = CandidateRef.from_record(row["candidate_ref"])
                 if ref in seen:
                     raise RecordedReviewError("candidate must be decided or deferred exactly once")
                 seen.add(ref)
                 _text(row["reason"])
-                if field == "deferred":
-                    continue
                 _text(row["review_id"])
                 if row["review_id"] in review_ids:
                     raise RecordedReviewError("duplicate review id")
                 review_ids.add(row["review_id"])
+                if field == "deferred":
+                    continue
                 decision = ReviewDecision(row["decision"])
                 if decision is ReviewDecision.REMAP:
                     if not isinstance(row["selected_scope_refs"], list):
@@ -103,6 +102,8 @@ def load_recorded_review(raw: bytes) -> Mapping[str, Any]:
                         PlantTargetRef.from_record(row["selected_target"])
                 elif row["selected_target"] is not None or row["selected_scope_refs"] is not None:
                     raise RecordedReviewError("only REMAP stores a selected binding")
+        # Deferrals are an unordered set of explicit decisions, not log positions.
+        data["deferred"].sort(key=lambda row: CandidateRef.from_record(row["candidate_ref"]))
         return freeze_json(data)
     except RecordedReviewError:
         raise
@@ -124,6 +125,7 @@ class StageSummary:
     visibility: str
     approved: tuple[Mapping[str, Any], ...]
     rejected: tuple[Mapping[str, Any], ...]
+    excluded: tuple[Mapping[str, Any], ...]
     deferred: tuple[Mapping[str, Any], ...]
     unsupported_count: int
     revision_id: str
@@ -134,27 +136,29 @@ class StageSummary:
     def record(self) -> dict[str, Any]:
         return to_jsonable({
             "visibility": self.visibility, "approved": list(self.approved),
-            "rejected": list(self.rejected), "deferred": list(self.deferred),
+            "rejected": list(self.rejected), "excluded": list(self.excluded),
+            "deferred": list(self.deferred),
             "unsupported_count": self.unsupported_count, "revision_id": self.revision_id,
             "revision_checksum": self.revision_checksum, "verification": self.verification})
 
 
-def stage_revision(session: CompileSession, rules: ExtractionRuleSet, review_raw: bytes
+def stage_revision(session: CompileSession, rules: ExtractionRuleSet,
+                   review_raw: bytes | Mapping[str, Any]
                    ) -> tuple[StagedPublication, StageSummary]:
     """Registered corpus -> S3 fragments -> S4 candidates -> recorded human review
-    -> stage_publication -> independent verify_publication, entirely in memory.
+    -> stage_publication (including its internal verification), entirely in memory.
 
     No implicit carry-forward: exact session, source revisions and candidate versions
     must match the recorded DATA. Excluded candidates remain in audit artifacts only.
     The summary carries session visibility, including counts and exclusion reasons.
+    A mapping input must be the validated immutable output of load_recorded_review.
+    PASS reports stage_publication's successful internal verify_publication call.
     """
-    data = load_recorded_review(review_raw)
+    data = load_recorded_review(review_raw) if isinstance(review_raw, bytes) else review_raw
     if data["visibility"] != session.visibility.value:
         raise RecordedReviewError("recorded review visibility differs from the compile session")
     if (data["session_id"] != session.session_id
-            or data["review_policy"] != session.policies.review_policy
-            or dict(data["input_revisions"]) !=
-            {ref.repository: ref.git_revision for ref in session.inventory}):
+            or data["review_policy"] != session.policies.review_policy):
         raise RecordedReviewError("recorded review belongs to a stale input/session/policy tuple")
     result = extract_candidates(session, rules)
     candidates = {c.ref: c for c in result.candidates}
@@ -178,10 +182,10 @@ def stage_revision(session: CompileSession, rules: ExtractionRuleSet, review_raw
                 tuple(PlantTargetRef.from_record(t) for t in row["selected_scope_refs"]))
         # Explicit deferral is the contract's KEEP_CANDIDATE decision. Retain its
         # human rationale in the same append-only log, including revision identity.
-        for index, row in enumerate(data["deferred"], start=1):
+        for row in data["deferred"]:
             workspace.append_review(
                 CandidateRef.from_record(row["candidate_ref"]), ReviewDecision.KEEP_CANDIDATE,
-                review_id=f"recorded-deferred-{index}", principal=principal, reason=row["reason"],
+                review_id=row["review_id"], principal=principal, reason=row["reason"],
                 reviewed_at=data["reviewed_at"], visibility=session.visibility)
         request = PublicationRequest(
             lineage_id=data["lineage_id"], candidate_refs=tuple(candidates),
@@ -191,35 +195,42 @@ def stage_revision(session: CompileSession, rules: ExtractionRuleSet, review_raw
     resolver = extraction_input_resolver(rules)
     staged = workspace.stage_publication(session, request, derived_input_resolver=resolver)
     anchor = workspace.anchor()
-    verify_publication(dict(staged.files), staged.revision, session,
-                       anchor=anchor, derived_input_resolver=resolver)
-    approved_refs = {CandidateRef.from_record(item["candidate_ref"]) for field in
-                     ("approved_bindings", "approved_knowledge", "rule_scope_bindings")
-                     for item in staged.document[field]}
+    approved_items = {CandidateRef.from_record(item["candidate_ref"]): item for field in
+                      ("approved_bindings", "approved_knowledge", "rule_scope_bindings")
+                      for item in staged.document[field]}
     recorded_rows = {CandidateRef.from_record(row["candidate_ref"]): row for row in rows}
     exclusions = {item.candidate_ref: item for item in staged.exclusions}
     review_ids = {item.candidate_ref: item.review_id for item in workspace.review_log()}
-    groups: dict[str, list[Mapping[str, Any]]] = {"approved": [], "rejected": [], "deferred": []}
+    groups: dict[str, list[Mapping[str, Any]]] = {
+        "approved": [], "rejected": [], "excluded": [], "deferred": []}
     for candidate in result.candidates:
         row = recorded_rows[candidate.ref]
         decision = row.get("decision", "DEFERRED")
-        group = ("approved" if candidate.ref in approved_refs else
-                 "rejected" if decision == ReviewDecision.REJECT.value else "deferred")
+        item = approved_items.get(candidate.ref)
+        group = ("approved" if item is not None else
+                 "rejected" if decision == ReviewDecision.REJECT.value else
+                 "deferred" if decision == "DEFERRED" else "excluded")
         detail = (candidate.mention_text if isinstance(candidate, CandidateBinding)
                   else candidate.rule.extraction.claim)
-        target = (row["selected_target"] if decision == ReviewDecision.REMAP.value else
-                  candidate.proposed_target.record() if isinstance(candidate, CandidateBinding)
-                  and candidate.proposed_target else None)
+        target = None if item is None else item["validation"]["selected_target"]
+        scope = () if item is None else item["validation"]["selected_scope_refs"]
+        requested_target = (row["selected_target"] if item is None
+                            and decision == ReviewDecision.REMAP.value else None)
+        requested_scope = (row["selected_scope_refs"] if item is None
+                           and decision == ReviewDecision.REMAP.value else ())
         groups[group].append(freeze_json({
             "candidate_ref": candidate.ref.record(), "kind": candidate.extraction_kind.value,
             "description": detail, "decision": decision, "reason": row["reason"],
             "review_id": review_ids[candidate.ref], "target": target,
+            "scope_refs": scope, "requested_target": requested_target,
+            "requested_scope_refs": requested_scope,
             "fragments": [f.record() for f in candidate.fragments()],
-            "exclusion": None if candidate.ref in approved_refs
+            "exclusion": None if item is not None
             else exclusions[candidate.ref].record()}))
     return staged, StageSummary(
         session.visibility.value, tuple(groups["approved"]), tuple(groups["rejected"]),
-        tuple(groups["deferred"]), len(result.unsupported), staged.document["revision_id"],
+        tuple(groups["excluded"]), tuple(groups["deferred"]), len(result.unsupported),
+        staged.document["revision_id"],
         staged.revision.content_checksum, "PASS", anchor)
 
 
@@ -227,10 +238,13 @@ def format_stage_summary(staged: StagedPublication, summary: StageSummary) -> tu
     lines = [f"Recorded HUMAN demo decisions; visibility={summary.visibility}; "
              f"canonical={staged.canonical}"]
     for label, rows in (("APPROVED", summary.approved), ("REJECTED", summary.rejected),
+                        ("EXCLUDED", summary.excluded),
                         ("DEFERRED", summary.deferred)):
         lines.append(f"{label}: {len(rows)}")
         for row in rows:
             target = "" if row["target"] is None else " -> " + row["target"]["target_id"]
+            if row["decision"] == "REMAP" and row["target"] is None and row["scope_refs"]:
+                target = " scope: " + ",".join(t["target_id"] for t in row["scope_refs"])
             lines.append(f"  {row['decision']} {row['kind']} {row['description']}{target}")
             lines.append(f"    reason: {row['reason']} review={row['review_id']}")
             for record in row["fragments"]:
@@ -239,11 +253,17 @@ def format_stage_summary(staged: StagedPublication, summary: StageSummary) -> tu
                              f"{location.semantic_locator} "
                              f"fragment:{record['fragment_id'][:15]}")
             if row["exclusion"] is not None:
+                requested = ("; requested target: " + row["requested_target"]["target_id"]
+                             if row["requested_target"] is not None else "")
+                if row["requested_scope_refs"]:
+                    requested += "; requested scope: " + ",".join(
+                        t["target_id"] for t in row["requested_scope_refs"])
                 lines.append(f"    excluded: {row['exclusion']['reason']} "
-                             f"{row['exclusion']['detail']}")
+                             f"{row['exclusion']['detail']}{requested}")
     lines.extend((f"UNSUPPORTED extraction entries: {summary.unsupported_count}",
                   f"revision_id={summary.revision_id}",
                   f"checksum={summary.revision_checksum}",
                   f"staged files={len(staged.files)}; canonical={staged.canonical}",
-                  f"verify_publication: {summary.verification}"))
+                  f"verify_publication: {summary.verification} "
+                  "(stage_publication internal verification)"))
     return tuple(lines)

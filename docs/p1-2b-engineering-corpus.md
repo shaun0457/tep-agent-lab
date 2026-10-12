@@ -468,24 +468,29 @@ existing P1.2A API; there is no second review/publication model.
 [candidates + recorded HUMAN demo decisions]
   -- exact-version coverage + append_review --> [CompilerWorkspace review log]
 [workspace + PublicationRequest]
-  -- stage_publication --> [StagedPublication (canonical=False)]
-[staged files + trusted session/anchor + exact extraction-input resolver]
-  -- verify_publication --> [PASS + source-traced plant knowledge summary]
+  -- stage_publication (one internal verify_publication) --> [StagedPublication (canonical=False)]
+[successfully verified staged items + recorded decisions + exclusions]
+  -- format_stage_summary --> [PASS + source-traced plant knowledge summary]
 ```
 
 `staged_revision_demo.stage_revision(session, rules, review_raw)` returns a
 `StagedPublication` and immutable `StageSummary`. It composes S3/S4 and the P1.2A
 workspace, review, request, staging and verification contracts, entirely in memory.
+It accepts exact review bytes or the validated immutable mapping returned by
+`load_recorded_review`; the CLI loads the DATA once and passes that mapping.
 The generic module contains no domain tag literals or simulator imports. Its
 summary retains the session visibility, including counts and exclusion reasons.
 The exact extraction-rule bytes resolve by method/role and are checksum-validated
-by both staging and independent verification.
+by staging and its internal verification. The summary reports that single
+`verify_publication` call inside P1.2A `stage_publication`; the demo does not run a
+second verification with the same session objects. Verification failure returns
+no summary. Separate artifact-tampering tests still exercise the verifier directly.
 
 ### Recorded human demo review DATA
 
 `engineering_corpus/tep_reactor_cooling/demo-review.json` is strict, versioned
 `recorded-demo-review/v1` DATA. The named principal is
-`Demo reviewer Lin (human test principal)`, with role `HUMAN`. These are recorded
+`demo-reviewer (human test principal)`, with role `HUMAN`. These are recorded
 human demo decisions requested for the test scenario, **not an automated acceptance
 policy**, model/Agent decisions or authenticated real-world human sign-off.
 `compiler-demo.recorded-human@1` identifies the review replay protocol; it registers
@@ -498,6 +503,10 @@ exact `CandidateRef` per decision. The demo pins the corpus-containing base
 `2b35d4604fea6054fc318cd97585ee89ae69b0dd` and the existing simulator pin. It does
 not silently substitute a newer HEAD. A changed source/parser/extractor/plant/policy
 requires newly recorded reviews; CLI revision overrides that disagree fail closed.
+The stage CLI accepts only the corpus repository `shaun0457/tep-agent-lab`; it
+rejects the plant repository or any other repository before preparing a session.
+The exact session id checks the frozen source inventory without flattening it to
+one revision per repository.
 The input R0 remains the explicitly marked in-memory empty S4 demo rule set.
 
 All 12 candidates are accounted for:
@@ -518,17 +527,30 @@ All 12 candidates are accounted for:
   troubleshooting note declares an intentional discrepancy. REJECT RCW-IN-TT
   because the pinned plant context has no matching signal.
 - No candidate is deferred in the recorded baseline. Explicit `deferred` entries
-  replay as `KEEP_CANDIDATE` ReviewRecords, preserving the human rationale in the
-  same immutable log and revision identity. They never enter the approved set.
+  require exactly `candidate_ref`, `review_id` and `reason`, and replay as
+  `KEEP_CANDIDATE` ReviewRecords, preserving the human rationale and explicit id in
+  the same immutable log and revision identity. All ids must be unique across
+  decisions and deferrals. The loader sorts deferrals by full CandidateRef, so
+  reordering otherwise identical deferrals produces byte-identical staged files.
+  They never enter the approved set.
 
 The loader rejects duplicate JSON keys, unknown schema keys/versions, unsupported
-principals, duplicate decisions and malformed target refs. Before creating the
+principals, duplicate decisions/review ids and malformed target refs. Before creating the
 workspace, replay requires exact equality between extracted and recorded candidate
 versions: unknown, stale, missing, or decided-plus-deferred entries fail closed.
 REJECT/KEEP_CANDIDATE and invalid selections remain auditable exclusions, never
 approved bindings or Rules. Audit artifacts retain the full candidate/review log;
 the 150 degC item's conflict citation intentionally retains the rejected 145 degC
 fragment. Removing that history would violate P1.2A provenance requirements.
+
+The summary has four groups: APPROVED for items accepted into the staged content;
+REJECTED for recorded REJECT decisions; EXCLUDED for other decisions denied staging
+(including REMAP_INVALID, VALIDATION_FAILED, STALE_REVIEW and explicit
+KEEP_CANDIDATE); DEFERRED only for explicit entries in the DATA's `deferred` array.
+Each excluded row retains its recorded decision and the contract exclusion reason.
+Approved REMAP rows show the staged validation's selected target, or selected scope
+for knowledge. Excluded REMAP rows have no binding arrow: any requested target/scope
+appears only next to the exclusion reason, labelled as requested.
 
 ### S5 evidence and visible demo
 
@@ -538,6 +560,10 @@ Rule axes, rejection and explicit deferral, original/remapped targets, exact sou
 fragments and ReviewRecords, byte-identical repeated staging, tampering with every
 artifact, stale/unknown/missing/duplicate reviews, strict DATA, changed review
 rationale changing revision identity, generic literals and the stage CLI.
+The review-fix regressions cover EXCLUDED versus explicit DEFERRED, validated
+binding/knowledge REMAP output, mandatory unique deferred ids, deferred order
+independence, one internal verification and failure propagation, one CLI DATA load,
+repository rejection, and specific CLI REJECT/REMAP rows and verification output.
 `tests/staged_revision_demo_golden.json` pins the strict summary and all four
 staged-file SHA-256 checksums; `.gitattributes` fixes its bytes to LF.
 
@@ -547,17 +573,18 @@ python -m tep_agent_lab.engineering_corpus stage
 
 The output lists each accepted plant binding/limit/relation, reviewer decision and
 reason, source semantic locator and fragment id prefix; it also lists rejections,
-deferrals, unsupported extraction count and the staged revision identity:
+exclusions, explicit deferrals, unsupported extraction count and the staged revision identity:
 
 ```text
 APPROVED: 10
 REJECTED: 2
+EXCLUDED: 0
 DEFERRED: 0
 UNSUPPORTED extraction entries: 20
-revision_id=ecr-8e213e4dc65aa99b86504f50534d26a87d9c705e9b6631d455cede37996478a6
-checksum=ddde3adfa26837f72d84c4d93135791d8f5514542bb20de11a9aa6616f0994f4
+revision_id=ecr-32140d7b6870d7cc6f35726e87e5ab8eb0dd5fab1b556aeaf09d1b5fa93e538d
+checksum=f2649802cea37c0e56c6752fe88ac886abc8ddf95466ab33a4bcc0fcbadd42ce
 staged files=4; canonical=False
-verify_publication: PASS
+verify_publication: PASS (stage_publication internal verification)
 ```
 
 No staged file or log is written by the demo. No head advances, no Agent tool is

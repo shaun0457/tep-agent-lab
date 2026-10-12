@@ -9,7 +9,7 @@
   "review_policy": "compiler-demo.recorded-human@1",
   "principal": {
     "kind": "HUMAN",
-    "identifier": "Demo reviewer Lin (human test principal)"
+    "identifier": "demo-reviewer (human test principal)"
   },
   "reviewed_at": "2026-10-12T00:00:00Z",
   "published_at": "2026-10-12T00:00:00Z",
