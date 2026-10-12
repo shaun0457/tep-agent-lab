@@ -15,6 +15,7 @@ Phase 0 Design Freeze is complete for the first RCA/runtime-lab boundary. Progra
 
 - [`plant-telemetry-contract-v0.md`](plant-telemetry-contract-v0.md) — frozen P1.0 plant context, engineering context, telemetry (clocks, SignalSample, append store, T/K snapshots, bounded reads), ContextSnapshot and evidence-provenance semantics. Sequencing per ADR-004.
 - [`context-compiler-v0.md`](context-compiler-v0.md) — P1.2 Engineering Knowledge Context Compiler: exact source fragments, typed extraction, semantic grounding, Candidate Context, deterministic validation, application-only human review, and immutable EngineeringContextRevision publication that reuses the RuleRegistry through a rule-set source revision.
+- [`live-operational-state-v0.md`](live-operational-state-v0.md) — proposed P1.4A snapshot-bound deterministic Q2 interpretation and serving; P1.4B long-lived simulated plant delivery, lifecycle, pacing, capacity and scheduled disturbance timeline; records owner decisions of 2026-10-12 and SC-1/SC-2 resolution through the Playground live-mode amendment.
 
 ## Application / Playground
 
