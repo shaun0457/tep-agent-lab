@@ -409,6 +409,20 @@ class InMemoryTimeSeriesStore:
         self._streams: dict[tuple[str, str], _EventIndex] = {}
         # _frontier[r - 1]: maximum event tick committed at or before revision r.
         self._frontier: list[int] = []
+        self._disposed = False
+
+    def dispose(self) -> None:
+        """Invalidate this incarnation and release records, including cached readers."""
+        with self._lock:
+            self._disposed = True
+            self._by_identity.clear()
+            self._streams.clear()
+            self._frontier.clear()
+
+    def _require_retained(self) -> None:
+        # Caller holds the store lock. Disposed is unavailable, never NO_DATA.
+        if self._disposed:
+            raise SnapshotUnavailable("store incarnation is no longer retained")
 
     @property
     def bindings(self) -> Mapping[str, frozenset[str]]:
@@ -417,6 +431,7 @@ class InMemoryTimeSeriesStore:
     @property
     def current_ingest_sequence(self) -> int:
         with self._lock:
+            self._require_retained()
             return self._revision
 
     def require_binding(self, source_id: str, signal_id: str) -> None:
@@ -455,6 +470,7 @@ class InMemoryTimeSeriesStore:
         if not batch:
             raise TelemetryError("batch must contain at least one sample")
         with self._lock:
+            self._require_retained()
             revision = self._revision + 1
             pending: dict[SampleIdentity, AcceptedRecord] = {}
             records: list[AcceptedRecord] = []
@@ -484,6 +500,7 @@ class InMemoryTimeSeriesStore:
                  ingest_sequence: int | None = None) -> TelemetryReadSnapshot:
         """Freeze T and K together; K defaults to the current committed revision."""
         with self._lock:
+            self._require_retained()
             revision = self._revision if ingest_sequence is None else ingest_sequence
         snapshot = TelemetryReadSnapshot(self.ref, revision, event_horizon,
                                          self.event_clock, self.context_ref,
@@ -502,6 +519,7 @@ class InMemoryTimeSeriesStore:
         if snapshot.event_clock != self.event_clock:
             raise ClockMismatch("snapshot clock domain differs from the store clock")
         with self._lock:
+            self._require_retained()
             if snapshot.ingest_sequence > self._revision:
                 raise SnapshotUnavailable("snapshot ingest_sequence is not yet committed")
         return snapshot
@@ -510,6 +528,7 @@ class InMemoryTimeSeriesStore:
         """Maximum event time committed at or before revision K; None for an empty prefix."""
         _checked_int("ingest_sequence", ingest_sequence, minimum=0)
         with self._lock:
+            self._require_retained()
             if ingest_sequence > self._revision:
                 raise SnapshotUnavailable("ingest_sequence is not yet committed")
             if ingest_sequence == 0:
@@ -530,6 +549,7 @@ class InMemoryTimeSeriesStore:
         """
         self.require_binding(source_id, signal_id)
         with self._lock:
+            self._require_retained()
             index = self._streams.get((source_id, signal_id))
             if index is None:
                 return []
@@ -543,6 +563,7 @@ class InMemoryTimeSeriesStore:
         """(eligible count, last sample in read order) at or before T under K."""
         self.require_binding(source_id, signal_id)
         with self._lock:
+            self._require_retained()
             index = self._streams.get((source_id, signal_id))
             if index is None:
                 return 0, None
@@ -556,6 +577,7 @@ class InMemoryTimeSeriesStore:
         """Latest event under T/K; frontier is O(1), slow reads share one budget."""
         revision, horizon = snapshot.ingest_sequence, snapshot.event_horizon.ticks
         with self._lock:
+            self._require_retained()
             if revision == 0:
                 return None
             frontier = self._frontier[revision - 1]
@@ -566,6 +588,7 @@ class InMemoryTimeSeriesStore:
         best = None
         for index in indexes:
             with self._lock:
+                self._require_retained()
                 blocks, tail = index.visible(revision)
             _, record = _last_at_or_before(blocks, tail, horizon, budget)
             if record is not None and (best is None or
