@@ -28,7 +28,7 @@ from tep_sim.evaluator_bindings import build_evaluator_disturbance_bindings
 
 from .canonical_context import (CanonicalContextRegistry, ProjectionScope,
                                 inventory_checksum, visible_in)
-from .run_telemetry import CANONICAL_SOURCE, RunTelemetry, sample_json, snapshot_json
+from .run_telemetry import TelemetryReads, sample_json, snapshot_json
 from .telemetry import TimePoint
 from .tep_world import ARTIFACT_OWNER, leakage_findings
 
@@ -171,8 +171,11 @@ class RunQueries:
             except ViewUnavailable:
                 pass
         session = run.session
+        live = None if session is None else session._live_plant
+        released = (session is not None and
+                    (live.physics_closed if live is not None else session.closed))
         body["resources"] = {"session": ("NONE" if session is None else
-                                         "RELEASED" if session.closed else "LIVE")}
+                                         "RELEASED" if released else "LIVE")}
         if run.outcome is not None:
             body["outcome"] = self._outcome(run.outcome, scope)
         return self._view("RunSummaryView", scope, body)
@@ -257,6 +260,8 @@ class RunQueries:
     def telemetry(self, *, variables: tuple[str, ...] | None = None,
                   max_records: int = 120) -> Any:
         """Bounded sanitized reference history; dense data stays artifact-backed."""
+        if self._run.live_provenance_checksum is not None:
+            raise ViewUnavailable("legacy telemetry is unavailable for live runs; use snapshot reads")
         scope = self.scope
         if type(max_records) is not int or not 1 <= max_records <= MAX_TELEMETRY_RECORDS:
             raise ValueError(f"max_records must be in [1, {MAX_TELEMETRY_RECORDS}]")
@@ -291,7 +296,7 @@ class RunQueries:
     # -- Canonical telemetry views (P1.1C) -----------------------------------------------
     # Snapshot-bound reads of the run-scoped canonical store. They never touch the world,
     # so they need no world lock; they exist while the in-process session is live.
-    def _run_telemetry(self) -> RunTelemetry:
+    def _run_telemetry(self) -> TelemetryReads:
         session = self._run.session
         telemetry = None if session is None else getattr(session, "telemetry", None)
         if telemetry is None:
@@ -305,7 +310,7 @@ class RunQueries:
         snapshot = telemetry.snapshot(event_horizon_ticks=event_horizon_ticks,
                                       ingest_sequence=ingest_sequence)
         return self._view("TelemetrySnapshotView", self.scope, {
-            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(snapshot)})
+            "source": telemetry.description, "snapshot": snapshot_json(snapshot)})
 
     def telemetry_current(self, signal_id: str, *,
                           snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -315,7 +320,7 @@ class RunQueries:
         result = telemetry.reader.current(source_id=telemetry.source_id, signal_id=signal_id,
                                           snapshot=pinned)
         return self._view("CanonicalCurrentView", self.scope, {
-            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(pinned),
+            "source": telemetry.description, "snapshot": snapshot_json(pinned),
             "source_id": result.source_id, "signal_id": result.signal_id,
             "status": str(result.status), "eligible_count": result.eligible_count,
             "sample": None if result.sample is None else sample_json(result.sample),
@@ -335,7 +340,7 @@ class RunQueries:
             event_start=TimePoint(clock, start), event_end=TimePoint(clock, end),
             max_points=max_points, snapshot=pinned)
         return self._view("CanonicalHistoryView", self.scope, {
-            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(pinned),
+            "source": telemetry.description, "snapshot": snapshot_json(pinned),
             "source_id": result.source_id, "signal_id": result.signal_id,
             "event_start_ticks": start, "event_end_ticks": end,
             "max_points": result.max_points, "eligible_count": result.eligible_count,
@@ -350,7 +355,7 @@ class RunQueries:
         pinned = telemetry.resolve_snapshot(snapshot)
         last = telemetry.reader.last_event_time(pinned)
         return self._view("CanonicalLastEventView", self.scope, {
-            "source": CANONICAL_SOURCE, "snapshot": snapshot_json(pinned),
+            "source": telemetry.description, "snapshot": snapshot_json(pinned),
             "status": "NO_DATA" if last is None else "DATA",
             "event_ticks": None if last is None else last.ticks})
 

@@ -48,8 +48,9 @@ from .canonical_context import (_SHA256, CANONICAL_JSON_SHA256, RESERVED_NAMES,
 from .investigation import (RcaResultIngestor, RcaState, RcaStateStore,
                             readiness_deficiencies)
 from .persistence import RunLog, canonical_json
-from .run_telemetry import RunTelemetry, TelemetryReadPolicy
-from .tep_world import ArtifactStore, ReferenceWorld
+from .live_plant import LivePlantError, LivePlantPolicy, LivePlantSession
+from .run_telemetry import LiveTelemetry, RunTelemetry, TelemetryReadPolicy
+from .tep_world import ArtifactStore, ReferenceWorld, sanitize_observation
 from .tool_bridge import BRIDGE_VERSION, AnalysisToolBridge, BridgedToolSurface
 from .tool_surface import TOOL_SURFACE_VERSION, BlindRcaToolSurface
 
@@ -548,14 +549,17 @@ class RunSession:
     closed: bool = False
     # Run-scoped canonical telemetry (P1.1C); survives close() for snapshot reads.
     _telemetry: RunTelemetry | None = None
+    _live_plant: LivePlantSession | None = None
 
     @property
-    def telemetry(self) -> RunTelemetry | None:
-        """Read-only: sealed before READY; no public path ingests into it."""
-        return self._telemetry
+    def telemetry(self) -> RunTelemetry | LiveTelemetry | None:
+        """Read attachment selected at preparation; no read can change it."""
+        return self._telemetry if self._live_plant is None else self._live_plant.telemetry
 
     def close(self) -> None:
         """Release simulator handles; in-memory history/lineage stays readable."""
+        if self._live_plant is not None:
+            self._live_plant.close_prepared()
         if self.closed:
             return
         self.closed = True
@@ -580,6 +584,7 @@ class _Run:
     attempts: int = 0
     session_dir: Path | None = None
     manifest_checksum: str | None = None
+    live_provenance_checksum: str | None = None
     session: RunSession | None = None
     outcome: RunOutcome | None = None
     owner: str | None = None
@@ -648,6 +653,8 @@ class RunManager:
         self.clock = clock or _now
         self._lock = threading.Lock()
         self._runs: dict[str, _Run] = {}
+        # OD-6 S1 retains one live attachment per manager, including stopped data.
+        self._live_run_id: str | None = None
 
     # -- identity and lookup ------------------------------------------------------------
     def _checked_id(self, run_id: Any) -> str:
@@ -686,6 +693,7 @@ class RunManager:
                     raise LifecycleError("lifecycle log names an invalid session directory")
                 run.status, run.session_dir = RunStatus.READY, directory / payload["session"]
                 run.manifest_checksum = payload["manifest_checksum"]
+                run.live_provenance_checksum = payload.get("live_provenance_checksum")
             elif event["type"] == "RUN_STARTED":
                 run.status, run.owner = RunStatus.RUNNING, payload["owner"]
             elif event["type"] in ("RUN_COMPLETED", "RUN_FAILED"):
@@ -730,7 +738,8 @@ class RunManager:
                 context_sources: Sequence[ContextSourceRef],
                 case_setup: Callable[[ReferenceWorld], CaseSetupAttestation | None]
                 | None = None,
-                benchmark: BenchmarkRefs | None = None) -> RunManifest:
+                benchmark: BenchmarkRefs | None = None,
+                live_policy: LivePlantPolicy | None = None) -> RunManifest:
         """Resolve/attest every source, assemble the session, publish one manifest.
 
         All or nothing: on any failure the session is torn down, no manifest is
@@ -740,28 +749,46 @@ class RunManager:
         """
         if benchmark is not None and not isinstance(benchmark, BenchmarkRefs):
             raise TypeError("BenchmarkRefs required")
+        if live_policy is not None and not isinstance(live_policy, LivePlantPolicy):
+            raise TypeError("LivePlantPolicy required")
+        if live_policy is not None and (case_setup is not None or benchmark is not None):
+            raise PrepareError("S1 live mode accepts only a clean simulated source")
         with self._lock:
             run = self._record(run_id)
             if run.status != RunStatus.CREATED or run.preparing:
                 raise LifecycleError(f"prepare requires CREATED, run is {run.status.value}")
             if run.request_object is None:
                 raise LifecycleError("a run loaded from disk cannot be prepared again")
+            if live_policy is not None:
+                if self._live_run_id is not None:
+                    raise LifecycleError("live attachment capacity is already reserved")
+                self._live_run_id = run_id
             run.preparing = True
             run.attempts += 1
             attempt = f"prepare-{run.attempts:04d}"
         session = None
         try:
             session, manifest = self._assemble(run, attempt, provider, tuple(context_sources),
-                                               case_setup, benchmark or BenchmarkRefs())
+                                               case_setup, benchmark or BenchmarkRefs(), live_policy)
+            live_checksum = None
+            if session._live_plant is not None:
+                data = canonical_json(to_jsonable(session._live_plant.provenance))
+                _write_once(session.directory / "live-session-provenance.json",
+                            data)
+                live_checksum = hashlib.sha256(data).hexdigest()
             _write_once(session.directory / "manifest.json",
                         canonical_json(manifest.record()))
             with self._lock:
-                run.lifecycle.append("RUN_READY", {
+                ready = {
                     "at": manifest.prepared_at, "session": attempt,
                     "manifest_checksum": manifest.checksum(),
-                    "agent_manifest_checksum": checksum(manifest.agent_projection())})
+                    "agent_manifest_checksum": checksum(manifest.agent_projection())}
+                if live_checksum is not None:
+                    ready["live_provenance_checksum"] = live_checksum
+                run.lifecycle.append("RUN_READY", ready)
                 run.status, run.session, run.session_dir = RunStatus.READY, session, session.directory
                 run.manifest_checksum = manifest.checksum()
+                run.live_provenance_checksum = live_checksum
             return manifest
         except BaseException as exc:
             if session is not None:
@@ -769,6 +796,8 @@ class RunManager:
             # No partial manifest and no unreferenced hidden-truth world artifacts.
             shutil.rmtree(run.directory / attempt, ignore_errors=True)
             with self._lock:
+                if live_policy is not None:
+                    self._live_run_id = None
                 run.lifecycle.append("PREPARE_FAILED", {
                     "at": self.clock(), "session": attempt,
                     "category": type(exc).__name__, "detail": _failure_text(exc)})
@@ -815,7 +844,8 @@ class RunManager:
             raise PrepareError("numpy is not the pinned numerical stack version")
 
     def _assemble(self, run: _Run, attempt: str, provider: ModelProvider,
-                  sources: tuple[ContextSourceRef, ...], case_setup, benchmark: BenchmarkRefs
+                  sources: tuple[ContextSourceRef, ...], case_setup, benchmark: BenchmarkRefs,
+                  live_policy: LivePlantPolicy | None = None
                   ) -> tuple[RunSession, RunManifest]:
         request = run.request_object
         if provider is None or not callable(getattr(provider, "generate", None)):
@@ -833,6 +863,9 @@ class RunManager:
         if len(graph_sources) != 1:
             raise PrepareError("exactly one AGENT-visible PROCESS_GRAPH source is required")
         graph_source = graph_sources[0]
+        if live_policy is not None and (len(sources) != 1 or request.allowed_tools != ()
+                                       or request.world.record_interval != live_policy.cadence_ticks):
+            raise PrepareError("S1 live mode requires only the graph, no tools, and fixed cadence")
         graph = build_process_graph(registry.resolve(graph_source.source_id,
                                                      ProjectionScope.AGENT).json())
         provenance = graph.provenance
@@ -875,11 +908,66 @@ class RunManager:
                 environment.close()
             raise
         try:
-            return session, self._manifest(run, attempt, request, session, registry,
-                                           graph_source, benchmark_record)
+            if live_policy is not None:
+                # The investigation environment is CLOSED before a live producer
+                # can exist. The latter has no ReferenceWorld or Agent tool handle.
+                session.close()
+                session._live_plant = self._prepare_live(run, session, graph_source, live_policy)
+            manifest = self._manifest(run, attempt, request, session, registry,
+                                      graph_source, benchmark_record)
+            if session._live_plant is not None:
+                session._live_plant.attach(manifest, graph_source)
+            return session, manifest
         except BaseException:
             session.close()
             raise
+
+    def _prepare_live(self, run: _Run, session: RunSession, graph_source: ContextSourceRef,
+                      policy: LivePlantPolicy) -> LivePlantSession:
+        """Process-pack producer over the pinned public tep-sim stepping interface."""
+        import secrets
+
+        world = run.request_object.world
+        session_id = secrets.token_hex(16)
+        telemetry = LiveTelemetry(
+            run_id=run.run_id, session_id=session_id, graph=session.world.graph,
+            graph_source=graph_source, visibility_policy_ref=f"{VISIBILITY_POLICY_VERSION}#AGENT",
+            clock=self.clock, policy=self.telemetry_policy)
+        policy.reserve(telemetry)
+        environment = TEPEnvironment(EnvironmentConfig(
+            seed=world.seed, backend=world.backend, control_mode=world.control_mode,
+            record_interval=world.record_interval, upstream_revision=UPSTREAM_REVISION,
+            artifact_directory=session.directory / "live-physics"))
+        try:
+            initial = sanitize_observation(environment.reset())
+            return LivePlantSession(
+                session_id=session_id, telemetry=telemetry, policy=policy, initial=initial,
+                advance=lambda: sanitize_observation(environment.step().observation),
+                close_physics=environment.close,
+                history=RunLog(run.directory / "lifecycle" / f"live-{session_id}",
+                               {"run_id": run.run_id, "session_id": session_id,
+                                "record": "tep-agent-lab.live-plant-lifecycle/v0"}))
+        except BaseException:
+            environment.close()
+            raise
+
+    def live_session(self, run_id: str) -> LivePlantSession:
+        """Trusted host handle; lifecycle diagnostics never enter public read models."""
+        with self._lock:
+            run = self._record(run_id)
+            live = None if run.session is None else run.session._live_plant
+            if run.status != RunStatus.READY or live is None:
+                raise LifecycleError("run has no retained live attachment")
+            self._read_live_provenance(run)
+            return live
+
+    def start_live(self, run_id: str) -> None:
+        """Explicit trusted producer start, distinct from Coordinator start."""
+        live = self.live_session(run_id)
+        try:
+            live.start()
+        except LivePlantError as exc:
+            raise LifecycleError(str(exc)) from exc
 
     @staticmethod
     def _checked_attestation(applied: Any, benchmark: BenchmarkRefs,
@@ -1025,6 +1113,8 @@ class RunManager:
             if run.session is None:
                 raise LifecycleError("READY session is not live in this process; "
                                      "v0 sessions are not resumable")
+            if run.session._live_plant is not None:
+                raise LifecycleError("live mode requires trusted start_live; no investigation handoff")
             owner = f"execution-owner:{run.run_id}"
             started_at = self.clock()
             run.world_lock.acquire()  # waits only for an in-flight live-world read
@@ -1087,6 +1177,18 @@ class RunManager:
                         "runtime_task_status_owner": "RcaStateStore (runtime TaskStateStore)"})
 
     # -- durable reads ------------------------------------------------------------------
+    @staticmethod
+    def _read_live_provenance(run: _Run) -> Mapping[str, Any] | None:
+        if run.live_provenance_checksum is None:
+            return None
+        try:
+            data = (run.session_dir / "live-session-provenance.json").read_bytes()
+        except OSError as exc:
+            raise LifecycleError("published live provenance is unavailable") from exc
+        if hashlib.sha256(data).hexdigest() != run.live_provenance_checksum:
+            raise LifecycleError("live provenance bytes differ from the checksum published at READY")
+        return freeze_json(json.loads(data))
+
     def _read_outcome(self, run: _Run, expected: str) -> RunOutcome:
         data = (run.session_dir / "outcome.json").read_bytes()
         if hashlib.sha256(data).hexdigest() != expected:
@@ -1106,6 +1208,7 @@ class RunManager:
         data = path.read_bytes()
         if hashlib.sha256(data).hexdigest() != run.manifest_checksum:
             raise LifecycleError("manifest bytes differ from the checksum published at READY")
+        self._read_live_provenance(run)
         return RunManifest.from_record(json.loads(data))
 
     def queries(self, run_id: str, scope: ProjectionScope = ProjectionScope.AGENT):

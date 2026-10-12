@@ -41,7 +41,7 @@ from .telemetry import (TELEMETRY_CONTRACT_VERSION, AppendResult, ClockDescripto
                         SourceObservation, StoreRef, TelemetryError, TelemetryIngestor,
                         TelemetryReadSnapshot, TelemetryRequestError, TimePoint, TimeSeriesReader,
                         _checked_id, _checked_int, _coerce, parse_event_resolution)
-from .tep_telemetry import TEPSimulationSource
+from .tep_telemetry import TEP_SOURCE_VERSION, TEPSimulationSource
 
 TELEMETRY_STORE_ID = "p0-reference-telemetry"
 CANONICAL_SOURCE = "P0 run-scoped canonical reference telemetry"
@@ -125,7 +125,75 @@ class TelemetrySealed(TelemetryError):
     """Ingestion was attempted after the run telemetry was sealed at READY."""
 
 
-class RunTelemetry:
+class TelemetryReads:
+    """Shared snapshot-bound queries; no ingestion or stepping authority."""
+
+    description = CANONICAL_SOURCE
+
+    # -- snapshots ----------------------------------------------------------------------
+    def snapshot(self, *, event_horizon_ticks: int | None = None,
+                 ingest_sequence: int | None = None) -> TelemetryReadSnapshot:
+        """Freeze (T, K) once. K defaults to now; T to the K frontier, or tick 0 if empty."""
+        if ingest_sequence is None:
+            ingest_sequence = self.store.current_ingest_sequence
+        _request_int("ingest_sequence", ingest_sequence)
+        if event_horizon_ticks is None:
+            frontier = self.store.event_frontier(ingest_sequence)
+            event_horizon_ticks = 0 if frontier is None else frontier.ticks
+        _request_int("event_horizon_ticks", event_horizon_ticks)
+        return self.store.snapshot(TimePoint(self.store.event_clock.clock_id,
+                                             event_horizon_ticks), ingest_sequence)
+
+    def resolve_snapshot(self, value: Any) -> TelemetryReadSnapshot:
+        """Rebuild an exact public snapshot object, check its ref, resolve it here."""
+        body = _exact(value, SNAPSHOT_KEYS, "object")
+        if body["contract"] != TELEMETRY_CONTRACT_VERSION:
+            raise SnapshotUnavailable("unsupported snapshot contract")
+        store = _exact(body["store"], _STORE_KEYS, "store")
+        horizon = _exact(body["event_horizon"], _HORIZON_KEYS, "event_horizon")
+        clock = _exact(body["event_clock"], _CLOCK_KEYS, "event_clock")
+        resolution = parse_event_resolution(clock["resolution"])
+        # Validate client fields explicitly. Constructor/store invariant failures below
+        # are server faults and must never be reclassified by a broad base-class catch.
+        try:
+            for name in _STORE_KEYS:
+                _checked_id(name, store[name])
+            for name, value in (("clock_id", horizon["clock_id"]),
+                                ("clock_id", clock["clock_id"]),
+                                ("context_ref", body["context_ref"]),
+                                ("visibility_policy_ref", body["visibility_policy_ref"])):
+                _checked_id(name, value)
+            if not isinstance(clock["kind"], str):
+                raise TelemetryRequestError("snapshot clock kind must be a string")
+            kind = _coerce(ClockKind, "kind", clock["kind"])
+            if clock["origin"] is not None:
+                _checked_id("origin", clock["origin"])
+            elif kind in (ClockKind.SIMULATION, ClockKind.UTC):
+                raise TelemetryRequestError("snapshot clock requires an origin")
+            _checked_int("ingest_sequence", body["ingest_sequence"], minimum=0)
+            _checked_int("event_horizon_ticks", horizon["ticks"], minimum=0)
+        except TelemetryError:
+            raise TelemetryRequestError("invalid snapshot arguments") from None
+        pinned = TelemetryReadSnapshot(
+            StoreRef(store["store_id"], store["incarnation"], store["namespace"]),
+            body["ingest_sequence"], TimePoint(horizon["clock_id"], horizon["ticks"]),
+            ClockDescriptor(clock["clock_id"], kind, resolution, clock["origin"]),
+            body["context_ref"], body["visibility_policy_ref"])
+        if body["snapshot_ref"] != pinned.snapshot_ref:
+            raise SnapshotUnavailable("snapshot reference does not match its contents")
+        return self.store.resolve(pinned)
+
+    def history_bounds(self, snapshot: TelemetryReadSnapshot, event_start_ticks: Any,
+                       event_end_ticks: Any) -> tuple[int, int]:
+        """Default end = T and start = max(0, end - max_interval_ticks), resolved once."""
+        end = (snapshot.event_horizon.ticks if event_end_ticks is None
+               else _request_int("event_end_ticks", event_end_ticks))
+        start = (max(0, end - self.policy.max_interval_ticks) if event_start_ticks is None
+                 else _request_int("event_start_ticks", event_start_ticks))
+        return start, end
+
+
+class RunTelemetry(TelemetryReads):
     """Source, store, ingestor and reader of one prepared P0 session (one incarnation)."""
 
     def __init__(self, *, run_id: str, graph: ProcessGraph, graph_source: ContextSourceRef,
@@ -203,64 +271,41 @@ class RunTelemetry:
         with self._lock:
             return self._commit(batch, self._ingest_time())
 
-    # -- snapshots ----------------------------------------------------------------------
-    def snapshot(self, *, event_horizon_ticks: int | None = None,
-                 ingest_sequence: int | None = None) -> TelemetryReadSnapshot:
-        """Freeze (T, K) once. K defaults to now; T to the K frontier, or tick 0 if empty."""
-        if ingest_sequence is None:
-            ingest_sequence = self.store.current_ingest_sequence
-        _request_int("ingest_sequence", ingest_sequence)
-        if event_horizon_ticks is None:
-            frontier = self.store.event_frontier(ingest_sequence)
-            event_horizon_ticks = 0 if frontier is None else frontier.ticks
-        _request_int("event_horizon_ticks", event_horizon_ticks)
-        return self.store.snapshot(TimePoint(self.store.event_clock.clock_id,
-                                             event_horizon_ticks), ingest_sequence)
 
-    def resolve_snapshot(self, value: Any) -> TelemetryReadSnapshot:
-        """Rebuild an exact public snapshot object, check its ref, resolve it here."""
-        body = _exact(value, SNAPSHOT_KEYS, "object")
-        if body["contract"] != TELEMETRY_CONTRACT_VERSION:
-            raise SnapshotUnavailable("unsupported snapshot contract")
-        store = _exact(body["store"], _STORE_KEYS, "store")
-        horizon = _exact(body["event_horizon"], _HORIZON_KEYS, "event_horizon")
-        clock = _exact(body["event_clock"], _CLOCK_KEYS, "event_clock")
-        resolution = parse_event_resolution(clock["resolution"])
-        # Validate client fields explicitly. Constructor/store invariant failures below
-        # are server faults and must never be reclassified by a broad base-class catch.
-        try:
-            for name in _STORE_KEYS:
-                _checked_id(name, store[name])
-            for name, value in (("clock_id", horizon["clock_id"]),
-                                ("clock_id", clock["clock_id"]),
-                                ("context_ref", body["context_ref"]),
-                                ("visibility_policy_ref", body["visibility_policy_ref"])):
-                _checked_id(name, value)
-            if not isinstance(clock["kind"], str):
-                raise TelemetryRequestError("snapshot clock kind must be a string")
-            kind = _coerce(ClockKind, "kind", clock["kind"])
-            if clock["origin"] is not None:
-                _checked_id("origin", clock["origin"])
-            elif kind in (ClockKind.SIMULATION, ClockKind.UTC):
-                raise TelemetryRequestError("snapshot clock requires an origin")
-            _checked_int("ingest_sequence", body["ingest_sequence"], minimum=0)
-            _checked_int("event_horizon_ticks", horizon["ticks"], minimum=0)
-        except TelemetryError:
-            raise TelemetryRequestError("invalid snapshot arguments") from None
-        pinned = TelemetryReadSnapshot(
-            StoreRef(store["store_id"], store["incarnation"], store["namespace"]),
-            body["ingest_sequence"], TimePoint(horizon["clock_id"], horizon["ticks"]),
-            ClockDescriptor(clock["clock_id"], kind, resolution, clock["origin"]),
-            body["context_ref"], body["visibility_policy_ref"])
-        if body["snapshot_ref"] != pinned.snapshot_ref:
-            raise SnapshotUnavailable("snapshot reference does not match its contents")
-        return self.store.resolve(pinned)
+class LiveTelemetry(TelemetryReads):
+    """Explicit production attachment, independent of every sealed P0 store.
 
-    def history_bounds(self, snapshot: TelemetryReadSnapshot, event_start_ticks: Any,
-                       event_end_ticks: Any) -> tuple[int, int]:
-        """Default end = T and start = max(0, end - max_interval_ticks), resolved once."""
-        end = (snapshot.event_horizon.ticks if event_end_ticks is None
-               else _request_int("event_end_ticks", event_end_ticks))
-        start = (max(0, end - self.policy.max_interval_ticks) if event_start_ticks is None
-                 else _request_int("event_start_ticks", event_start_ticks))
-        return start, end
+    Only the trusted live producer commits here. Registration is fixed at
+    construction, and all reads use the identical P0 snapshot resolver/reader.
+    """
+
+    description = "clean deterministic simulated stream"
+    source_version = TEP_SOURCE_VERSION
+
+    def __init__(self, *, run_id: str, session_id: str, graph: ProcessGraph,
+                 graph_source: ContextSourceRef, visibility_policy_ref: str,
+                 clock: Callable[[], str], policy: TelemetryReadPolicy) -> None:
+        self.policy = policy
+        self.source = TEPSimulationSource(
+            graph, source_id=f"tep-live:{run_id}:{session_id}",
+            clock_id=f"tep-live-clock:{run_id}:{session_id}",
+            clock_origin=f"tep-live-reset:{run_id}:{session_id}")
+        self.store = InMemoryTimeSeriesStore(
+            store_id="live-plant-telemetry", namespace=f"live-run:{run_id}:{session_id}",
+            context_ref=context_ref_for(graph_source), visibility_policy_ref=visibility_policy_ref,
+            event_clock=self.source.event_clock, ingest_clock=INGEST_CLOCK,
+            bindings=self.source.store_bindings(), incarnation=f"inc-{session_id}")
+        self.reader = TimeSeriesReader(self.store, max_interval_ticks=policy.max_interval_ticks,
+                                       max_scan_records=policy.max_scan_records,
+                                       max_points_limit=policy.max_points_limit)
+        self._ingestor = TelemetryIngestor(self.store)
+        self._clock = clock
+
+    @property
+    def source_id(self) -> str:
+        return self.source.source_id
+
+    def commit_batch(self, batch: Sequence[SourceObservation]) -> AppendResult:
+        """Synchronous atomic delivery; caller retains the assigned batch until commit."""
+        return self._ingestor.ingest(
+            batch, ingest_time=TimePoint(INGEST_CLOCK.clock_id, utc_ticks(self._clock())))
