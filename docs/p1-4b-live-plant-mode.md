@@ -26,7 +26,7 @@ no case setup or benchmark binding. The provenance records the exact interim
 PROCESS_GRAPH source and an explicit empty engineering selection; no P1.3 revision
 or ContextSnapshot is invented.
 
-Preparation keeps the P0 assembly and immutable RunManifest contract. It closes
+S1 preparation kept the P0 assembly and immutable RunManifest contract. It closed
 that assembly's investigation environment and sandbox before creating a separate
 harness-owned live `TEPEnvironment` with the same pinned configuration and seed.
 The live environment has no ReferenceWorld, Agent tool or investigation handoff.
@@ -118,15 +118,14 @@ manifest/inventory, frozen registration and the separate sealed P0 store.
 The D0 diff remains a coordinator/verifier command outside the unit suite, so
 tests need no remote Git refs and continue to work with shallow checkouts.
 
-## Known limitations
+## S1 limitations resolved by LOS-B-S3
 
-- The per-manager live slot is released only on prepare failure. An unstarted
+- In S1, the per-manager live slot was released only on prepare failure. An unstarted
   PREPARED live session retains its TEPEnvironment until the run is closed.
-  Disposal and new preparation after STOPPED/FAILED belong to LOS-B-S3 (#38).
-- Live preparation builds the full P0 investigation assembly and closes it before
+  LOS-B-S3 (#38) below implements disposal and slot release after STOPPED/FAILED.
+- S1 live preparation built the full P0 investigation assembly and closed it before
   creating the live physics environment. This initializes the simulator twice and
-  leaves orphaned world/state/trace artifacts. A later slice should let assembly
-  skip the investigation path in live mode.
+  left orphaned world/state/trace artifacts. LOS-B-S3 skips that investigation path.
 
 Reads retain all committed prefixes for the lifetime of the in-process attachment.
 The stored manifest/provenance alone do not recover its telemetry after process
@@ -294,3 +293,173 @@ the existing retained-session slot. The S1 fail-closed guard remains. The schedu
 disturbance timeline belongs to LOS-B-S4 (#39). Retention lasts only in process;
 no durable telemetry recovery, rolling eviction, new UI or investigation handoff is
 claimed. No upstream repository, specs, ADRs, AGENTS.md or D0 surfaces are changed.
+
+## LOS-B-S3 (issue #38): limits, failure and read lifetime
+
+This slice implements Live Operational State v0 §Backpressure, retention and resource
+bounds (OD-6), §Fail closed and §Live plant session (Restart/Recovery). LOS-B3–LOS-B6
+are exercised through canonical public reads, with S1/S2 covering LOS-B1/LOS-B2.
+This delivers the mandatory P1.4B exit evidence **pending owner confirmation** of the
+proposed v2 values and sustained envelope below. It makes no external-plant or Agent
+capability claim. LOS-B-S4 and Operational State remain outside this change.
+
+```text
+[PREPARED] -- trusted start / one owner --> [ACTIVE]
+[ACTIVE] -- resolve batch / pause --> [PAUSED]
+[PAUSED] -- same owner / resume --> [ACTIVE]
+[ACTIVE] -- configured end or pre-step capacity boundary --> [STOPPED]
+[ACTIVE / PAUSED] -- resolved stop / host close --> [STOPPED]
+[ACTIVE / PAUSED] -- source, translation, commit, clock or ownership failure --> [FAILED]
+[STOPPED / FAILED] -- exact T/K reads --> [retained committed prefix]
+[PREPARED] -- close or dispose / close environment --> [STOPPED + disposed]
+[STOPPED / FAILED] -- explicit dispose / release store and slot --> [disposed]
+[disposed / process loss] -- old snapshot read --> [SnapshotUnavailable]
+[new explicit run preparation] -- new source, clock and store --> [new PREPARED]
+```
+
+`LivePlantPolicyV2` pins all finite limits, retry and read lifetime in preparation
+provenance under `tep-agent-lab.live-plant-demo-policy/v2`. Its default deterministic
+parameter checksum is `4ace02165be9f994ee8ee9be29eef3e0194098c14f05d2281374ce5d1473ce1f`;
+the sustained demo explicitly selects ACCELERATED pacing and therefore records its
+own different exact policy checksum. Confirmed v0 values, serialized fields and
+checksum `683ed7f5ae0131504097a1bceaed927e03fee83344d7a2e375b38a43b998ce15`
+are unchanged. v1 pacing/lifecycle semantics remain unchanged.
+
+Before each integration step, v2 reserves one complete worst-case batch against
+sample, serialized byte, index, commit and commit-association metadata caps. The
+check uses retained actual sample bytes plus `53 * sample_byte_cap` for the next
+batch, not an optimistic estimate of its values. A count cap reserves all 53
+bindings. Capacity exhaustion ends STOPPED before calling the simulator, with a
+distinct trusted `capacity_samples`, `capacity_bytes`, `capacity_commits`,
+`capacity_index`, `capacity_commit_metadata` or `capacity_events` reason. Public
+capacity reason is `capacity_reached`. No eviction or rollback modifies the
+committed prefix. Every nonterminal event retains terminal room; the v2 producer
+stops when only that room remains. Disposal has its separate pinned single host
+event, so it does not consume or reopen terminal capacity.
+
+Record/frame and association sizes are validated before acceptance. Preparation
+rejects an initial batch/layout or reader envelope that cannot fit before creating
+the simulator. The single synchronous pending batch is a structural bound: no
+next step is admitted until it resolves. History/artifact bounds are also structural
+zero bounds: no ReferenceWorld, sandbox, RCA state, trace or rollout is assembled
+for live runs. `LiveRunSession` holds only the attested graph, registry, immutable
+manifest Task metadata and live handle. One environment is initialized. Existing
+P0 assembly, sealed telemetry and Coordinator behavior are unchanged; the manifest
+schema/storage fields retain their meanings, while uncreated investigation owners
+report unavailable. No investigation authority or future handoff is introduced.
+
+### Proposed final caps and recovery policy
+
+The inherited numbers below retain the owner-confirmed v0 defaults; v2 adds
+explicit commit metadata, diagnostic, disposal and retry/lifetime parameters.
+These additions and the demonstration envelope require owner confirmation.
+
+| Resource | v2 value | Rationale |
+|---|---:|---|
+| Cadence / configured duration | 1 second / 300 steps | Supported public integration grid, five simulated minutes; pacing is never physics input. |
+| Pending batches | 1 | Synchronous commit/refusal retry blocks further stepping. |
+| Retained samples / index records | 16,000 / 16,000 | Entire `301 * 53 = 15,953` sample prefix, including initial batch. Fixed store indices and opaque pinned ids; no unbounded metadata. |
+| Retained serialized sample bytes | 16 MiB | Worst-case full prefix `15,953 * 1,024 = 16,336,896` fits; actual byte accounting uses accepted SignalSample JSON, including trusted ingest time. This is not RSS. |
+| Per sample / batch frame | 1,024 bytes / 64 KiB | Finite floats and fixed source layout; `53 * 1,024 = 54,272` fits the frame. |
+| Commits / association record | 301 / 1,024 bytes | One immutable association per batch; validated before commit. |
+| Commit metadata bytes (new) | 308,224 | `301 * 1,024`; reserves complete bounded association metadata, apart from sample payload. |
+| Producer session events / record | 35 / 1,024 bytes | Retains v1's cap, including terminal room; covers 16 pause/resume pairs. |
+| Trusted diagnostics (explicit in v2) | 2 artifacts, each <= 1,024 bytes | Producer failure plus possible close failure; checksum chain retains both. Type and first 48 detail characters, with truncation flag, are trusted-only. |
+| Host disposal event (new) | 1, bounded by 1,024 bytes | Idempotent terminal disposal outside the producer's 35-event budget. |
+| Lab-owned simulator history / rollout artifacts | 0 / 0 | Consume public step observations directly; live prepare now skips the entire investigation assembly. |
+| Retained live attachments / RunManager | 1 | STOPPED and FAILED keep the slot until disposal; PREPARED close also disposes. |
+| Retry count / wait (new) | 3 retries after first attempt / 0.1 seconds each | Four total attempts, at most 0.3 seconds of requested retry waiting; enough for transient refusal while keeping recovery short and finite. |
+| Read lifetime (new explicit field) | Until explicit disposal or process loss | Retain exact snapshots in process; no expiry, rolling eviction, durable telemetry or checkpoint/resume. |
+
+Only `IngestBackpressure` means a typed retryable **atomic refusal**, with no
+accepted batch or unknown outcome. The current in-memory adapter does not raise
+it naturally; test-only refusing adapters exercise the contract. Retry retains the
+identical translated tuple/checksum/identities, never invokes translation again and
+never steps while pending. The injectable monotonic clock/sleeper enforce the pinned
+wait; lifecycle wake signals cannot shorten it. A successful late commit reanchors
+S2 pacing rather than catching up. Ordinary errors and unknown commit outcomes are
+not retried. A synchronous adapter must return or refuse; preempting a hung external
+adapter is not implemented and is not claimed by the retry wait budget.
+
+Identical committed sample identities resolve idempotently without advancing K or
+retention again; different content rejects the entire batch atomically. Exhausted
+retry, simulator/shutdown, binding/field/grid/value/identity/clock errors and lost
+ownership stop stepping and end FAILED. Public reason is always
+`live_delivery_failed`. Trusted append-only history retains last successful step/K,
+pending checksum and exact diagnostic refs. Detail, private-world data and injection
+metadata never enter public queries, application reads or transport. Failures do not
+set P0 COMPLETED/RunOutcome or alter runtime TaskStatus.
+
+### Disposal, restart and process loss
+
+`RunManager.dispose_live` accepts STOPPED/FAILED and an unstarted PREPARED session.
+It closes an unstarted environment, appends one durable DISPOSED host record,
+invalidates the store incarnation and releases sample/identity/index/frontier
+storage and the manager slot. ACTIVE/PAUSED disposal is rejected: first resolve a
+trusted stop. `close_live`, the session close path and `close_prepared` also dispose
+an unstarted PREPARED session, fixing its environment/slot leak. Closing an already
+started run retains S2 host-close semantics and retained reads until explicit
+disposal. Concurrent/repeated disposal is idempotent.
+
+Disposal leaves manifests, attested provenance and failed/negative lifecycle history
+durable. Cached query/store/reader handles also fail `SnapshotUnavailable`; transport
+returns `SNAPSHOT_UNAVAILABLE`, never empty history. Slot admission remains typed
+`LifecycleError` while any undisposed live attachment holds it. A new preparation
+after disposal succeeds with a new run id and opaque session/source/clock origin/id/
+store incarnation/namespace. No same-run READY re-preparation or automatic latest
+resolution exists. Another RunManager over the same durable root reads the exact
+manifest/provenance/history but has no live telemetry and reports unavailable.
+Process loss does not claim a durable terminal event if the process could not write
+one; that incarnation cannot recover unknown simulator/commit outcomes.
+
+### Sustained evidence and CLI demonstrations
+
+Measured on 2026-10-12 using the pinned simulation source, seed 17, v2 and
+ACCELERATED pacing (20x, 0.05 wall seconds per simulated second). All 53 complete
+301-point histories were read through ApplicationViewService after termination;
+initial T/K reads remained identical. Windows peak working set is obtained using
+standard-library `ctypes` and the native process counters, including preparation
+and public read assembly. Other supported systems use standard-library `resource`;
+if unavailable the CLI explicitly reports a payload proxy, not an RSS claim.
+
+| Measured / proposed envelope | Result / rationale |
+|---|---|
+| Simulated duration | 300 seconds, final T=300 / K=301 |
+| Measured wall duration | 22.614 seconds (producer plus complete public history verification); pacing minimum 15 seconds, physics/serialization/scheduling adds elapsed time |
+| Peak retained samples | 15,953, exactly matching all public history samples |
+| Peak retained serialized bytes | 6,147,205 bytes; under 16 MiB cap |
+| Process peak RSS | 49,487,872 bytes (about 47.2 MiB), measured after live preparation skips P0 assembly |
+| Proposed process envelope | 256 MiB (268,435,456 bytes); >5x measured peak for interpreter/platform overhead. An exit-demonstration acceptance envelope, not a portable enforced OS memory limit. CLI returns failure if measured RSS exceeds it. |
+
+This is a **clean deterministic simulated stream** qualification only. There is no
+external connector robustness claim, durable telemetry recovery, rolling retention,
+timeline, Operational State algorithm, new UI or investigation handoff. Actual wall
+duration/RSS vary across runs and hosts; exact event values/identities at pinned T/K
+and the finite payload limits do not depend on that variation.
+
+Using the same pinned dependency setup as the existing demo:
+
+```powershell
+py -3.13 -m tep_agent_lab.live_plant_demo capacity
+py -3.13 -m tep_agent_lab.live_plant_demo failure
+py -3.13 -m tep_agent_lab.live_plant_demo restart
+py -3.13 -m tep_agent_lab.live_plant_demo sustained
+```
+
+`capacity` pins commit_cap=11: STOPPED / capacity_reached at T=10/K=11, with the
+prefix readable. `failure` explicitly labels its isolated CLI-only synthetic failing
+callback DEMO-ONLY, reaches FAILED / live_delivery_failed at T=0/K=1 and prints no
+trusted diagnostic. Production RunManager never installs that fault. This is not
+a plant incident/disturbance injection or scheduled timeline. `restart` completes,
+disposes, prepares a different run, proves new identities and old SnapshotUnavailable.
+Every command cleans its temporary artifacts and joins its producer. Existing
+`live` and `lifecycle` commands retain their output and pacing options.
+
+Focused evidence is in `test_live_plant_limits.py` and `test_live_plant_session.py`:
+each storage/metadata/event cap, zero history/artifacts, frame admission, retained
+old snapshot bytes, retry translation counts and barriers, atomic conflict/idempotency,
+all requested failures, diagnostics isolation, slot release, new identities and
+process-loss lifetime. Tests use fake clocks/events, never real-time correctness
+sleeps, and close/join started sessions in cleanup. The canonical manifest/inventory
+and P0 outcome/status boundaries are checked across capacity and failure; the D0
+diff gate remains a verifier command, not a test or source of test data.

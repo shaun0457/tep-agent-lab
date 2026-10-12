@@ -4,6 +4,9 @@ import argparse
 from pathlib import Path
 import tempfile
 import sys
+import time
+import os
+import ctypes
 
 from industrial_agent_runtime import Budget
 
@@ -11,10 +14,11 @@ from .application_views import ApplicationViewService
 from .canonical_context import ProjectionScope, inventory_checksum
 from .e0_demo import git_revision
 from .live_plant import (LivePacingMode, LivePacingPolicy,
-                         LivePlantPolicy, LivePlantPolicyV1, LivePlantState)
+                         LivePlantPolicy, LivePlantPolicyV1, LivePlantPolicyV2, LivePlantState)
 from .playground import (ModelSpec, RunManager, RunRequest, SourceRevisions, WorldSpec,
                          load_dependency_pins, pinned_tep_sim_sources)
 from .sidecar_resources import dependency_pins_path, packaged_lab_revision
+from .telemetry import SnapshotUnavailable
 
 
 class _UnusedProvider:
@@ -43,9 +47,99 @@ def cleanup_live(live, *, suppress_errors: bool) -> None:
         raise error
 
 
+def peak_rss_bytes() -> int | None:
+    """Standard-library native process high-water mark; includes preparation."""
+    if os.name == "nt":
+        from ctypes import wintypes
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        *[(name, ctypes.c_size_t) for name in (
+                            "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                            "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+                            "PagefileUsage", "PeakPagefileUsage")]]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        if psapi.GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            return counters.PeakWorkingSetSize
+        return None
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return peak if sys.platform == "darwin" else peak * 1024
+    except (ImportError, OSError):
+        return None
+
+
+def _s3_demo(mode, manager, live, app, request, sources, pacing) -> int:
+    """Isolated demonstration faults never enter RunManager's production assembly."""
+    signal = "reactor.temperature_measurement"
+    old = app.open_telemetry_snapshot("live-demo", ingest_sequence=1)
+    initial = app.get_signal("live-demo", signal, snapshot=old)
+    if mode == "failure":
+        print("DEMO-ONLY synthetic failure; no plant incident injection or production fault path")
+        # This CLI-only constructor callback replacement is an authorized fault
+        # demonstration. Production composition never supplies a failing callback.
+        def demo_only_fault():
+            raise RuntimeError("demo-only trusted diagnostic")
+        live._advance = demo_only_fault
+    started = time.monotonic()
+    try:
+        manager.start_live("live-demo")
+        live.wait(timeout=commit_timeout(pacing, live.policy.step_count))
+        snapshot = app.open_telemetry_snapshot("live-demo")
+        current = app.get_signal("live-demo", signal, snapshot=snapshot)
+        print(f"terminal: {live.state.value}; public reason={live.public_reason}; "
+              f"T={snapshot.event_horizon_ticks} K={snapshot.ingest_sequence}")
+        print(f"committed prefix readable: {current.current is not None}; "
+              f"old snapshot unchanged: {initial == app.get_signal('live-demo', signal, snapshot=old)}")
+        if mode == "sustained":
+            # Verify complete per-signal histories through public application reads.
+            count = sum(len(app.get_signal_history("live-demo", s, snapshot=snapshot,
+                                                   max_points=301).points)
+                        for s in live.telemetry.source.signal_ids)
+            elapsed = time.monotonic() - started
+            peak = peak_rss_bytes()
+            envelope = 256 * 1024 * 1024
+            print(f"sustained: simulated_seconds={snapshot.event_horizon_ticks}; "
+                  f"wall_seconds={elapsed:.3f}; pacing_min_seconds={300 * pacing.seconds_per_tick:.3f}")
+            print(f"peak_retained_samples={live.telemetry.retained_samples}; public_history_samples={count}; "
+                  f"peak_retained_serialized_bytes={live.telemetry.retained_bytes}")
+            print(f"peak_RSS_bytes={peak}; proposed_process_envelope_bytes={envelope}; "
+                  f"within_envelope={peak <= envelope if peak is not None else 'unmeasured'}")
+            if peak is None:
+                print("RSS unavailable; serialized retained bytes are a payload proxy, not process memory")
+            if count != live.telemetry.retained_samples or (peak is not None and peak > envelope):
+                return 1
+        if mode == "restart":
+            prior = (live.telemetry.source_id, live.telemetry.source.event_clock, live.telemetry.store.ref)
+            manager.dispose_live("live-demo")
+            manager.create("live-restart", request)
+            manager.prepare("live-restart", provider=_UnusedProvider(), context_sources=sources,
+                            live_policy=LivePlantPolicyV2(step_count=1))
+            new = manager.live_session("live-restart")
+            try:
+                identities = (new.telemetry.source_id, new.telemetry.source.event_clock, new.telemetry.store.ref)
+                print(f"restart: new run/source/clock/store identities={all(a != b for a, b in zip(prior, identities))}")
+                try:
+                    app.get_signal("live-demo", signal, snapshot=old)
+                except SnapshotUnavailable:
+                    print("old snapshot: SnapshotUnavailable (no fallback)")
+                else:
+                    return 1
+            finally:
+                manager.dispose_live("live-restart")
+        return 0 if live.state == (LivePlantState.FAILED if mode == "failure" else LivePlantState.STOPPED) else 1
+    finally:
+        cleanup_live(live, suppress_errors=sys.exc_info()[0] is not None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="clean deterministic simulated stream")
-    parser.add_argument("mode", choices=("live", "lifecycle"))
+    parser.add_argument("mode", choices=("live", "lifecycle", "capacity", "failure", "restart", "sustained"))
     parser.add_argument("--pacing", choices=tuple(m.value for m in LivePacingMode),
                         help="live: all modes, milestone timeout scales with pacing; "
                              "lifecycle: ACCELERATED (default) or REAL_TIME only")
@@ -56,18 +150,22 @@ def main() -> int:
     pins = load_dependency_pins(dependency_pins_path())
     lab_revision = packaged_lab_revision() or git_revision(root)
     pacing = LivePacingPolicy(mode=LivePacingMode(args.pacing or (
-        "ACCELERATED" if args.mode == "lifecycle" else "DETERMINISTIC")))
+        "ACCELERATED" if args.mode in ("lifecycle", "sustained") else "DETERMINISTIC")))
     policy = (LivePlantPolicy() if args.mode == "live" and pacing.mode == LivePacingMode.DETERMINISTIC
               else LivePlantPolicyV1(pacing=pacing))
+    if args.mode in ("capacity", "failure", "restart", "sustained"):
+        policy = LivePlantPolicyV2(pacing=pacing,
+                                  **({"commit_cap": 11} if args.mode == "capacity" else {}))
     # Temporary run artifacts are removed on exit; nothing is logged to the repo.
     with tempfile.TemporaryDirectory(prefix="live-plant-demo-") as directory:
         manager = RunManager(directory, dependency_pins=pins,
                              revisions=SourceRevisions(pins["tep-sim"],
                                                        pins["industrial-agent-runtime"], lab_revision))
-        manager.create("live-demo", RunRequest(
+        request = RunRequest(
             "live-demo", "clean simulated telemetry", WorldSpec(17, record_interval=1),
             ModelSpec("unused", "unused", "v0", "v0"), Budget(0, 0, 0, 0, 0),
-            allowed_tools=(), require_conclusion=False))
+            allowed_tools=(), require_conclusion=False)
+        manager.create("live-demo", request)
         sources = tuple(s for s in pinned_tep_sim_sources(pins["tep-sim"])
                         if s.kind == "PROCESS_GRAPH")
         manifest = manager.prepare("live-demo", provider=_UnusedProvider(),
@@ -80,6 +178,8 @@ def main() -> int:
         print(f"policy: {policy.version}; cadence={policy.cadence_ticks}s; steps={policy.step_count}")
         print(f"pacing: {pacing.mode.value}; wall seconds/sim second={pacing.seconds_per_tick:g}")
         print(f"manifest before: {manifest.checksum()}")
+        if args.mode in ("capacity", "failure", "restart", "sustained"):
+            return _s3_demo(args.mode, manager, live, app, request, sources, pacing)
         owner = manager.start_live("live-demo")
         try:
             # Supervise committed milestones and open exact accepted prefixes. No

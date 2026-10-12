@@ -39,7 +39,7 @@ from industrial_agent_runtime import (VERIFIER_VERSION, Budget, Coordinator, Inf
 from industrial_agent_runtime.serialization import freeze_json
 from tep_sim import (CAPABILITY_VERSION, SAFETY_LIMITS_VERSION, SCENARIO_MAPPING_VERSION,
                      UPSTREAM_REVISION, ControlMode, EnvironmentConfig, TEPEnvironment,
-                     build_process_graph)
+                     ProcessGraph, build_process_graph)
 from tep_sim.snapshot import ENVIRONMENT_VERSION
 
 from .canonical_context import (_SHA256, CANONICAL_JSON_SHA256, RESERVED_NAMES,
@@ -53,7 +53,7 @@ from .live_plant import (LivePlantError, LivePlantPolicy, LivePlantSession,
                          LiveSleeper, interruptible_wait)
 from .run_telemetry import LiveTelemetry, RunTelemetry, TelemetryReadPolicy
 from .tep_world import ArtifactStore, ReferenceWorld, sanitize_observation
-from .tool_bridge import BRIDGE_VERSION, AnalysisToolBridge, BridgedToolSurface
+from .tool_bridge import BRIDGED_POLICY_VERSION, BRIDGE_VERSION, AnalysisToolBridge, BridgedToolSurface
 from .tool_surface import TOOL_SURFACE_VERSION, BlindRcaToolSurface
 
 MANIFEST_VERSION = "tep-agent-lab.playground-run-manifest/v0"
@@ -575,6 +575,28 @@ class RunSession:
 
 
 @dataclass
+class LiveRunSession:
+    """Ephemeral live attachment, with no world, tools, state store or Coordinator."""
+
+    directory: Path
+    graph: ProcessGraph
+    registry: CanonicalContextRegistry
+    task: Task  # existing immutable manifest metadata, no investigation execution
+    _live_plant: LivePlantSession | None = None
+    _telemetry: None = None
+    closed: bool = False
+
+    @property
+    def telemetry(self) -> LiveTelemetry | None:
+        return None if self._live_plant is None else self._live_plant.telemetry
+
+    def close(self) -> None:
+        if self._live_plant is not None:
+            self._live_plant.close_prepared()
+        self.closed = True
+
+
+@dataclass
 class _Run:
     run_id: str
     directory: Path
@@ -587,7 +609,7 @@ class _Run:
     session_dir: Path | None = None
     manifest_checksum: str | None = None
     live_provenance_checksum: str | None = None
-    session: RunSession | None = None
+    session: RunSession | LiveRunSession | None = None
     outcome: RunOutcome | None = None
     owner: str | None = None
     # Held by the execution owner for the whole Coordinator run; live-world views
@@ -852,7 +874,7 @@ class RunManager:
     def _assemble(self, run: _Run, attempt: str, provider: ModelProvider,
                   sources: tuple[ContextSourceRef, ...], case_setup, benchmark: BenchmarkRefs,
                   live_policy: LivePlantPolicy | None = None
-                  ) -> tuple[RunSession, RunManifest]:
+                  ) -> tuple[RunSession | LiveRunSession, RunManifest]:
         request = run.request_object
         if provider is None or not callable(getattr(provider, "generate", None)):
             raise PrepareError("a ModelProvider is required")
@@ -886,6 +908,23 @@ class RunManager:
                 if registry.ref(getattr(benchmark, name), ProjectionScope.EVALUATOR
                                 ).visibility != Visibility.EVALUATOR:
                     raise PrepareError(f"{name} must reference an EVALUATOR-only source")
+        if live_policy is not None:
+            # The existing live contract requires allowed_tools=(). Build only
+            # the immutable Task/Incident metadata the manifest already records.
+            incident = InformationRef(f"incident-{run.run_id}", "Incident", "tep-agent-lab",
+                                      "v0", Visibility.AGENT, self.clock())
+            task = Task(f"task-{run.run_id}", request.goal, (incident,), (), request.budget,
+                        request.output_schema, metadata={"run_id": run.run_id})
+            session = LiveRunSession(directory, graph, registry, task)
+            try:
+                session._live_plant = self._prepare_live(run, session, graph_source, live_policy)
+                manifest = self._manifest(run, attempt, request, session, registry,
+                                          graph_source, {"case_setup_applied": False})
+                session._live_plant.attach(manifest, graph_source)
+                return session, manifest
+            except BaseException:
+                session.close()
+                raise
         environment = None
         world = None
         try:
@@ -914,11 +953,6 @@ class RunManager:
                 environment.close()
             raise
         try:
-            if live_policy is not None:
-                # The investigation environment is CLOSED before a live producer
-                # can exist. The latter has no ReferenceWorld or Agent tool handle.
-                session.close()
-                session._live_plant = self._prepare_live(run, session, graph_source, live_policy)
             manifest = self._manifest(run, attempt, request, session, registry,
                                       graph_source, benchmark_record)
             if session._live_plant is not None:
@@ -928,7 +962,7 @@ class RunManager:
             session.close()
             raise
 
-    def _prepare_live(self, run: _Run, session: RunSession, graph_source: ContextSourceRef,
+    def _prepare_live(self, run: _Run, session: LiveRunSession, graph_source: ContextSourceRef,
                       policy: LivePlantPolicy) -> LivePlantSession:
         """Process-pack producer over the pinned public tep-sim stepping interface."""
         import secrets
@@ -936,7 +970,7 @@ class RunManager:
         world = run.request_object.world
         session_id = secrets.token_hex(16)
         telemetry = LiveTelemetry(
-            run_id=run.run_id, session_id=session_id, graph=session.world.graph,
+            run_id=run.run_id, session_id=session_id, graph=session.graph,
             graph_source=graph_source, visibility_policy_ref=f"{VISIBILITY_POLICY_VERSION}#AGENT",
             clock=self.clock, policy=self.telemetry_policy)
         policy.reserve(telemetry)
@@ -951,12 +985,29 @@ class RunManager:
                 advance=lambda: sanitize_observation(environment.step().observation),
                 close_physics=environment.close,
                 monotonic=self.live_monotonic, sleeper=self.live_sleeper,
+                release_slot=lambda: self._release_live_slot(run.run_id),
                 history=RunLog(run.directory / "lifecycle" / f"live-{session_id}",
                                {"run_id": run.run_id, "session_id": session_id,
                                 "record": "tep-agent-lab.live-plant-lifecycle/v0"}))
         except BaseException:
             environment.close()
             raise
+
+    def _release_live_slot(self, run_id: str) -> None:
+        with self._lock:
+            if self._live_run_id == run_id:
+                self._live_run_id = None
+
+    def dispose_live(self, run_id: str) -> None:
+        """Release terminal live data/slot, preserving manifest and trusted history."""
+        try:
+            self.live_session(run_id).dispose()
+        except LivePlantError as exc:
+            raise LifecycleError(str(exc)) from exc
+
+    def close_live(self, run_id: str) -> None:
+        """Trusted host close; an unstarted session is also disposed."""
+        self.live_session(run_id).close_prepared()
 
     def live_session(self, run_id: str) -> LivePlantSession:
         """Trusted host handle; lifecycle diagnostics never enter public read models."""
@@ -1026,12 +1077,13 @@ class RunManager:
             raise PrepareError("setup attestation differs from the prepared reference world")
         return applied
 
-    def _manifest(self, run: _Run, attempt: str, request: RunRequest, session: RunSession,
+    def _manifest(self, run: _Run, attempt: str, request: RunRequest, session: RunSession | LiveRunSession,
                   registry: CanonicalContextRegistry, graph_source: ContextSourceRef,
                   benchmark: Mapping[str, Any]) -> RunManifest:
-        provenance = session.world.graph.provenance
+        live = isinstance(session, LiveRunSession)
+        provenance = (session.graph if live else session.world.graph).provenance
         created_at = run.lifecycle.events()[0]["payload"]["at"]
-        specs = session.surface.tool_specs()
+        specs = () if live else session.surface.tool_specs()
         allowed = tuple(spec for spec in specs if spec.name in session.task.allowed_tools)
         inventory = registry.freeze()
         manifest = RunManifest(
@@ -1060,7 +1112,8 @@ class RunManager:
                 # equals the runtime trace's MODEL_TURN registered_tool_set_version
                 "tool_set_version": checksum(allowed),
                 "allowed_tools": [spec.name for spec in allowed],
-                "gate_policy_version": session.surface.gate_policy().policy_version,
+                "gate_policy_version": (BRIDGED_POLICY_VERSION if live else
+                                        session.surface.gate_policy().policy_version),
                 "visibility_policy_version": VISIBILITY_POLICY_VERSION,
                 "rca_projection_policy_version": RCA_VISIBILITY_POLICY_VERSION,
                 "projection_policy": to_jsonable(request.projection_policy),
