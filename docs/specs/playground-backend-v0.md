@@ -198,6 +198,29 @@ Application `COMPLETED` therefore answers "did the Playground successfully host 
 
 Outcome/error projections remain visibility-aware. A hidden evaluator/setup error must not become an Agent-side oracle merely because it is useful for debugging.
 
+## Live plant session mode (amendment 2026-10-12)
+
+Owner decision 2026-10-12 adds a distinct live mode beside existing P0 runs.
+Existing P0 runs are unchanged: their store is sealed before READY, start owns one
+Coordinator execution, and RunOutcome / COMPLETED retain their semantics above.
+
+A live plant session is a separate, versioned harness-owned lifecycle. Its preparation,
+start, pause/resume, stop, failure and restart semantics are owned by
+[Live Operational State v0 §Live plant session (OD-4)](live-operational-state-v0.md#live-plant-session-od-4).
+It attaches to the P0 READY-frozen source inventory and immutable RunManifest;
+streamed samples, lifecycle events and outcomes are run data, never new canonical
+sources. Live mode permits post-READY canonical telemetry ingestion through its
+explicit production attachment, without reopening existing sealed P0 stores or using
+a private test seam in production.
+
+Reads remain bounded and snapshot-bound through public RunQueries / application
+queries, with exact T/K, source, clock and context refs and visibility checks.
+The live lifecycle grants no Agent authority; reads never step the plant or inject
+a disturbance. Injection is trusted harness authority, with identity and timing
+EVALUATOR-only across manifests, inventory, logs, errors and artifacts. Pacing never
+changes physics, values, sample identities or order. Investigation handoff stays
+with P1.5.
+
 ## RunSession
 
 `RunSession` is an ephemeral in-process assembly object. It is not durable canonical state and Python object identity is never a reproducibility contract.
