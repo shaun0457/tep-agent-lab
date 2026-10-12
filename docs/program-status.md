@@ -54,7 +54,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B merged (S1–S5, PRs #30–#33 plus the S5 completion PR): deterministic corpus, fragments, extraction, recorded human demo review and verified staged revision ([note](p1-2b-engineering-corpus.md)); P1.2C next; P1.2D adds the real review workflow and repository transaction (one git commit, head CAS) |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4A serving + Operational State | owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12; implementation not started; first slice LOS-A-S1; P1.4 split by owner decision 2026-10-11 |
-| P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; implementation not started; first slice LOS-B-S1; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
+| P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; LOS-B-S1 delivered (issue #36): clean continuously stepped simulated stream, atomic session commits and snapshot-bound reads ([note](p1-4b-live-plant-mode.md)); LOS-B-S2 (#37) is next; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
 | B5 first real provider for the investigation Agent (runtime repo) | deferred until the context layer is in place (owner decision 2026-10-11); still required for the MVP exit criterion's real-model investigation (D-049) |
 | MVP integration (E1 substrate + context panels) | not started |
@@ -100,7 +100,8 @@ None.
   covering **P1.4A** (serving + Operational State) and **P1.4B** (live plant mode).
   Owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12)
   resolve SC-1/SC-2.
-  First slices: LOS-A-S1 and LOS-B-S1. LOS-B-S4 follows LOS-B-S3 as scheduled work,
+  First P1.4A slice: LOS-A-S1. P1.4B LOS-B-S1 is delivered (issue #36);
+  LOS-B-S2 (#37), pacing and pause/resume, is next. LOS-B-S4 follows LOS-B-S3 as scheduled work,
   without gating the P1.4B exit. Existing ADR-005 live plant constraints still bind.
 - **B5** is deferred until the context layer is in place; it remains required for the
   MVP exit criterion's real-model investigation (owner decision 2026-10-11).
