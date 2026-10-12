@@ -1,6 +1,7 @@
-# P1.2B S1–S3 — Engineering corpus and deterministic fragments
+# P1.2B S1–S5 — Engineering corpus to staged revision
 
-Status: S1 registration, S2 section/paragraph and S3 table/step fragmentation implemented. Owning semantics:
+Status: S1–S5 implemented: registration, fragmentation, deterministic extraction,
+recorded human demo review and verified non-canonical staging. Owning semantics:
 [Context Compiler v0](specs/context-compiler-v0.md) sections Exact source input,
 SourceFragmentRef, Benchmark use, Model/provider boundary and Initial P1.2 vertical
 slice; existing contracts are described in [P1.2A](p1-2a-compiler-contracts.md).
@@ -454,11 +455,168 @@ acceptance, review records, staging or publication. Reviewed Rule and rejection
 publication evidence belong to S5; the repository transaction remains P1.2D. No
 benchmark/scorer/evaluator sources or existing test fixtures were consulted.
 
-## Remaining slices
+## S5 — End-to-end staged revision
 
-- S5: end-to-end test-principal review and reproducible non-canonical staged revision.
+Owning contracts: context-compiler-v0 sections Human review, Candidate identity and
+immutability, Publication, Hard trust invariant, Confidence semantics, Visibility
+and derivation taint, Benchmark use and Initial P1.2 vertical slice. S5 uses the
+existing P1.2A API; there is no second review/publication model.
 
-The repository publication transaction and head CAS remain P1.2D.
+```text
+[registered exact corpus + frozen CompileSession]
+  -- S3 parser / S4 extraction DATA --> [immutable typed candidates]
+[candidates + recorded HUMAN demo decisions]
+  -- exact-version coverage + append_review --> [CompilerWorkspace review log]
+[workspace + PublicationRequest]
+  -- stage_publication (one internal verify_publication) --> [StagedPublication (canonical=False)]
+[successfully verified staged items + recorded decisions + exclusions]
+  -- format_stage_summary --> [PASS + source-traced plant knowledge summary]
+```
+
+`staged_revision_demo.stage_revision(session, rules, review_raw)` returns a
+`StagedPublication` and immutable `StageSummary`. It composes S3/S4 and the P1.2A
+workspace, review, request, staging and verification contracts, entirely in memory.
+It accepts exact review bytes or the validated immutable mapping returned by
+`load_recorded_review`; the CLI loads the DATA once and passes that mapping.
+The generic module contains no domain tag literals or simulator imports. Its
+summary retains the session visibility, including counts and exclusion reasons.
+The exact extraction-rule bytes resolve by method/role and are checksum-validated
+by staging and its internal verification. The summary reports that single
+`verify_publication` call inside P1.2A `stage_publication`; the demo does not run a
+second verification with the same session objects. Verification failure returns
+no summary. Separate artifact-tampering tests still exercise the verifier directly.
+
+### Recorded human demo review DATA
+
+`engineering_corpus/tep_reactor_cooling/demo-review.json` is strict, versioned
+`recorded-demo-review/v1` DATA. The named principal is
+`demo-reviewer (human test principal)`, with role `HUMAN`. These are recorded
+human demo decisions requested for the test scenario, **not an automated acceptance
+policy**, model/Agent decisions or authenticated real-world human sign-off.
+`compiler-demo.recorded-human@1` identifies the review replay protocol; it registers
+no deterministic acceptance policy and computes no acceptance predicate.
+
+The DATA pins visibility (which must match the session), source repository revisions,
+full compile session id, review policy, principal, fixed UTC review/staging
+timestamps, workspace/lineage and one
+exact `CandidateRef` per decision. The demo pins the corpus-containing base
+`2b35d4604fea6054fc318cd97585ee89ae69b0dd` and the existing simulator pin. It does
+not silently substitute a newer HEAD. A changed source/parser/extractor/plant/policy
+requires newly recorded reviews; CLI revision overrides that disagree fail closed.
+The stage CLI accepts only the corpus repository `shaun0457/tep-agent-lab`; it
+rejects the plant repository or any other repository before preparing a session.
+The exact session id checks the frozen source inventory without flattening it to
+one revision per repository.
+The input R0 remains the explicitly marked in-memory empty S4 demo rule set.
+
+All 12 candidates are accounted for:
+
+- APPROVE the four unambiguous table signal bindings, including XMEAS(21) cooling
+  water outlet temperature.
+- REMAP the ambiguous `reactor-side temperature` to the existing
+  `reactor.temperature_measurement`, with its full reactor scope. P1.2A reruns
+  deterministic validation and retains the original unresolved proposal, both
+  alternatives and the reviewer rationale. This recorded choice applies only to
+  the cited mention; it establishes no global alias or proof of source intent.
+- APPROVE four table limits: pressure normal upper 2895 and shutdown high 3000
+  kPa gauge; process temperature normal upper 150 and shutdown high 175 degC.
+- APPROVE the qualitative CONTROL_RELATION as reference knowledge. All five
+  Rule-routed items keep `LITERATURE / NONE / REFERENCE`; APPROVE accepts extraction
+  fidelity and does not promote engineering truth or execution authority.
+- REJECT the competing 145 degC claim because the table gives 150 degC and the
+  troubleshooting note declares an intentional discrepancy. REJECT RCW-IN-TT
+  because the pinned plant context has no matching signal.
+- No candidate is deferred in the recorded baseline. Explicit `deferred` entries
+  require exactly `candidate_ref`, `review_id` and `reason`, and replay as
+  `KEEP_CANDIDATE` ReviewRecords, preserving the human rationale and explicit id in
+  the same immutable log and revision identity. All ids must be unique across
+  decisions and deferrals. The loader sorts deferrals by full CandidateRef, so
+  reordering otherwise identical deferrals produces byte-identical staged files.
+  They never enter the approved set.
+
+The loader rejects duplicate JSON keys, unknown schema keys/versions, unsupported
+principals, duplicate decisions/review ids and malformed target refs. Before creating the
+workspace, replay requires exact equality between extracted and recorded candidate
+versions: unknown, stale, missing, or decided-plus-deferred entries fail closed.
+REJECT/KEEP_CANDIDATE and invalid selections remain auditable exclusions, never
+approved bindings or Rules. Audit artifacts retain the full candidate/review log;
+the 150 degC item's conflict citation intentionally retains the rejected 145 degC
+fragment. Removing that history would violate P1.2A provenance requirements.
+
+The summary has four groups: APPROVED for items accepted into the staged content;
+REJECTED for recorded REJECT decisions; EXCLUDED for other decisions denied staging
+(including REMAP_INVALID, VALIDATION_FAILED, STALE_REVIEW and explicit
+KEEP_CANDIDATE); DEFERRED only for explicit entries in the DATA's `deferred` array.
+Each excluded row retains its recorded decision and the contract exclusion reason.
+Approved REMAP rows show the staged validation's selected target, or selected scope
+for knowledge. Excluded REMAP rows have no binding arrow: any requested target/scope
+appears only next to the exclusion reason, labelled as requested.
+
+### S5 evidence and visible demo
+
+`tests/test_staged_revision_demo.py` was written first and initially failed because
+the pipeline module did not exist. It covers corpus-to-verifier PASS, preserved
+Rule axes, rejection and explicit deferral, original/remapped targets, exact source
+fragments and ReviewRecords, byte-identical repeated staging, tampering with every
+artifact, stale/unknown/missing/duplicate reviews, strict DATA, changed review
+rationale changing revision identity, generic literals and the stage CLI.
+The review-fix regressions cover EXCLUDED versus explicit DEFERRED, validated
+binding/knowledge REMAP output, mandatory unique deferred ids, deferred order
+independence, one internal verification and failure propagation, one CLI DATA load,
+repository rejection, and specific CLI REJECT/REMAP rows and verification output.
+`tests/staged_revision_demo_golden.json` pins the strict summary and all four
+staged-file SHA-256 checksums; `.gitattributes` fixes its bytes to LF.
+
+```console
+python -m tep_agent_lab.engineering_corpus stage
+```
+
+The output lists each accepted plant binding/limit/relation, reviewer decision and
+reason, source semantic locator and fragment id prefix; it also lists rejections,
+exclusions, explicit deferrals, unsupported extraction count and the staged revision identity:
+
+```text
+APPROVED: 10
+REJECTED: 2
+EXCLUDED: 0
+DEFERRED: 0
+UNSUPPORTED extraction entries: 20
+revision_id=ecr-32140d7b6870d7cc6f35726e87e5ab8eb0dd5fab1b556aeaf09d1b5fa93e538d
+checksum=f2649802cea37c0e56c6752fe88ac886abc8ddf95466ab33a4bcc0fcbadd42ce
+staged files=4; canonical=False
+verify_publication: PASS (stage_publication internal verification)
+```
+
+No staged file or log is written by the demo. No head advances, no Agent tool is
+registered and no model is called. The corpus documents and manifest are unchanged.
+
+## P1.2B completion and follow-ups
+
+P1.2B delivers the complete deterministic source-only path: registered corpus ->
+exact S3 fragments -> immutable S4 candidates -> recorded human demo reviews ->
+reproducible verified staging. S1–S4 landed in PRs #30–#33; S5 completes the path
+in this change. This is the first visible "what the plant is" output, with exact
+source and review provenance, not a consumer-visible canonical publication or a
+benchmark/capability claim.
+
+Limitations and follow-ups:
+
+- The corpus is deliberately small; the bounded Markdown grammar and declarative
+  extraction rules leave 20 extraction entries unsupported. Those entries are
+  unextracted source content, distinct from reviewed candidate deferrals.
+- S3 follow-up: numbered items whose content starts with a nested list, quote or
+  fence still become `PROCEDURE_STEP`. Tighten conservative classification in a
+  follow-up parser policy with dedicated regression evidence; S5 does not change
+  the frozen S3 policy.
+- Reviews are recorded demo DATA, not an interactive reviewer UI or authentication
+  system. Workspace and demo R0 are in memory; repository membership/ancestor
+  commit attestation limitations remain as described in P1.2A.
+- P1.2C is next: bounded model-assisted extraction/grounding and exact call records
+  behind the same candidate/trust contracts. S5 makes no model calls.
+- P1.2D owns the real review workflow and repository transaction: one git commit,
+  immutable repository-backed artifacts, trusted repository anchors and head CAS.
+  Staged results remain non-canonical until that transaction succeeds. P1.3 then
+  composes reviewed engineering context with canonical plant semantics.
 
 ## Demo and verification
 

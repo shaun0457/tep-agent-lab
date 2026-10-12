@@ -2,3 +2,5 @@
 src/tep_agent_lab/engineering_corpus/** text eol=lf
 # The strict candidate golden is compared as canonical JSON bytes, including its LF.
 tests/deterministic_extraction_golden.json text eol=lf
+# S5 strict staged summary and artifact checksums are compared as bytes.
+tests/staged_revision_demo_golden.json text eol=lf
