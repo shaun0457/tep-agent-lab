@@ -179,7 +179,8 @@ class RunQueries:
         body["resources"] = {"session": ("NONE" if session is None else
                                          "RELEASED" if released else "LIVE")}
         if live is not None:
-            body["live_session"] = {"state": live.state.value, "reason": live.public_reason}
+            state, reason = live.public_status()
+            body["live_session"] = {"state": state.value, "reason": reason}
         if run.outcome is not None:
             body["outcome"] = self._outcome(run.outcome, scope)
         return self._view("RunSummaryView", scope, body)

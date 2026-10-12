@@ -30,6 +30,9 @@ LIVE_POLICY_V1 = "tep-agent-lab.live-plant-demo-policy/v1"
 LIVE_POLICY_V2 = "tep-agent-lab.live-plant-demo-policy/v2"
 LIVE_PACING_VERSION = "tep-agent-lab.live-plant-pacing/v0"
 MAX_WALL_SECONDS_PER_TICK = 3600.0
+MAX_RETRY_WINDOW_SECONDS = 1.0
+MAX_DIAGNOSTIC_TYPE_LENGTH = 48
+_LONGEST_FAILURE_REASON = "operator_stop_pending_batch"
 
 
 class LivePacingMode(StrEnum):
@@ -167,6 +170,13 @@ class LivePlantPolicy:
                 or signals * self.sample_byte_cap > self.batch_byte_cap
                 or self.session_event_cap < 3):
             raise ValueError("configured trajectory exceeds reserved live/reader bounds")
+        self._reserve_record_sizes(telemetry, commits)
+
+    def _reserve_record_sizes(self, telemetry: LiveTelemetry, commits: int) -> None:
+        """Validate bounded metadata using this policy's own record caps."""
+        signals = len(telemetry.source.signal_ids)
+        if signals * self.sample_byte_cap > self.batch_byte_cap:
+            raise ValueError("source batch exceeds reserved frame size")
         # The pinned source emits floats only, no free-form metadata. Reserve the
         # longest finite float, final sequence/event tick and diagnostic UTC tick.
         for signal in telemetry.source.signal_ids:
@@ -182,11 +192,17 @@ class LivePlantPolicy:
         association = LiveCommit(self.step_count, self.step_count, self.step_count,
                                  commits, "0" * 64)
         event = {"version": LIVE_LIFECYCLE_VERSION, "state": "PREPARED",
-                 "reason": "resource_close_unavailable", "last_step": self.step_count,
+                 "reason": _LONGEST_FAILURE_REASON, "last_step": self.step_count,
                  "ingest_sequence": commits, "pending_batch_checksum": "0" * 64,
                  "diagnostic_ref": "0" * 64}
+        unavailable_event = {**event, "diagnostic_status": "diagnostic_unavailable"}
+        diagnostic = {"category": "X" * MAX_DIAGNOSTIC_TYPE_LENGTH,
+                      "reason": _LONGEST_FAILURE_REASON, "last_step": self.step_count,
+                      "ingest_sequence": commits, "pending_batch_checksum": "0" * 64,
+                      "prior_diagnostic_ref": "0" * 64}
         if (len(canonical_json(to_jsonable(association))) > self.association_byte_cap
-                or len(canonical_json(event)) > self.event_byte_cap):
+                or max(len(canonical_json(value)) for value in
+                       (event, unavailable_event, diagnostic)) > self.event_byte_cap):
             raise ValueError("session metadata exceeds its reserved record size")
 
 
@@ -216,6 +232,7 @@ class LivePlantPolicyV2(LivePlantPolicyV1):
         if (type(self.retry_wait_seconds) not in (int, float)
                 or not math.isfinite(self.retry_wait_seconds)
                 or not 0 < self.retry_wait_seconds <= 60 or self.retry_count > 100
+                or self.retry_count * self.retry_wait_seconds > MAX_RETRY_WINDOW_SECONDS
                 or self.diagnostic_artifact_cap != 2
                 or self.disposal_event_cap != 1
                 or self.read_lifetime != LivePlantPolicyV2.__dataclass_fields__["read_lifetime"].default):
@@ -232,7 +249,7 @@ class LivePlantPolicyV2(LivePlantPolicyV1):
         return next((f"capacity_{name}" for value, cap, name in checks if value > cap), None)
 
     def reserve(self, telemetry: LiveTelemetry) -> None:
-        # Reuse v0 record/frame/reader validation over the largest count reachable
+        # Validate record/frame/reader bounds over the largest count reachable
         # under the pinned caps. Small caps stop at boundaries rather than rejecting
         # an otherwise readable trajectory. Initial batch must fit before reset.
         signals = len(telemetry.source.signal_ids)
@@ -241,12 +258,11 @@ class LivePlantPolicyV2(LivePlantPolicyV1):
                         self.commit_metadata_byte_cap // self.association_byte_cap)
         if reachable < 1 or self.capacity_reason(telemetry, 0):
             raise ValueError("initial batch exceeds prepared capacity")
-        bound = LivePlantPolicy(step_count=max(1, reachable - 1),
-                                sample_byte_cap=self.sample_byte_cap,
-                                batch_byte_cap=self.batch_byte_cap,
-                                association_byte_cap=self.association_byte_cap,
-                                event_byte_cap=self.event_byte_cap)
-        bound.reserve(telemetry)
+        if (reachable * signals > telemetry.policy.max_scan_records
+                or reachable > telemetry.policy.max_points_limit
+                or (reachable - 1) * self.cadence_ticks > telemetry.policy.max_interval_ticks):
+            raise ValueError("configured trajectory exceeds reserved reader bounds")
+        self._reserve_record_sizes(telemetry, reachable)
         telemetry.sample_byte_cap = self.sample_byte_cap
 
 
@@ -288,7 +304,6 @@ class LivePlantSession:
         self._anchor = 0.0
         self._state = LivePlantState.PREPARED
         self._owner: str | None = None
-        self._producer_owner: str | None = None
         self._thread: threading.Thread | None = None
         self._physics_closed = False
         self._commits: list[LiveCommit] = []
@@ -298,6 +313,7 @@ class LivePlantSession:
         self._provenance: Mapping[str, Any] | None = None
         self._diagnostic: Mapping[str, Any] | None = None
         self._diagnostic_ref: str | None = None
+        self._diagnostic_unavailable = False
         self._failure_reason = "ingest_translation_error"
         self._disposed = False
         self._terminal_reason: str | None = None
@@ -305,8 +321,8 @@ class LivePlantSession:
         try:
             self._deliver(0, initial)
         except BaseException as exc:
-            self._record_diagnostic(exc, self._failure_reason)
             self._state = LivePlantState.FAILED
+            self._record_diagnostic(exc, self._failure_reason)
             self._event(self._state, self._failure_reason)
             raise
         self._event(LivePlantState.PREPARED, "initial_committed")
@@ -318,12 +334,16 @@ class LivePlantSession:
 
     @property
     def public_reason(self) -> str | None:
+        return self.public_status()[1]
+
+    def public_status(self) -> tuple[LivePlantState, str | None]:
+        """One atomic redacted lifecycle projection for application summaries."""
         with self._condition:
             if self._state == LivePlantState.FAILED:
-                return "live_delivery_failed"
+                return self._state, "live_delivery_failed"
             if self._terminal_reason and self._terminal_reason.startswith("capacity_"):
-                return "capacity_reached"
-            return self._terminal_reason
+                return self._state, "capacity_reached"
+            return self._state, self._terminal_reason
 
     @property
     def owner(self) -> str | None:
@@ -388,13 +408,18 @@ class LivePlantSession:
         if len(canonical_json(to_jsonable(self._provenance))) > self.policy.batch_byte_cap:
             raise LivePlantError("session provenance exceeds its reserved frame size")
 
-    def _event(self, state: LivePlantState, reason: str) -> None:
-        event = freeze_json({"version": LIVE_LIFECYCLE_VERSION, "state": state.value,
+    def _event_record(self, state: LivePlantState, reason: str) -> Mapping[str, Any]:
+        return freeze_json({"version": LIVE_LIFECYCLE_VERSION, "state": state.value,
                              "reason": reason,
                              "last_step": self._commits[-1].step if self._commits else None,
                              "ingest_sequence": self.telemetry.store.current_ingest_sequence,
                              "pending_batch_checksum": self._pending_checksum,
-                             "diagnostic_ref": self._diagnostic_ref})
+                             "diagnostic_ref": self._diagnostic_ref,
+                             **({"diagnostic_status": "diagnostic_unavailable"}
+                                if self._diagnostic_unavailable else {})})
+
+    def _event(self, state: LivePlantState, reason: str) -> None:
+        event = self._event_record(state, reason)
         if (len(self._events) >= self.policy.session_event_cap - (1 if state != LivePlantState.STOPPED
                                                                and state != LivePlantState.FAILED else 0)
                 or len(canonical_json(to_jsonable(event))) > self.policy.event_byte_cap):
@@ -409,23 +434,29 @@ class LivePlantSession:
             raise LivePlantError("lifecycle event capacity reserved for terminal outcome")
 
     def _record_diagnostic(self, exc: BaseException, reason: str) -> None:
-        extra = {}
-        if isinstance(self.policy, LivePlantPolicyV2):
-            if self._diagnostic_count >= self.policy.diagnostic_artifact_cap:
+        """Never format exception text; diagnostic failure cannot mask failure."""
+        try:
+            if (isinstance(self.policy, LivePlantPolicyV2)
+                    and self._diagnostic_count >= self.policy.diagnostic_artifact_cap):
                 raise LivePlantError("reserved diagnostic capacity exceeded")
-            # Bounded trusted-only text. JSON escaping can expand each character.
-            extra = {"detail": str(exc)[:48], "detail_truncated": len(str(exc)) > 48}
-        self._diagnostic = freeze_json({
-            "category": type(exc).__name__, "reason": reason,
-            "last_step": self._commits[-1].step if self._commits else None,
-            "ingest_sequence": self.telemetry.store.current_ingest_sequence,
-            "pending_batch_checksum": self._pending_checksum,
-            "prior_diagnostic_ref": self._diagnostic_ref, **extra})
-        value = to_jsonable(self._diagnostic)
-        if len(canonical_json(value)) > self.policy.event_byte_cap:
-            raise LivePlantError("reserved diagnostic size exceeded")
-        self._diagnostic_ref = self.history.put_artifact(value)
-        self._diagnostic_count += 1
+            category = "".join(c for c in type(exc).__name__[:MAX_DIAGNOSTIC_TYPE_LENGTH]
+                               if c.isascii() and (c.isalnum() or c == "_")) or "Exception"
+            diagnostic = freeze_json({
+                "category": category, "reason": reason,
+                "last_step": self._commits[-1].step if self._commits else None,
+                "ingest_sequence": self.telemetry.store.current_ingest_sequence,
+                "pending_batch_checksum": self._pending_checksum,
+                "prior_diagnostic_ref": self._diagnostic_ref})
+            value = to_jsonable(diagnostic)
+            if len(canonical_json(value)) > self.policy.event_byte_cap:
+                raise LivePlantError("reserved diagnostic size exceeded")
+            self._diagnostic_ref = self.history.put_artifact(value)
+            self._diagnostic = diagnostic
+            self._diagnostic_count += 1
+        except BaseException:
+            # The terminal trusted event is the fallback record. Do not invent a
+            # reference to an artifact that could not be written.
+            self._diagnostic_unavailable = True
 
     def _deliver(self, step: int, record: Mapping[str, Any]) -> None:
         self._failure_reason = "source_unavailable"
@@ -451,7 +482,7 @@ class LivePlantSession:
             raise LivePlantError("commit association exceeds reserved size")
         attempts = 0
         while True:
-            self._check_owner()
+            self._pending_stop()
             try:
                 result = self.telemetry.commit_batch(batch)
                 break
@@ -460,13 +491,14 @@ class LivePlantSession:
                     self._failure_reason = "backpressure_exhausted"
                     raise
                 attempts += 1
-                # A separate wake token prevents lifecycle requests from shortening
-                # the pinned retry wait while a batch remains unresolved.
                 deadline = self._wall_now() + self.policy.retry_wait_seconds
-                retry_wake = threading.Event()
                 while (remaining := deadline - self._wall_now()) > 1e-12:
-                    self._sleeper(remaining, retry_wake)
-                    self._check_owner()
+                    with self._condition:
+                        self._pending_stop()
+                        # Pause waits for resolution; stop always interrupts.
+                        self._wake.clear()
+                    self._sleeper(remaining, self._wake)
+                    self._pending_stop()
         association = LiveCommit(step, batch[0].sequence, expected_tick,
                                  result.ingest_sequence, self._pending_checksum)
         with self._condition:
@@ -479,6 +511,13 @@ class LivePlantSession:
                 self._failure_reason = "pacing_error"
                 self._anchor = self._wall_now()
             self._condition.notify_all()
+
+    def _pending_stop(self) -> None:
+        with self._condition:
+            if self._request == "stop":
+                assert self._request_ticket is not None
+                self._failure_reason = self._request_ticket.reason + "_pending_batch"
+                raise LivePlantError("unresolved batch interrupted by trusted stop")
 
     def _wall_now(self) -> float:
         value = self._monotonic()
@@ -511,7 +550,6 @@ class LivePlantSession:
                 raise LivePlantError("live attachment has not been attested")
             self._reserve_events(1)
             self._owner = secrets.token_hex(16)
-            self._producer_owner = self._owner
             owner = self._owner
             try:
                 self._failure_reason = "pacing_error"
@@ -575,6 +613,8 @@ class LivePlantSession:
                     raise LivePlantSuperseded("pause superseded by stop")
                 if not ready:
                     raise LivePlantError("lifecycle boundary has not resolved")
+                if host_close and self._state in (LivePlantState.STOPPED, LivePlantState.FAILED):
+                    return
                 if not ticket.acknowledged:
                     raise LivePlantError("requested lifecycle transition unavailable")
                 if operation == "stop" and self._state == LivePlantState.FAILED:
@@ -601,7 +641,6 @@ class LivePlantSession:
     def _boundary(self) -> bool:
         """Only the producer acknowledges requests, with no unresolved batch."""
         with self._condition:
-            self._check_owner()
             if self._pending is not None:
                 raise LivePlantError("unresolved source batch at lifecycle boundary")
             if self._request == "pause":
@@ -613,35 +652,29 @@ class LivePlantSession:
                 self._wake.clear()
                 self._condition.notify_all()
             self._condition.wait_for(lambda: self._state != LivePlantState.PAUSED
-                                     or self._request == "stop"
-                                     or self._owner != self._producer_owner)
-            self._check_owner()
+                                     or self._request == "stop")
             if self._request == "stop":
                 assert self._request_ticket is not None
                 self._stop_reason = self._request_ticket.reason
                 self._request_ticket.acknowledged = True
             return self._request != "stop"
 
-    def _check_owner(self) -> None:
-        if self._state in (LivePlantState.ACTIVE, LivePlantState.PAUSED) and (
-                self._owner is None or self._owner != self._producer_owner):
-            self._failure_reason = "ownership_lost"
-            raise LivePlantError("live stepping ownership unavailable")
-
     def _produce(self) -> None:
         state, reason = LivePlantState.STOPPED, "configured_steps_reached"
         try:
             for step in range(1, self.policy.step_count + 1):
-                if not self._pace():
+                if not self._boundary():
                     reason = self._stop_reason
                     break
-                self._check_owner()
                 if isinstance(self.policy, LivePlantPolicyV2):
                     capacity = ("capacity_events" if len(self._events) + 1 >= self.policy.session_event_cap
                                 else self.policy.capacity_reason(self.telemetry, len(self._commits)))
                     if capacity:
                         reason = capacity
                         break
+                if not self._pace():
+                    reason = self._stop_reason
+                    break
                 self._failure_reason = "source_unavailable"
                 if self._advance is None:
                     raise LivePlantError("producer resource unavailable")
@@ -651,8 +684,8 @@ class LivePlantSession:
                 if not self._boundary():
                     reason = self._stop_reason
         except BaseException as exc:
-            self._record_diagnostic(exc, self._failure_reason)
             state, reason = LivePlantState.FAILED, self._failure_reason
+            self._record_diagnostic(exc, reason)
         finally:
             self._finish(state, reason)
 
@@ -678,11 +711,19 @@ class LivePlantSession:
             self._request = None
             self._state = state
             self._terminal_reason = reason
-            self._event(state, reason)
-            # Failed pending records never become a second retained data set.
-            if isinstance(self.policy, LivePlantPolicyV2):
-                self._pending = None
-            self._condition.notify_all()
+            try:
+                self._event(state, reason)
+            except BaseException:
+                # A failed history device cannot strand ownership or waiters.
+                # Retain the fixed failure locally; durable recovery is not claimed.
+                self._state = LivePlantState.FAILED
+                self._terminal_reason = "terminal_history_unavailable"
+                self._events.append(self._event_record(self._state, self._terminal_reason))
+            finally:
+                # Failed pending records never become a second retained data set.
+                if isinstance(self.policy, LivePlantPolicyV2):
+                    self._pending = None
+                self._condition.notify_all()
 
     def wait_for_commit(self, ingest_sequence: int, timeout: float = 30) -> None:
         """Trusted supervision only; waits for a producer, never advances it."""
@@ -706,10 +747,9 @@ class LivePlantSession:
     def close_prepared(self) -> None:
         """Trusted host close, including active/paused producers; retain reads."""
         with self._condition:
-            prepared = self._state == LivePlantState.PREPARED
-        if prepared:
-            self.dispose()
-            return
+            if self._state == LivePlantState.PREPARED:
+                self.dispose()
+                return
         try:
             self._lifecycle("stop", None, 30, host_close=True)
         finally:

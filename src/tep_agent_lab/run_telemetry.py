@@ -334,8 +334,10 @@ class LiveTelemetry(TelemetryReads):
             if result.new_count:
                 self.retained_samples += result.new_count
                 unique = {r.sample.identity: r for r in accepted}
-                self.retained_bytes += sum(len(canonical_json(to_jsonable(r.sample)))
-                                           for r in unique.values())
+                sizes_by_identity = {(item.source_id, item.signal_id, item.sequence): size
+                                     for item, size in zip(batch, sizes)}
+                self.retained_bytes += sum(sizes_by_identity[(key.source_id, key.signal_id,
+                                                             key.sequence)] for key in unique)
             return result
 
     def dispose(self) -> None:

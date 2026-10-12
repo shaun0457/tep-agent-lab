@@ -1007,7 +1007,10 @@ class RunManager:
 
     def close_live(self, run_id: str) -> None:
         """Trusted host close; an unstarted session is also disposed."""
-        self.live_session(run_id).close_prepared()
+        try:
+            self.live_session(run_id).close_prepared()
+        except LivePlantError as exc:
+            raise LifecycleError(str(exc)) from exc
 
     def live_session(self, run_id: str) -> LivePlantSession:
         """Trusted host handle; lifecycle diagnostics never enter public read models."""

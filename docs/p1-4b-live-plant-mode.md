@@ -309,7 +309,8 @@ capability claim. LOS-B-S4 and Operational State remain outside this change.
 [PAUSED] -- same owner / resume --> [ACTIVE]
 [ACTIVE] -- configured end or pre-step capacity boundary --> [STOPPED]
 [ACTIVE / PAUSED] -- resolved stop / host close --> [STOPPED]
-[ACTIVE / PAUSED] -- source, translation, commit, clock or ownership failure --> [FAILED]
+[ACTIVE / PAUSED] -- source, translation, commit or clock failure --> [FAILED]
+[unresolved refused batch] -- operator stop / host close --> [FAILED + retained prefix]
 [STOPPED / FAILED] -- exact T/K reads --> [retained committed prefix]
 [PREPARED] -- close or dispose / close environment --> [STOPPED + disposed]
 [STOPPED / FAILED] -- explicit dispose / release store and slot --> [disposed]
@@ -323,9 +324,9 @@ parameter checksum is `4ace02165be9f994ee8ee9be29eef3e0194098c14f05d2281374ce5d1
 the sustained demo explicitly selects ACCELERATED pacing and therefore records its
 own different exact policy checksum. Confirmed v0 values, serialized fields and
 checksum `683ed7f5ae0131504097a1bceaed927e03fee83344d7a2e375b38a43b998ce15`
-are unchanged. v1 pacing/lifecycle semantics remain unchanged.
+are unchanged. v1 serialized policy values are unchanged.
 
-Before each integration step, v2 reserves one complete worst-case batch against
+Before pacing for each integration step, v2 reserves one complete worst-case batch against
 sample, serialized byte, index, commit and commit-association metadata caps. The
 check uses retained actual sample bytes plus `53 * sample_byte_cap` for the next
 batch, not an optimistic estimate of its values. A count cap reserves all 53
@@ -333,7 +334,8 @@ bindings. Capacity exhaustion ends STOPPED before calling the simulator, with a
 distinct trusted `capacity_samples`, `capacity_bytes`, `capacity_commits`,
 `capacity_index`, `capacity_commit_metadata` or `capacity_events` reason. Public
 capacity reason is `capacity_reached`. No eviction or rollback modifies the
-committed prefix. Every nonterminal event retains terminal room; the v2 producer
+committed prefix. A saturated session does not wait another pacing interval (which
+may be up to 3,600 seconds). Every nonterminal event retains terminal room; the v2 producer
 stops when only that room remains. Disposal has its separate pinned single host
 event, so it does not consume or reopen terminal capacity.
 
@@ -347,6 +349,20 @@ manifest Task metadata and live handle. One environment is initialized. Existing
 P0 assembly, sealed telemetry and Coordinator behavior are unchanged; the manifest
 schema/storage fields retain their meanings, while uncreated investigation owners
 report unavailable. No investigation authority or future handoff is introduced.
+
+V2 validation uses the selected v2 caps and the reader envelope, rather than v0
+default caps. Preparation also reserves the worst serialized diagnostic and terminal
+fallback layouts, including a bounded ASCII exception type (at most 48 characters),
+the longest fixed reason, checksum refs and numeric widths. Exception messages are
+never formatted or retained. Diagnostic artifact I/O failure still ends FAILED;
+the trusted terminal record carries the fixed failure reason and
+`diagnostic_status=diagnostic_unavailable`, without inventing an artifact ref.
+If an earlier diagnostic was written successfully, its exact ref stays available
+when recording a later close diagnostic fails.
+Closing physics cannot bypass terminal state, owner release or waiter notification.
+If the terminal history device itself fails, the in-process trusted event/state is
+FAILED / `terminal_history_unavailable`; no durable record is claimed for a failed
+write. Terminal disposal remains possible once the history device is writable.
 
 ### Proposed final caps and recovery policy
 
@@ -364,11 +380,11 @@ These additions and the demonstration envelope require owner confirmation.
 | Commits / association record | 301 / 1,024 bytes | One immutable association per batch; validated before commit. |
 | Commit metadata bytes (new) | 308,224 | `301 * 1,024`; reserves complete bounded association metadata, apart from sample payload. |
 | Producer session events / record | 35 / 1,024 bytes | Retains v1's cap, including terminal room; covers 16 pause/resume pairs. |
-| Trusted diagnostics (explicit in v2) | 2 artifacts, each <= 1,024 bytes | Producer failure plus possible close failure; checksum chain retains both. Type and first 48 detail characters, with truncation flag, are trusted-only. |
+| Trusted diagnostics (explicit in v2) | 2 artifacts, each <= 1,024 bytes | Producer failure plus possible close failure; checksum chain retains both. Bounded exception type and fixed reason only, with exact step/K and pending/prior refs; no raw exception text. |
 | Host disposal event (new) | 1, bounded by 1,024 bytes | Idempotent terminal disposal outside the producer's 35-event budget. |
 | Lab-owned simulator history / rollout artifacts | 0 / 0 | Consume public step observations directly; live prepare now skips the entire investigation assembly. |
 | Retained live attachments / RunManager | 1 | STOPPED and FAILED keep the slot until disposal; PREPARED close also disposes. |
-| Retry count / wait (new) | 3 retries after first attempt / 0.1 seconds each | Four total attempts, at most 0.3 seconds of requested retry waiting; enough for transient refusal while keeping recovery short and finite. |
+| Retry count / wait (new) | 3 retries after first attempt / 0.1 seconds each | Four total attempts, at most 0.3 seconds of requested retry waiting. All v2 configurations require `retry_count * retry_wait_seconds <= 1.0` second, leaving at least 29 seconds of the 30-second lifecycle/close timeout for ordinary synchronous delivery and cleanup. |
 | Read lifetime (new explicit field) | Until explicit disposal or process loss | Retain exact snapshots in process; no expiry, rolling eviction, durable telemetry or checkpoint/resume. |
 
 Only `IngestBackpressure` means a typed retryable **atomic refusal**, with no
@@ -376,19 +392,49 @@ accepted batch or unknown outcome. The current in-memory adapter does not raise
 it naturally; test-only refusing adapters exercise the contract. Retry retains the
 identical translated tuple/checksum/identities, never invokes translation again and
 never steps while pending. The injectable monotonic clock/sleeper enforce the pinned
-wait; lifecycle wake signals cannot shorten it. A successful late commit reanchors
+wait; operator stop and host close interrupt it through the lifecycle wake event.
+Pause still waits for the pending batch to resolve. A successful late commit reanchors
 S2 pacing rather than catching up. Ordinary errors and unknown commit outcomes are
 not retried. A synchronous adapter must return or refuse; preempting a hung external
 adapter is not implemented and is not claimed by the retry wait budget.
 
+Stop/host close observed while a translated batch remains unresolved fails closed
+with trusted reason `operator_stop_pending_batch` / `host_close_pending_batch`.
+It commits none of that refused batch, records its checksum and last successful
+step/K, stops stepping and retains the earlier exact prefix. This is an explicit
+negative terminal outcome, never a silent drop or a configured-success stop.
+Operator stop reports the existing typed lifecycle failure; host close joins the
+producer and returns once the FAILED terminal state is reached. A synchronous
+commit already executing must first return its atomic acceptance/refusal; a fully
+accepted batch may resolve before the stop is observed. No partial commit is allowed.
+
 Identical committed sample identities resolve idempotently without advancing K or
 retention again; different content rejects the entire batch atomically. Exhausted
-retry, simulator/shutdown, binding/field/grid/value/identity/clock errors and lost
-ownership stop stepping and end FAILED. Public reason is always
+retry and simulator/shutdown, binding/field/grid/value/identity/clock errors
+stop stepping and end FAILED. Public reason is always
 `live_delivery_failed`. Trusted append-only history retains last successful step/K,
-pending checksum and exact diagnostic refs. Detail, private-world data and injection
+pending checksum and exact diagnostic refs (or explicit diagnostic unavailability).
+Raw exception text never enters durable history. Private-world data and injection
 metadata never enter public queries, application reads or transport. Failures do not
 set P0 COMPLETED/RunOutcome or alter runtime TaskStatus.
+
+The v0 in-process ownership design has no lease, transfer or revocation operation.
+One producer thread acquires the token at trusted start; duplicate starts and
+lifecycle requests with another token reject. That producer's unconditional terminal
+cleanup releases ownership, and host close joins it. Ownership cannot disappear
+independently while the process and producer are alive, so the former private-field
+`ownership_lost` polling path has been removed. Unexpected producer exceptions end
+FAILED through the same cleanup. Process loss makes the entire incarnation unavailable
+and prevents any more stepping or same-incarnation recovery; it cannot promise a
+durable failure record. This satisfies the spec's lost-ownership fail-closed boundary
+without claiming a distributed lease detector. Tests exercise trusted start, wrong-owner
+requests and host close; they do not mutate private owner fields.
+
+RunSummaryView obtains state and redacted reason in one session critical section,
+so a capacity/failure transition cannot publish a contradictory state/reason pair.
+RunManager.close_live translates session errors to LifecycleError consistently with
+the other trusted lifecycle operations. PREPARED disposal is decided and performed
+under one critical section with start, eliminating the host-close/start race.
 
 ### Disposal, restart and process loss
 
@@ -425,10 +471,10 @@ if unavailable the CLI explicitly reports a payload proxy, not an RSS claim.
 | Measured / proposed envelope | Result / rationale |
 |---|---|
 | Simulated duration | 300 seconds, final T=300 / K=301 |
-| Measured wall duration | 22.614 seconds (producer plus complete public history verification); pacing minimum 15 seconds, physics/serialization/scheduling adds elapsed time |
+| Measured wall duration | 23.567 seconds (producer plus complete public history verification, executor review-fix verification); pacing minimum 15 seconds, physics/serialization/scheduling adds elapsed time |
 | Peak retained samples | 15,953, exactly matching all public history samples |
 | Peak retained serialized bytes | 6,147,205 bytes; under 16 MiB cap |
-| Process peak RSS | 49,487,872 bytes (about 47.2 MiB), measured after live preparation skips P0 assembly |
+| Process peak RSS | 48,508,928 bytes (about 46.3 MiB), measured after live preparation skips P0 assembly |
 | Proposed process envelope | 256 MiB (268,435,456 bytes); >5x measured peak for interpreter/platform overhead. An exit-demonstration acceptance envelope, not a portable enforced OS memory limit. CLI returns failure if measured RSS exceeds it. |
 
 This is a **clean deterministic simulated stream** qualification only. There is no

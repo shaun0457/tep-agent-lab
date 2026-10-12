@@ -3,12 +3,13 @@
 from dataclasses import replace
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from industrial_agent_runtime import to_jsonable
 
 import test_live_plant_session as helpers
-from tep_agent_lab.live_plant import LivePlantPolicyV2, LivePlantState
+from tep_agent_lab.live_plant import (LivePlantError, LivePlantPolicyV2, LivePlantSession,
+                                     LivePlantState, MAX_RETRY_WINDOW_SECONDS)
 from tep_agent_lab.persistence import RunLog, canonical_json
 from tep_agent_lab.playground import LifecycleError, RunManager, RunStatus
 from tep_agent_lab.run_telemetry import IngestBackpressure
@@ -21,8 +22,8 @@ class LiveLimitsTests(unittest.TestCase):
     setUp = helpers.LivePlantTests.setUp
     prepare = helpers.LivePlantTests.prepare
 
-    def baseline(self, policy=None):
-        wall = helpers.FakeWall()
+    def baseline(self, policy=None, *, wall=None):
+        wall = wall or helpers.FakeWall()
         self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
         manifest, live = self.prepare(policy or LivePlantPolicyV2(step_count=4))
         query = self.manager.queries("live-test")
@@ -142,8 +143,14 @@ class LiveLimitsTests(unittest.TestCase):
         history = RunLog(live.history.directory)
         diagnostic = history.read_artifact(history.events()[-1]["payload"]["diagnostic_ref"])
         previous = history.read_artifact(diagnostic["prior_diagnostic_ref"])
-        self.assertEqual(diagnostic["detail"], "PRIVATE close detail")
-        self.assertEqual(previous["detail"], "PRIVATE advance detail")
+        self.assertEqual(diagnostic["category"], "RuntimeError")
+        self.assertEqual(previous["category"], "RuntimeError")
+        self.assertEqual(diagnostic["reason"], "resource_close_unavailable")
+        self.assertEqual(previous["reason"], "source_unavailable")
+        for record in (diagnostic, previous):
+            self.assertNotIn("detail", record)
+            self.assertNotIn("detail_truncated", record)
+            self.assertNotIn("PRIVATE", str(record))
         self.assertEqual(len(list((history.directory / "artifacts").iterdir())), 2)
         self.assert_prefix(data)
         self.manager.dispose_live("live-test")
@@ -206,7 +213,7 @@ class LiveLimitsTests(unittest.TestCase):
         self.assert_prefix(data)
 
     def test_fail_closed_source_and_translation(self):
-        for fault in ("simulator", "binding", "field", "grid", "nonfinite", "clock", "identity", "owner"):
+        for fault in ("simulator", "binding", "field", "grid", "nonfinite", "clock", "identity"):
             with self.subTest(fault=fault):
                 data = self.baseline()
                 live = data[1]
@@ -232,13 +239,8 @@ class LiveLimitsTests(unittest.TestCase):
                     if fault == "identity":
                         batch = tuple(replace(x, sequence=0) for x in batch)
                     return batch
-                def lose_owner():
-                    with live._condition:
-                        live._owner = None
-                    return live._boundary()
-                seam = (patch.object(live, "_pace", side_effect=lose_owner) if fault == "owner"
-                        else patch.object(live, "_advance", side_effect=bad_advance))
-                with seam, patch.object(live.telemetry.source, "translate_sanitized", side_effect=bad_translate):
+                with patch.object(live, "_advance", side_effect=bad_advance), \
+                        patch.object(live.telemetry.source, "translate_sanitized", side_effect=bad_translate):
                     live.start()
                     live.wait()
                 self.assertEqual(live.state, LivePlantState.FAILED)
@@ -248,7 +250,7 @@ class LiveLimitsTests(unittest.TestCase):
                 self.assert_prefix(data)
                 history = RunLog(live.history.directory)
                 diagnostic = history.read_artifact(history.events()[-1]["payload"]["diagnostic_ref"])
-                self.assertIn("detail", diagnostic)
+                self.assertNotIn("detail", diagnostic)
                 self.assertNotIn("PRIVATE", str(data[2].run_summary()))
                 self.manager.dispose_live("live-test")
                 # New run, never re-prepare READY; independent test root.
@@ -335,7 +337,9 @@ class LiveLimitsTests(unittest.TestCase):
         finally:
             live.close_prepared()
 
-    def test_lost_ownership_while_paused_fails_without_another_step(self):
+    def test_paused_owner_cannot_be_replaced_and_host_close_joins(self):
+        self.assertFalse(hasattr(LivePlantSession, "_check_owner"),
+                         "in-process ownership must not pretend to detect lease loss")
         wall = helpers.HeldWall()
         self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
         _, live = self.prepare(LivePlantPolicyV2(step_count=1,
@@ -344,12 +348,299 @@ class LiveLimitsTests(unittest.TestCase):
         try:
             self.assertTrue(wall.entered.wait(10))
             live.pause(owner=owner)
-            with live._condition:
-                live._owner = None  # Test-only ownership loss, never a public operation.
-                live._condition.notify_all()
-            live.wait(timeout=1)
-            self.assertEqual(live.state, LivePlantState.FAILED)
-            self.assertEqual(live.public_reason, "live_delivery_failed")
+            with self.assertRaises(LifecycleError):
+                self.manager.start_live("live-test")
+            with self.assertRaises(LifecycleError):
+                self.manager.resume_live("live-test", owner="different-owner")
+            self.assertEqual(live.owner, owner)
+            self.manager.close_live("live-test")
+            self.assertEqual(live.state, LivePlantState.STOPPED)
+            self.assertIsNone(live.owner)
             self.assertEqual(live.last_step, 0)
         finally:
             live.close_prepared()
+
+    def test_verifier_nul_exception_at_400_byte_cap_always_fails(self):
+        data = self.baseline(LivePlantPolicyV2(step_count=4, event_byte_cap=400))
+        live = data[1]
+        with patch.object(live, "_advance", side_effect=RuntimeError("\x00" * 48)):
+            live.start()
+            live.wait()
+        self.assertEqual(live.state, LivePlantState.FAILED)
+        self.assertEqual(live.public_status(), (LivePlantState.FAILED, "live_delivery_failed"))
+        event = RunLog(live.history.directory).events()[-1]
+        self.assertEqual(event["type"], "FAILED")
+        self.assertEqual(event["payload"]["reason"], "source_unavailable")
+        diagnostic = live.history.read_artifact(event["payload"]["diagnostic_ref"])
+        self.assertNotIn("detail", diagnostic)
+        self.assert_prefix(data)
+
+    def test_preparation_reserves_longest_failure_record(self):
+        from tep_agent_lab.playground import PrepareError
+        # Old resource_close_unavailable frame fit exactly; pending-stop needs more.
+        with patch("tep_agent_lab.playground.TEPEnvironment") as environment, \
+                self.assertRaises(PrepareError):
+            self.prepare(LivePlantPolicyV2(step_count=4, event_byte_cap=318))
+        environment.assert_not_called()
+
+    def test_producer_diagnostic_io_failure_keeps_failed_history(self):
+        data = self.baseline()
+        live = data[1]
+        with patch.object(live, "_advance", side_effect=RuntimeError("PRIVATE")), \
+                patch.object(live.history, "put_artifact", side_effect=OSError("PRIVATE disk")):
+            live.start()
+            live.wait()
+        self.assertEqual(live.state, LivePlantState.FAILED)
+        self.assertIsNone(live.owner)
+        event = live.history.events()[-1]
+        self.assertEqual(event["type"], "FAILED")
+        self.assertEqual(event["payload"]["reason"], "source_unavailable")
+        self.assertEqual(event["payload"]["diagnostic_status"], "diagnostic_unavailable")
+        self.assertIsNone(event["payload"]["diagnostic_ref"])
+        self.manager.dispose_live("live-test")
+
+    def test_close_failure_is_terminal_and_disposable_for_all_diagnostics(self):
+        class UnprintableError(RuntimeError):
+            def __str__(self):
+                raise AssertionError("exception text must never be formatted")
+
+        faults = (UnprintableError(), RuntimeError("\x00" * 48),
+                  RuntimeError("PRIVATE" * 1000), RuntimeError("\ud800"))
+        for index, fault in enumerate(faults):
+            for io_failure in (False, True):
+                with self.subTest(index=index, io_failure=io_failure):
+                    if index or io_failure:
+                        self.manager = RunManager(
+                            str(self.temp.name) + f"/close-{index}-{io_failure}",
+                            revisions=self.manager.revisions, dependency_pins=self.manager.dependency_pins,
+                            clock=self.manager.clock)
+                        self.manager.create("live-test", self.request)
+                    _, live = self.prepare(LivePlantPolicyV2(step_count=1, event_byte_cap=400))
+                    close = live._close_physics
+                    def bad_close():
+                        close()
+                        raise fault
+                    writer = live.history.put_artifact
+                    with patch.object(live, "_close_physics", side_effect=bad_close), \
+                            patch.object(live.history, "put_artifact",
+                                         side_effect=OSError("disk unavailable") if io_failure else writer):
+                        live.start()
+                        live.wait(timeout=1)
+                    self.assertEqual(live.state, LivePlantState.FAILED)
+                    self.assertIsNone(live.owner)
+                    event = live.history.events()[-1]
+                    self.assertEqual(event["payload"]["reason"], "resource_close_unavailable")
+                    if io_failure:
+                        self.assertEqual(event["payload"]["diagnostic_status"], "diagnostic_unavailable")
+                    else:
+                        diagnostic = live.history.read_artifact(event["payload"]["diagnostic_ref"])
+                        self.assertNotIn("detail", diagnostic)
+                    self.manager.close_live("live-test")
+                    self.manager.dispose_live("live-test")
+                    self.assertEqual(live.telemetry.retained_samples, 0)
+                    self.manager.create("replacement", self.request)
+                    self.manager.prepare("replacement", provider=helpers.NoModel(), context_sources=self.sources,
+                                         live_policy=LivePlantPolicyV2(step_count=1))
+                    self.addCleanup(self.manager.live_session("replacement").close_prepared)
+
+    def test_terminal_history_io_failure_still_releases_owner_and_notifies(self):
+        _, live = self.prepare(LivePlantPolicyV2(step_count=1))
+        append = live.history.append
+        def fail_terminal(kind, payload):
+            if kind in ("FAILED", "STOPPED"):
+                raise OSError("disk unavailable")
+            return append(kind, payload)
+        with patch.object(live.history, "append", side_effect=fail_terminal):
+            live.start()
+            live.wait(timeout=1)
+        self.assertEqual(live.state, LivePlantState.FAILED)
+        self.assertIsNone(live.owner)
+        self.assertEqual(live.events[-1]["reason"], "terminal_history_unavailable")
+        self.manager.dispose_live("live-test")
+
+    def test_close_diagnostic_io_failure_preserves_prior_exact_ref(self):
+        _, live = self.prepare(LivePlantPolicyV2(step_count=1, event_byte_cap=400))
+        close, writer = live._close_physics, live.history.put_artifact
+        refs = []
+        def write_once(value):
+            if refs:
+                raise OSError("second diagnostic unavailable")
+            ref = writer(value)
+            refs.append(ref)
+            return ref
+        def bad_close():
+            close()
+            raise RuntimeError("PRIVATE close")
+        with patch.object(live, "_advance", side_effect=RuntimeError("PRIVATE source")), \
+                patch.object(live, "_close_physics", side_effect=bad_close), \
+                patch.object(live.history, "put_artifact", side_effect=write_once):
+            live.start()
+            live.wait()
+        event = live.history.events()[-1]["payload"]
+        self.assertEqual(live.state, LivePlantState.FAILED)
+        self.assertEqual(event["reason"], "resource_close_unavailable")
+        self.assertEqual(event["diagnostic_status"], "diagnostic_unavailable")
+        self.assertEqual(event["diagnostic_ref"], refs[0])
+        self.assertEqual(live.history.read_artifact(refs[0])["reason"], "source_unavailable")
+        self.manager.dispose_live("live-test")
+
+    def test_host_close_serializes_prepared_disposal_against_start(self):
+        _, live = self.prepare(LivePlantPolicyV2(step_count=1))
+        disposing, start_attempted, release = (threading.Event() for _ in range(3))
+        dispose = live.dispose
+        outcomes = {}
+        def blocked_dispose():
+            disposing.set()
+            self.assertTrue(release.wait(2))
+            dispose()
+        def close():
+            try:
+                self.manager.close_live("live-test")
+                outcomes["close"] = "closed"
+            except BaseException as exc:
+                outcomes["close"] = exc
+        def start():
+            start_attempted.set()
+            try:
+                outcomes["start"] = self.manager.start_live("live-test")
+            except LifecycleError:
+                outcomes["start"] = "rejected"
+        with patch.object(live, "dispose", side_effect=blocked_dispose):
+            closer = threading.Thread(target=close)
+            starter = threading.Thread(target=start)
+            closer.start()
+            try:
+                self.assertTrue(disposing.wait(2))
+                starter.start()
+                self.assertTrue(start_attempted.wait(2))
+                # Close owns the decision lock through disposal. A nonblocking
+                # probe deterministically detects the former split critical sections.
+                acquired = live._condition.acquire(blocking=False)
+                if acquired:
+                    live._condition.release()
+                self.assertFalse(acquired)
+            finally:
+                release.set()
+                closer.join(2)
+                if starter.ident is not None:
+                    starter.join(2)
+        self.assertFalse(closer.is_alive())
+        self.assertFalse(starter.is_alive())
+        self.assertEqual(outcomes, {"close": "closed", "start": "rejected"})
+        self.assertEqual(live.telemetry.retained_samples, 0)
+
+    def test_retry_policy_total_wait_is_at_most_one_second(self):
+        self.assertEqual(MAX_RETRY_WINDOW_SECONDS, 1.0)
+        for count, wait in ((100, 60), (3, 0.34), (1, 1.01)):
+            with self.subTest(count=count, wait=wait), self.assertRaises(ValueError):
+                LivePlantPolicyV2(retry_count=count, retry_wait_seconds=wait)
+        self.assertEqual(LivePlantPolicyV2(retry_count=4, retry_wait_seconds=0.25).retry_count, 4)
+
+    def interrupted_retry(self, *, host_close):
+        wall = helpers.HeldWall()
+        self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
+        data = self.baseline(wall=wall)
+        live = data[1]
+        finished = threading.Event()
+        errors = []
+        with patch.object(live.telemetry, "commit_batch", side_effect=IngestBackpressure("PRIVATE")) as commit, \
+                patch.object(live, "_advance", wraps=live._advance) as advance, \
+                patch.object(live.telemetry.source, "translate_sanitized",
+                             wraps=live.telemetry.source.translate_sanitized) as translate:
+            owner = self.manager.start_live("live-test")
+            def stop():
+                try:
+                    if host_close:
+                        self.manager.close_live("live-test")
+                    else:
+                        self.manager.stop_live("live-test", owner=owner)
+                except LifecycleError as exc:
+                    errors.append(exc)
+                finally:
+                    finished.set()
+            stopper = threading.Thread(target=stop)
+            try:
+                self.assertTrue(wall.entered.wait(2))
+                stopper.start()
+                # Safety timeout, not a correctness sleep: the sleeper must be
+                # interrupted rather than waiting for fake monotonic time to pass.
+                self.assertTrue(finished.wait(MAX_RETRY_WINDOW_SECONDS))
+            finally:
+                live.close_prepared()
+                if stopper.ident is not None:
+                    stopper.join(2)
+            self.assertEqual(commit.call_count, 1)
+            self.assertEqual(advance.call_count, 1)
+            self.assertEqual(translate.call_count, 1)
+        self.assertEqual(len(errors), 0 if host_close else 1)
+        self.assertEqual(live.state, LivePlantState.FAILED)
+        self.assertIsNone(live.owner)
+        self.assertEqual(wall.elapsed, 0)
+        self.assertEqual(live.last_step, 0)
+        self.assertEqual(live.telemetry.retained_samples, 53)
+        reason = "host_close_pending_batch" if host_close else "operator_stop_pending_batch"
+        self.assertEqual(live.history.events()[-1]["payload"]["reason"], reason)
+        self.assertIsNotNone(live.history.events()[-1]["payload"]["pending_batch_checksum"])
+        self.assert_prefix(data)
+        self.manager.dispose_live("live-test")
+
+    def test_host_close_interrupts_unresolved_retry(self):
+        self.interrupted_retry(host_close=True)
+
+    def test_operator_stop_interrupts_unresolved_retry(self):
+        self.interrupted_retry(host_close=False)
+
+    def test_v2_reservation_accepts_caps_above_v0_defaults(self):
+        _, live = self.prepare(LivePlantPolicyV2(
+            step_count=600, commit_cap=601, commit_metadata_byte_cap=601 * 1024,
+            retained_sample_cap=40_000, index_record_cap=40_000, retained_byte_cap=32 * 1024 * 1024))
+        self.assertEqual(live.state, LivePlantState.PREPARED)
+        self.assertEqual(self.manager.queries("live-test").telemetry_snapshot()["snapshot"]["ingest_sequence"], 1)
+
+    def test_run_summary_uses_one_atomic_state_reason_accessor(self):
+        data = self.baseline()
+        live = data[1]
+        with patch.object(LivePlantSession, "state", new_callable=PropertyMock,
+                          side_effect=AssertionError("split state read")), \
+                patch.object(LivePlantSession, "public_reason", new_callable=PropertyMock,
+                             side_effect=AssertionError("split reason read")), \
+                patch.object(live, "public_status", wraps=live.public_status) as status:
+            encoded = canonical_json(to_jsonable(data[2].run_summary())).decode()
+        status.assert_called_once_with()
+        self.assertIn('"state":"PREPARED"', encoded)
+        self.assertIn('"reason":null', encoded)
+
+    def test_close_live_translates_session_error(self):
+        _, live = self.prepare(LivePlantPolicyV2(step_count=1))
+        with patch.object(live, "close_prepared", side_effect=LivePlantError("trusted fixed error")):
+            with self.assertRaises(LifecycleError) as caught:
+                self.manager.close_live("live-test")
+        self.assertIsInstance(caught.exception.__cause__, LivePlantError)
+
+    def test_capacity_stop_precedes_real_time_pacing(self):
+        wall = helpers.FakeWall()
+        self.manager.live_monotonic, self.manager.live_sleeper = wall.monotonic, wall.sleep
+        _, live = self.prepare(LivePlantPolicyV2(step_count=1, commit_cap=1,
+            pacing=helpers.LivePacingPolicy(mode=helpers.LivePacingMode.REAL_TIME,
+                                           real_time_seconds_per_sim_second=3600)))
+        with patch.object(live, "_advance", wraps=live._advance) as advance:
+            live.start()
+            live.wait()
+        self.assertEqual(wall.delays, [])
+        advance.assert_not_called()
+        self.assertEqual(live.events[-1]["reason"], "capacity_commits")
+
+    def test_commit_serializes_each_sample_once_and_reuses_accounting(self):
+        _, live = self.prepare(LivePlantPolicyV2(step_count=1))
+        batch = live.telemetry.source.translate_sanitized(live._advance())
+        telemetry = live.telemetry
+        with patch("tep_agent_lab.run_telemetry.canonical_json", wraps=canonical_json) as encode:
+            before = telemetry.retained_bytes
+            result = telemetry.commit_batch(batch)
+        self.assertEqual(encode.call_count, len(batch))
+        exact = sum(len(canonical_json(to_jsonable(record.sample))) for record in result.records)
+        self.assertEqual(telemetry.retained_bytes - before, exact)
+        stats = telemetry.retained_samples, telemetry.retained_bytes
+        duplicate_batch = (batch[0], *batch)  # Same identity twice and all already accepted.
+        telemetry.commit_batch(duplicate_batch)
+        self.assertEqual((telemetry.retained_samples, telemetry.retained_bytes), stats)
