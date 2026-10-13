@@ -20,8 +20,10 @@ RuleRegistry contract ([Knowledge / Rule Registry v0](knowledge-rule-registry-v0
 [Live Operational State v0](live-operational-state-v0.md), whose LOS-A-S2/S3 slices consume
 this spec.
 
-This proposal records the owner decisions of 2026-10-12 listed in §Owner decisions.
-The owner accepts the spec through its PR merge.
+This proposal records the owner decisions of 2026-10-12 and 2026-10-13 listed in
+§Owner decisions. It ships with an additive amendment to
+[Plant Context + Telemetry v0](plant-telemetry-contract-v0.md#source-binding-levels-amendment-2026-10-13)
+(§Source binding levels). The owner accepts both through this PR's merge.
 
 ## Problem Statement
 
@@ -190,10 +192,10 @@ reproducible from exact refs or reported unavailable.
 plant-telemetry §Canonical Plant Context requires `source_binding` to identify a
 `source_id`, and §Identity treats a `source_id` as one stream incarnation. Existing P0 and
 live stream source ids embed run and session tokens, so an incarnation id cannot sit in
-a PlantContextRevision that P0 and live runs over the same graph share. The same
-section also states that "source binding changes require versioned bindings and stream
-registration". This spec applies that rule in two levels, without changing either
-owning definition:
+a PlantContextRevision that P0 and live runs over the same graph share. By owner
+decision of 2026-10-13 (PCC-OD-5), the owning contract is amended in
+[plant-telemetry §Source binding levels (amendment 2026-10-13)](plant-telemetry-contract-v0.md#source-binding-levels-amendment-2026-10-13),
+which owns these semantics. This spec implements it:
 
 - **Static level (in the PlantContextRevision):** `source_binding` names a source
   *definition*: the versioned process-pack adapter that can produce the signal, plus
@@ -431,7 +433,7 @@ because the composed view pinned at READY includes applicability, grouping and
 reachability. LOS-A-S2 (#41) needs PCC-S5 and P1.2D; LOS-A-S3 (#42) needs PCC-S3
 grouping and PCC-S5, and still inherits its own LOS-A-S2 dependency.
 
-## Owner decisions (2026-10-12)
+## Owner decisions (2026-10-12, 2026-10-13)
 
 | ID | Decision |
 |---|---|
@@ -439,6 +441,7 @@ grouping and PCC-S5, and still inherits its own LOS-A-S2 dependency.
 | PCC-OD-2 | Subsystem grouping is derived from the plant topology by a versioned grouping policy, not authored as a parallel graph or reviewed knowledge item. |
 | PCC-OD-3 | PlantContextRevision is derived at preparation and content-addressed; it is not stored as a separate repository artifact. |
 | PCC-OD-4 | Directed topology reachability (hops, cycles) is part of the composed view, labelled topology-only. |
+| PCC-OD-5 (2026-10-13) | Amend plant-telemetry-contract-v0 with §Source binding levels: the plant revision holds a static source definition; each stream incarnation registers against it; the effective binding is resolved through the exact StreamRegistration. All runs over the same plant semantics share one `plant_context_ref`. |
 
 ## Open questions for owner decision
 

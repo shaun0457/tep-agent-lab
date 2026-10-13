@@ -100,6 +100,8 @@ unitless/unknown marker, never an implicit assumption. `value_kind` declares a
 scalar numeric, boolean, or string value; unknown/missing values may be null under
 explicit quality/status. `capability` declares READ, WRITE, or READ_WRITE source
 capability; v0 telemetry provides reads only. XMEAS/XMV are not required.
+For the two-level reading of `source_binding` used by PlantContextRevision, see
+§Source binding levels (amendment 2026-10-13) below.
 
 Candidate entities/bindings may be retained for review, but MUST remain labeled and
 separate from verified operational mapping. An unverified binding MUST NOT silently
@@ -107,6 +109,37 @@ drive a trusted operational read. Unknown/unverified mapping fails closed; an
 explicit candidate-review view may expose it with status and provenance. Document
 and knowledge refs do not auto-fetch bodies into prompts and do not replace Rule
 Registry `origin × validation × authority` semantics.
+
+### Source binding levels (amendment 2026-10-13)
+
+Owner decision of 2026-10-13, recorded with
+[Plant Context Composition v0](plant-context-composition-v0.md). This amendment is
+additive. It clarifies how `source_binding` above relates to §Identity, deduplication,
+and acceptance ordering, where `source_id` identifies one registered stream
+incarnation. It changes no sample, identity, deduplication or snapshot semantics.
+
+A canonical plant revision is shared by every stream over the same plant semantics,
+while a stream incarnation is created per run or session. `source_binding` therefore has
+two levels:
+
+- **Source definition (static, in the plant revision).** In a PlantContextRevision,
+  `SignalDescriptor.source_binding` identifies a versioned *source definition*: the
+  adapter that can produce the signal, its version, and the opaque adapter-native
+  locator. It contains no incarnation id, so the plant revision and its `context_ref`
+  stay identical across runs over the same pinned plant semantics and adapter version.
+- **Incarnation binding (per stream, at registration).** Registering a stream records an
+  immutable StreamRegistration: the incarnation `source_id`, the source definition id,
+  the exact plant `context_ref`, and the registered signal ids. Registration fails unless
+  every registered signal exists in that plant revision under that source definition.
+  The registration is retained in the owning run or session provenance.
+
+The **effective binding** of a signal in a given stream is the pair (its descriptor's
+source definition, the exact StreamRegistration of that stream). It is resolved only
+through the exact registration, never through "latest" metadata or a reusable connection
+name. Sample identity remains `(source_id, signal_id, sequence)` with the incarnation
+`source_id` unchanged, and a sequence reset still requires a new incarnation and a new
+registration. A change of source definition (adapter version or locator) is a new plant
+revision; a new incarnation over an unchanged definition is only a new registration.
 
 ### Context Builder boundary
 
