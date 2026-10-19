@@ -12,7 +12,7 @@ API version or Agent tool (CL-9, CL-13); LOS-A-S4 owns transport v2.
 
 ```text
 [caller] -- run, signal, exact public snapshot (T, K), finite window, refs --> [OperationalStateService]
-[OperationalStateService] -- validate shape, policy, window bounds, host index-work bound (no reads yet) --> [boundary]
+[OperationalStateService] -- validate shape, policy, window bounds, host read limits (no reads yet) --> [boundary]
 [P0OperationalStateBoundary] -- AGENT current read: snapshot, binding, source, work bound --> [public P0 reads]
 [P0OperationalStateBoundary] -- then inventory (plant context), graph view (descriptor), history --> [public P0 reads]
 [public P0 reads] -- one pinned snapshot, unreduced complete window, aggregate work bound --> [OD-1 interpreter (pure)]
@@ -45,13 +45,14 @@ with an optional exact `source_id` for the read request's scoped source selectio
 
 The generic module (`operational_state.py`) imports only the standard library and the
 generic telemetry core. Source, signal and unit ids are opaque. The service sees an
-injected `OperationalStateBoundary`: public queries, signal descriptor, pinned plant
-context and the AGENT screen. The process pack (`tep_operational_state.py`) composes
-it over `RunManager.queries` (AGENT scope only): the descriptor (value kind NUMERIC,
-exact unit) comes from the AGENT ProcessGraphView through
-`application_views.resolve_signal_binding`, the same rule as the application signal
-reads, so any binding disagreement on (quantity, relation, unit) is an unknown/ambiguous
-binding there too. The context check uses the AGENT context inventory, and the final
+injected `OperationalStateBoundary`: host read limits, public queries, signal
+descriptor, pinned plant context and the AGENT screen. The process pack
+(`tep_operational_state.py`) composes it over `RunManager.queries` (AGENT scope only):
+the descriptor (value kind NUMERIC, exact unit) comes from the AGENT ProcessGraphView,
+checked by `application_views.checked_agent_view` (AGENT scope, run id, leakage) and
+resolved through `application_views.resolve_signal_binding`, the same check and rule as
+the application signal reads, so any binding disagreement on (quantity, relation, unit)
+is an unknown/ambiguous binding there too. The context check uses the AGENT context inventory, and the final
 screen is the existing leakage screen. The boundary maps P0-specific view and visibility
 failures into the service families. The interpreter never touches a store, private
 world state or a cache.
@@ -60,9 +61,9 @@ Order of work in one request:
 
 1. Shape, policy ref, window bounds and the engineering selection are validated with
    no boundary call.
-2. The boundary reports its host reader's per-read index-work bound (host
-   configuration); it is checked against the pinned policy before any run is opened or
-   read.
+2. The boundary reports its host reader's per-read limits (host configuration: points,
+   interval and index work); they are checked against the pinned policy before any run
+   is opened or read.
 3. The current read at (T, K) is the public P0 path that validates the exact snapshot
    (run, incarnation, clock, context, visibility policy, K) and the signal binding. A
    `source_id` that differs from the answering source fails `UnknownBinding` here,
@@ -93,12 +94,19 @@ Order of work in one request:
   partial-tail record checks) that the views do not report. The reader enforces a
   per-read probe ceiling, `max(max_scan_records, index block)`, exposed as
   `TimeSeriesReader.max_index_work`; the boundary reports that host bound from its own
-  reader configuration. The policy declares `max_index_work_per_read` and
+  reader configuration (`HostReadLimits`). The policy declares `max_index_work_per_read` and
   `max_aggregate_index_work` (at least twice the per-read bound: one current and one
   history read per request). Before any read, a host bound above the per-read bound, or
   two reads' worth above the aggregate bound, fails `ResourceLimitExceeded`; a malformed
   host bound is an internal fault. `work` reports the host bound, the request bound
   (two reads) and both policy bounds.
+- Host read limits: the same pre-read check refuses a policy whose `max_input_points`
+  exceeds the host reader's points per read, or whose `max_window_ticks` exceeds its
+  interval per read, so such a host fails at once with `ResourceLimitExceeded` instead
+  of after the current read, context and descriptor. The TEP boundary takes all three
+  limits from the manager's `TelemetryReadPolicy`, a read-only `RunManager` property
+  from which every run's reader is built; the run's reader itself is reachable only
+  through private run state.
 - Current/quality: the reader's last eligible sample at or before T under K, whatever
   its quality or nullness. An older GOOD value is never substituted.
 - Staleness: `age_ticks = T - current.event_ticks`; FRESH when `age <= stale_after_ticks`.
@@ -243,7 +251,9 @@ policy version with its own rationale and owner confirmation.
 Fixed messages never echo ids, values, hidden counts, paths or exception text. Every
 failure raised by the boundary or a public P0 read is re-raised in its family with a
 fixed message and without the original exception chained; any exception outside the
-families is an internal fault (`InconsistentRead`). The families are:
+families is an internal fault (`InconsistentRead`). The original exception (type, text,
+traceback) is logged server-side on the module logger before it is redacted: INFO for a
+family failure, ERROR for an internal fault. The families are:
 `InvalidOperationalStateRequest` (shape, window order, ticks, missing selection, invalid
 run id), `UnknownRun`, `UnknownBinding` (unknown signal, a binding whose metadata
 disagrees, or a `source_id` that differs from the run's source), `ContextUnavailable`
@@ -251,12 +261,13 @@ disagrees, or a `source_id` that differs from the run's source), `ContextUnavail
 `IncompatiblePolicy` (bad policy record or a unit without a pinned tolerance),
 `SnapshotUnavailable` (wrong run, incarnation, context, future K, tampered ref, disposed
 store), `ClockMismatch` (including a horizon clock that differs from the event clock),
-`ResourceLimitExceeded` (window, host index work, reduced input, aggregate work, inline
+`ResourceLimitExceeded` (window, host read limits, reduced input, aggregate work, inline
 refs, reader bounds, response bound), `NonfiniteDerivation`, `VisibilityViolation`
-(AGENT scope or leakage screen) and `InconsistentRead` (a public read answered another
+(AGENT scope, a graph view of another scope or run or with hidden vocabulary, or the
+leakage screen) and `InconsistentRead` (a public read answered another
 snapshot/binding/window, counts that disagree, or an internal fault). Shape, policy,
 selection and window bounds are validated before any boundary call, and the host
-index-work bound before any run is opened or read; the snapshot and source are
+read limits before any run is opened or read; the snapshot and source are
 validated by the first public read, before any other work.
 
 ### Evidence
@@ -272,9 +283,12 @@ validated by the first public read, before any other work.
   snapshot validation before context/descriptor (counting boundary), redacted boundary
   and read failures, the aggregate work bound (current alone, sum, exactly at the
   bound), the host index-work bound (wider host refused with zero reads, malformed
-  host bound, exactly at the bound with real probes counted), counts that disagree,
-  reader/response bounds (exact byte boundary), a maximum all-unusable window with 256-character ids, and policy validation (strict
-  ints for every count field) and hashing (LOS-A5); import purity.
+  host bound, exactly at the bound with real probes counted), host point and interval
+  limits (refused before any read, exactly at the limit, malformed), the server-side
+  log of redacted failures, threshold detail from the selection, counts that disagree,
+  reader/response bounds (exact byte boundary), a maximum all-unusable window with
+  256-character ids, and policy validation (strict ints for every count field) and
+  hashing (LOS-A5); import purity.
 - `tests/test_telemetry_core.py`: the reader's `max_index_work` equals the bound its
   scan budget enforces.
 - `tests/test_operational_state_integration.py`: a real P0 run checked against the public
@@ -284,7 +298,9 @@ validated by the first public read, before any other work.
   queries (horizon-only clock change, unknown source, future K, wrong context caught by
   snapshot validation); old-snapshot reads identical while a live stream grows, then
   `SnapshotUnavailable` after disposal; the TEP boundary reports the real reader's
-  index-work bound and a wider host is refused before any run is opened; the
+  limits, the reader policy cannot be reassigned, and a host with wider index work or
+  fewer points or a shorter interval is refused before any run is opened; wrong-scope,
+  wrong-run and leaking graph views are rejected; the demo prints a null current; the
   measurement's public reads and 1.5x margin rule; the demo; no transport, API version
   or Agent tool change.
 
