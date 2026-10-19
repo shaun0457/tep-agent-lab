@@ -235,6 +235,7 @@ class P0RunTests(OperationalStateIntegrationCase):
                            snapshot["event_clock"]["clock_id"], "1000000"):
                 self.assertNotIn(secret, text)
             self.assertIsNone(caught.exception.__cause__)
+            self.assertIsNone(caught.exception.__context__)
 
     def test_no_transport_method_api_version_or_agent_tool_change(self):
         self.assertEqual(application_transport.PROTOCOL_VERSION,

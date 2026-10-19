@@ -103,10 +103,12 @@ def _guarded(call: Callable[[], _T]) -> _T:
     try:
         return call()
     except Exception as error:
-        for family, public, message in _PUBLIC_FAILURES:
-            if isinstance(error, family):
-                raise public(message) from None
-        raise InconsistentRead("internal fault in a boundary or public read") from None
+        failure = error
+    # Raised outside the handler so the original is neither __cause__ nor __context__.
+    for family, public, message in _PUBLIC_FAILURES:
+        if isinstance(failure, family):
+            raise public(message)
+    raise InconsistentRead("internal fault in a boundary or public read")
 
 
 # -- vocabulary ------------------------------------------------------------------------
@@ -264,7 +266,9 @@ class InterpretationPolicy:
             if (type(tolerance) not in (int, float) or not math.isfinite(tolerance)
                     or tolerance < 0):
                 raise IncompatiblePolicy("trend tolerance must be a non-negative finite number")
-            tolerances[unit] = tolerance
+            # One canonical number per value (int -> float, -0.0 -> 0.0), so equal
+            # policies have one checksum and one hash.
+            tolerances[unit] = float(tolerance) + 0.0
         object.__setattr__(self, "trend_tolerance_per_second",
                            MappingProxyType(dict(sorted(tolerances.items()))))
         object.__setattr__(self, "value_kinds", tuple(self.value_kinds))

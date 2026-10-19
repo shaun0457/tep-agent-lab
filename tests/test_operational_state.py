@@ -593,9 +593,9 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                 with self.assertRaises(error) as caught:
                     self.read(**options)
                 self.assertRedacted(caught.exception, "secret", "clock-a", "99")
+                # Nothing of the original exception stays reachable from the public one.
                 self.assertIsNone(caught.exception.__cause__)
-                self.assertTrue(caught.exception.__context__ is None
-                                or caught.exception.__suppress_context__)
+                self.assertIsNone(caught.exception.__context__)
         # Boundary failures keep their family and lose their text; unknown ones are
         # internal faults.
         for target, error, family in (
@@ -611,6 +611,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                 with self.assertRaises(family) as caught:
                     self.read(horizon=1)
                 self.assertRedacted(caught.exception, "secret")
+                self.assertIsNone(caught.exception.__context__)
         self.setUp()
         self.plant.series(NUM, [1.0, 2.0])
         self.plant.telemetry_history = leaky(KeyError("sig-secret"))
@@ -855,6 +856,14 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         self.assertEqual(hash(same), hash(POLICY))
         self.assertEqual({POLICY: "a"}[same], "a")
         self.assertEqual(len({POLICY, same, changed}), 2)
+        # Numerically equal tolerances (int/float, -0.0/0.0) are one policy and one hash.
+        for left, right in ((1, 1.0), (-0.0, 0.0)):
+            first = InterpretationPolicy(**{**base, "trend_tolerance_per_second": {"u1": left}})
+            second = InterpretationPolicy(**{**base, "trend_tolerance_per_second": {"u1": right}})
+            with self.subTest(left=left, right=right):
+                self.assertEqual(first, second)
+                self.assertEqual(first.ref, second.ref)
+                self.assertEqual(hash(first), hash(second))
 
     def test_maximum_unusable_window_is_a_typed_status_within_the_response_bound(self):
         source, signal = "src-" + "x" * 252, "sig-" + "y" * 252
