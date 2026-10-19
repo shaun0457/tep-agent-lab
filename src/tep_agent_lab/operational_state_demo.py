@@ -28,12 +28,14 @@ from .playground import (ModelSpec, RunManager, RunRequest, SourceRevisions, Wor
 from .run_telemetry import TelemetryReadPolicy
 from .sidecar_resources import dependency_pins_path, packaged_lab_revision
 from .tep_operational_state import (TEP_CLEAN_STREAM_POLICY, interim_plant_context,
-                                    operational_state_service)
+                                    operational_state_service, served_signals)
 
 RUN_ID = "operational-demo"
 SIGNALS = ("reactor.temperature_measurement", "reactor.pressure_measurement",
            "reactor_cooling.flow_actuator")
 _COMMIT_TIMEOUT = 120.0
+# Documented OD-2 rule: each tolerance is at least 1.5x the clean maximum |rate|.
+MIN_MARGIN = Fraction(3, 2)
 
 
 class _UnusedProvider:
@@ -79,7 +81,8 @@ def _line(result) -> str:
     features = result.features
     current = features[Feature.CURRENT].value
     if current is None or features[Feature.WINDOW_MIN].value is None:
-        return f"  {result.signal_id}: current={features[Feature.CURRENT].status.value}; "                f"window={features[Feature.WINDOW_MIN].status.value}"
+        return (f"  {result.signal_id}: current={features[Feature.CURRENT].status.value}; "
+                f"window={features[Feature.WINDOW_MIN].status.value}")
     rate, trend = features[Feature.RATE_OF_CHANGE], features[Feature.TREND]
     low, high = features[Feature.WINDOW_MIN], features[Feature.WINDOW_MAX]
     window = result.window.as_json()
@@ -138,10 +141,17 @@ def _histories(manager: RunManager, run_id: str, steps: int):
     """Complete unreduced per-signal histories via public application reads (<=1000/read)."""
     app = ApplicationViewService(manager.queries)
     snapshot = app.open_telemetry_snapshot(run_id)
-    signals = manager.live_session(run_id).telemetry.source.signal_ids
+    queries = manager.queries(run_id)
+    graph = queries.process_graph()
+    bound = sorted({binding["semantic_entity_id"] for category in ("nodes", "edges")
+                    for entity in graph[category] for binding in entity["bindings"]})
+    signals = served_signals(queries)
+    if list(signals) != bound:
+        raise RuntimeError("measurement requires every bound signal to be served")
     series = {}
     for signal in signals:
         unit = app.get_signal(run_id, signal, snapshot=snapshot).unit
+        TEP_CLEAN_STREAM_POLICY.tolerance(unit)   # every served unit has a pinned tolerance
         values = []
         for start in range(0, steps + 1, 1000):
             history = app.get_signal_history(run_id, signal, snapshot=snapshot,
@@ -156,6 +166,11 @@ def _histories(manager: RunManager, run_id: str, steps: int):
             raise RuntimeError("measurement requires one GOOD sample per tick")
         series[signal] = (unit, [value for _, value, _ in values])
     return series
+
+
+def margin_ok(tolerance: float, worst: Fraction) -> bool:
+    """Whether a tolerance keeps the documented margin over the clean maximum |rate|."""
+    return worst == 0 or Fraction(tolerance) >= MIN_MARGIN * worst
 
 
 def _measure(steps: int, seeds: list[int]) -> int:
@@ -194,14 +209,15 @@ def _measure(steps: int, seeds: list[int]) -> int:
                     manager.dispose_live(run_id)
     print(f"{'unit':>6} {'1 s step std':>13} {'max |rate| /s':>14} {'tolerance /s':>13} "
           f"{'margin':>7}")
-    margins = []
+    passed = True
     for unit in sorted(worst):
         tolerance = TEP_CLEAN_STREAM_POLICY.tolerance(unit)
         margin = (Fraction(tolerance) / worst[unit]) if worst[unit] else None
-        margins.append(margin)
+        passed = passed and margin_ok(tolerance, worst[unit])
         print(f"{unit:>6} {noise[unit]:>13.4g} {float(worst[unit]):>14.6g} {tolerance:>13g} "
               f"{'n/a' if margin is None else f'{float(margin):.2f}x':>7}")
-    return 0 if all(margin is None or margin > 1 for margin in margins) else 1
+    print(f"required margin: >= {float(MIN_MARGIN)}x; {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
 
 
 def main(argv: list[str] | None = None) -> int:

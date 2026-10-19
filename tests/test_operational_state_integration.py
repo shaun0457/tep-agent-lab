@@ -16,7 +16,8 @@ import unittest
 
 from industrial_agent_runtime import Budget, to_jsonable
 
-from tep_agent_lab import application_transport, tool_bridge, tool_surface
+from tep_agent_lab import (application_transport, operational_state_demo, tool_bridge,
+                           tool_surface)
 from tep_agent_lab.application_views import ApplicationViewService
 from tep_agent_lab.live_plant import LivePlantPolicyV2
 from tep_agent_lab.operational_state import (ContextUnavailable, EngineeringSelection, Feature,
@@ -277,6 +278,34 @@ class LiveStreamTests(OperationalStateIntegrationCase):
         self.manager.dispose_live("op-live")
         with self.assertRaises(SnapshotUnavailable):
             self.read("op-live", TEMPERATURE, old)
+
+    def test_measurement_uses_public_reads_and_enforces_the_documented_margin(self):
+        source = Path(operational_state_demo.__file__).read_text(encoding="utf-8")
+        for private in (".telemetry.", "._runs", ".session."):
+            self.assertFalse(private in source, private)
+        self.assertEqual(operational_state_demo.MIN_MARGIN, Fraction(3, 2))
+        self.assertTrue(operational_state_demo.margin_ok(0.375, Fraction(1, 4)))   # exactly 1.5x
+        self.assertFalse(operational_state_demo.margin_ok(0.375, Fraction(1, 4) + Fraction(1, 10**9)))
+        self.assertFalse(operational_state_demo.margin_ok(0.125, Fraction(1, 10)))  # 1.25x
+        self.assertTrue(operational_state_demo.margin_ok(0.02, Fraction(0)))
+        # A short clean stream: the measured set is the served set, every unit pinned.
+        manager = operational_state_demo._manager(self.directory())
+        live = operational_state_demo._prepare(manager, "op-measure", 11,
+                                               LivePlantPolicyV2(step_count=3))
+        self.addCleanup(manager.dispose_live, "op-measure")
+        manager.start_live("op-measure")
+        live.wait(timeout=60)
+        series = operational_state_demo._histories(manager, "op-measure", 3)
+        self.assertEqual(tuple(series), served_signals(manager.queries("op-measure")))
+        self.assertEqual(len(series), 53)
+        for unit, values in series.values():
+            TEP_CLEAN_STREAM_POLICY.tolerance(unit)
+            self.assertEqual(len(values), 4)
+
+    def directory(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return temp.name
 
     def test_demo_prints_unchanged_old_snapshot(self):
         output = io.StringIO()
