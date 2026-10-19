@@ -21,7 +21,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-from .application_views import AmbiguousSignal, UnknownSignal, resolve_signal_binding
+from .application_views import (AmbiguousSignal, UnknownSignal, checked_agent_view,
+                                resolve_signal_binding)
 from .canonical_context import ContextSourceRef, ProjectionScope
 from .operational_state import (ContextUnavailable, HostReadLimits, InterpretationPolicy,
                                 InvalidOperationalStateRequest, OperationalStateService,
@@ -94,8 +95,8 @@ def served_signals(queries: Any) -> tuple[str, ...]:
 class _AgentReads:
     """Public AGENT RunQueries with P0-specific failures mapped to the service families."""
 
-    def __init__(self, queries: RunQueries) -> None:
-        self._queries = queries
+    def __init__(self, queries: RunQueries, run_id: str) -> None:
+        self._queries, self._run_id = queries, run_id
 
     @staticmethod
     def _call(read: Callable[[], _T], unavailable: type[LookupError]) -> _T:
@@ -107,7 +108,9 @@ class _AgentReads:
             raise VisibilityViolation("AGENT visibility violation") from None
 
     def process_graph(self) -> Any:
-        return self._call(self._queries.process_graph, ContextUnavailable)
+        """The graph view, checked exactly as the application signal reads check it."""
+        return self._call(lambda: checked_agent_view(self._queries.process_graph(),
+                                                     self._run_id), ContextUnavailable)
 
     def context_inventory(self) -> Any:
         return self._call(self._queries.context_inventory, ContextUnavailable)
@@ -150,7 +153,7 @@ class P0OperationalStateBoundary:
             raise InvalidOperationalStateRequest("invalid run id") from None
         if queries.scope != ProjectionScope.AGENT:
             raise VisibilityViolation("operational state requires AGENT scope")
-        return _AgentReads(queries)
+        return _AgentReads(queries, run_id)
 
     def signal_descriptor(self, queries: Any, signal_id: str) -> SignalDescriptor:
         """Declared kind and exact unit, resolved like the application signal reads."""

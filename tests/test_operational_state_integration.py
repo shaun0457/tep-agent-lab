@@ -19,11 +19,13 @@ from industrial_agent_runtime import Budget, to_jsonable
 from tep_agent_lab import (application_transport, operational_state_demo, tool_bridge,
                            tool_surface)
 from tep_agent_lab.application_views import ApplicationViewService
+from tep_agent_lab.canonical_context import ProjectionScope
 from tep_agent_lab.live_plant import LivePlantPolicyV2
 from tep_agent_lab.operational_state import (ContextUnavailable, EngineeringSelection, Feature,
                                              FeatureStatus, Freshness, HostReadLimits,
                                              InvalidOperationalStateRequest, PlantContextRef,
                                              Trend, UnknownRun)
+from tep_agent_lab.operational_state import VisibilityViolation as OperationalVisibilityViolation
 from tep_agent_lab.operational_state_demo import main as demo_main
 from tep_agent_lab.playground import (ModelSpec, RunManager, RunRequest, SourceRevisions,
                                       WorldSpec, load_dependency_pins, pinned_tep_sim_sources)
@@ -234,6 +236,44 @@ class P0RunTests(OperationalStateIntegrationCase):
                 for value in ("50001", "500", "998"):
                     self.assertNotIn(value, str(caught.exception))
                 self.assertIsNone(caught.exception.__context__)
+
+    def test_graph_view_is_checked_like_the_application_read(self):
+        def view(**changes):
+            return {"scope": "AGENT", "run_id": "run-a", "edges": [], "nodes": [{
+                "node_id": "n1", "bindings": [{
+                    "semantic_entity_id": "s1", "runtime_variable_id": "r1",
+                    "quantity": "temperature", "relation": "MEASURES", "unit": "deg C"}]}],
+                **changes}
+
+        class Queries:
+            scope = ProjectionScope.AGENT
+
+            def __init__(self, graph):
+                self.graph = graph
+
+            def process_graph(self):
+                return self.graph
+
+        class Manager:
+            def __init__(self, graph):
+                self.graph = graph
+
+            def queries(self, run_id):
+                return Queries(self.graph)
+
+        boundary = P0OperationalStateBoundary(Manager(view()))
+        self.assertEqual(boundary.signal_descriptor(boundary.queries("run-a"), "s1").unit,
+                         "deg C")
+        # A wrong-scope, wrong-run or leaking view is rejected as the application read
+        # rejects it, never resolved.
+        for graph in (view(scope="EVALUATOR"), view(run_id="run-b"),
+                      view(note="IDV(4) secret")):
+            boundary = P0OperationalStateBoundary(Manager(graph))
+            with self.subTest(graph=sorted(graph)), \
+                    self.assertRaises(OperationalVisibilityViolation) as caught:
+                boundary.signal_descriptor(boundary.queries("run-a"), "s1")
+            self.assertNotIn("run-b", str(caught.exception))
+            self.assertNotIn("IDV", str(caught.exception))
 
     def test_default_p0_cadence_reports_gaps_instead_of_a_trend(self):
         self.prepare("p0-coarse", 60)

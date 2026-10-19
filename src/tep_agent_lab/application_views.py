@@ -82,10 +82,7 @@ class ApplicationViewService:
 
     @staticmethod
     def _checked(view: Mapping[str, Any], run_id: str) -> Mapping[str, Any]:
-        if (view["scope"] != ProjectionScope.AGENT.value or view["run_id"] != run_id
-                or leakage_findings(view)):
-            raise VisibilityViolation("invalid application projection")
-        return view
+        return checked_agent_view(view, run_id)
 
     @staticmethod
     def _pinned(run_id: str, snapshot: Any) -> dict[str, Any]:
@@ -202,6 +199,14 @@ class ApplicationViewService:
                              view["returned_count"], view["reduced"], view["reduction_policy"],
                              view["coverage"], view["status"],
                              tuple(_point(sample) for sample in view["samples"]))
+
+
+def checked_agent_view(view: Mapping[str, Any], run_id: str) -> Mapping[str, Any]:
+    """The AGENT projection of this run, free of hidden vocabulary, or VisibilityViolation."""
+    if (view["scope"] != ProjectionScope.AGENT.value or view["run_id"] != run_id
+            or leakage_findings(view)):
+        raise VisibilityViolation("invalid application projection")
+    return view
 
 
 def resolve_signal_binding(graph: Mapping[str, Any],
