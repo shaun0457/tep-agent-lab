@@ -99,6 +99,8 @@ _PUBLIC_FAILURES: tuple[tuple[type[Exception], type[Exception], str], ...] = (
     (ResourceLimitExceeded, ResourceLimitExceeded, "request exceeds a declared resource bound"),
 )
 _T = TypeVar("_T")
+# Operator-only server log: it keeps the original exception text and traceback, which
+# can carry ids or values, so it must never be forwarded to an Agent or UI channel.
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -112,8 +114,9 @@ def _guarded(call: Callable[[], _T]) -> _T:
     # the server log keeps the original type, text and traceback.
     for family, public, message in _PUBLIC_FAILURES:
         if isinstance(failure, family):
-            _LOGGER.info("redacted %s as %s", type(failure).__name__, public.__name__,
-                         exc_info=failure)
+            level = logging.WARNING if public is VisibilityViolation else logging.INFO
+            _LOGGER.log(level, "redacted %s as %s", type(failure).__name__, public.__name__,
+                        exc_info=failure)
             raise public(message)
     _LOGGER.error("internal fault redacted as InconsistentRead: %s", type(failure).__name__,
                   exc_info=failure)

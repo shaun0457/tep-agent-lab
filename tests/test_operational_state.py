@@ -650,12 +650,17 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                 raise error
             return fail
 
-        for target, error, family, message in (
+        # Internal faults log at ERROR and visibility violations at WARNING, so an operator
+        # sees them at default levels; other families are routine (INFO).
+        for target, error, family, message, level in (
                 ("telemetry_history", KeyError("sig-secret root cause"),
                  operational_state.InconsistentRead,
-                 "internal fault in a boundary or public read"),
+                 "internal fault in a boundary or public read", "ERROR"),
+                ("screen", operational_state.VisibilityViolation("screen root cause"),
+                 operational_state.VisibilityViolation, "AGENT visibility violation",
+                 "WARNING"),
                 ("plant_context", ContextUnavailable("ctx-secret root cause"),
-                 ContextUnavailable, "plant context is unavailable")):
+                 ContextUnavailable, "plant context is unavailable", "INFO")):
             with self.subTest(target=target):
                 self.setUp()
                 self.plant.series(NUM, [1.0, 2.0])
@@ -670,6 +675,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                 self.assertIsNone(caught.exception.__context__)
                 # ... while the server log keeps the original type, text and traceback.
                 record = logs.records[-1]
+                self.assertEqual(record.levelname, level)
                 self.assertIs(record.exc_info[0], type(error))
                 self.assertIn("root cause", logs.output[-1])
 

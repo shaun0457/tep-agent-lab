@@ -252,8 +252,9 @@ Fixed messages never echo ids, values, hidden counts, paths or exception text. E
 failure raised by the boundary or a public P0 read is re-raised in its family with a
 fixed message and without the original exception chained; any exception outside the
 families is an internal fault (`InconsistentRead`). The original exception (type, text,
-traceback) is logged server-side on the module logger before it is redacted: INFO for a
-family failure, ERROR for an internal fault. The families are:
+traceback) is logged server-side on the module logger before it is redacted: ERROR for
+an internal fault, WARNING for a visibility violation, INFO for other families. The log
+is operator-only and must never be forwarded to an Agent or UI channel. The families are:
 `InvalidOperationalStateRequest` (shape, window order, ticks, missing selection, invalid
 run id), `UnknownRun`, `UnknownBinding` (unknown signal, a binding whose metadata
 disagrees, or a `source_id` that differs from the run's source), `ContextUnavailable`
