@@ -30,7 +30,7 @@ and the test constants. A NumPy bump edits only the JSON.
 |---|---|
 | Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B/C, P1.2A compiler contracts, P1.2B deterministic corpus-to-staged-revision path, E0.2 desktop shell on application transport v1). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
-| Current product milestone | P1.4B live plant mode (LOS-B-S1/S2 merged, PRs #44/#45; LOS-B-S3 delivered, issue #38; mandatory exit pending owner confirmation of values). P1.2C model-assisted extraction is deferred by owner decision 2026-10-12: the MVP exit criterion does not need it, and P1.2D publication is the remaining compiler gap for MVP item 3 |
+| Current product milestone | P1.4A serving + Operational State (LOS-A-S1 delivered, issue #40; pending owner confirmation of OD-2 values). P1.4B live plant mode is complete: LOS-B-S1/S2/S3 merged (PRs #44/#45/#46), LOS-B-S3 with owner-confirmed values. P1.2C model-assisted extraction is deferred by owner decision 2026-10-12: the MVP exit criterion does not need it, and P1.2D publication is the remaining compiler gap for MVP item 3 |
 | Parallel product milestone | P1.1C canonical telemetry integration: merged; P1.4 can read live telemetry through snapshot-bound P0/application reads once its owning spec exists |
 | Current research milestone | D0.2C and D1 paused (owner decision 2026-10-11); D0.2C1 not started (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
@@ -52,9 +52,9 @@ Product track (P1 sequencing per ADR-004):
 | ADR-005 context-layer product positioning | merged (accepted) |
 | P1.1C canonical telemetry integration | merged: event-time-bounded scans, run-scoped P0 ingestion, snapshot-bound P0 views, Application API v1 / transport v1 (desktop, Rust bridge, sidecar); note `docs/p1-1c-canonical-telemetry-integration.md`, spec `docs/specs/application-api-v1.md` |
 | P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B merged (S1–S5, PRs #30–#33 plus the S5 completion PR): deterministic corpus, fragments, extraction, recorded human demo review and verified staged revision ([note](p1-2b-engineering-corpus.md)); P1.2C deferred (owner decision 2026-10-12, off the MVP path); P1.2D adds the real review workflow and repository transaction (one git commit, head CAS) |
-| P1.3 Canonical Context composition | owning spec [plant-context-composition-v0.md](specs/plant-context-composition-v0.md) proposed with owner decisions PCC-OD-1..10 of 2026-10-12/13/19, the plant-telemetry amendment (source binding levels) and the Application API amendment (bounded composed-view read) (two test seams; topology-derived versioned grouping; prepare-time content-addressed PlantContextRevision; topology-only reachability in the composed view); slices PCC-S1..S7, PCC-S6 blocked by P1.2D, PCC-S7 blocked by PCC-S5 |
-| P1.4A serving + Operational State | owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12; implementation not started; first slice LOS-A-S1; P1.4 split by owner decision 2026-10-11 |
-| P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; LOS-B-S1 merged (issue #36, PR #44): clean continuously stepped simulated stream, atomic session commits and snapshot-bound reads; LOS-B-S2 merged (issue #37, PR #45): pinned pacing, trusted pause/resume/stop and single ownership; LOS-B-S3 delivered (issue #38): capacity, bounded retry, fail-closed failure, disposal/restart and measured sustained envelope ([note](p1-4b-live-plant-mode.md)); mandatory P1.4B exit pending owner confirmation of the v2 values and sustained envelope; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
+| P1.3 Canonical Context composition | owning spec [plant-context-composition-v0.md](specs/plant-context-composition-v0.md) merged (PR #47) with owner decisions PCC-OD-1..10 of 2026-10-12/13/19, the plant-telemetry amendment (source binding levels) and the Application API amendment (bounded composed-view read) (two test seams; topology-derived versioned grouping; prepare-time content-addressed PlantContextRevision; topology-only reachability in the composed view); slices PCC-S1..S7 are issues #48-#54, PCC-S6 blocked by P1.2D, PCC-S7 blocked by PCC-S5 |
+| P1.4A serving + Operational State | owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12; LOS-A-S1 delivered (issue #40): direct snapshot-bound `get_operational_state` with current/freshness, endpoint rate/trend and exact window min/max over unreduced public P0 reads, typed unavailability and exact refs ([note](p1-4a-operational-state.md)); pending owner confirmation of the proposed OD-2 values; LOS-A-S2/S3/S4 are issues #41-#43; P1.4 split by owner decision 2026-10-11 |
+| P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; LOS-B-S1 merged (issue #36, PR #44): clean continuously stepped simulated stream, atomic session commits and snapshot-bound reads; LOS-B-S2 merged (issue #37, PR #45): pinned pacing, trusted pause/resume/stop and single ownership; LOS-B-S3 merged (issue #38, PR #46) with owner-confirmed values: capacity, bounded retry, fail-closed failure, disposal/restart and measured sustained envelope ([note](p1-4b-live-plant-mode.md)); mandatory P1.4B exit complete; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
 | B5 first real provider for the investigation Agent (runtime repo) | deferred until the context layer is in place (owner decision 2026-10-11); still required for the MVP exit criterion's real-model investigation (D-049) |
 | MVP integration (E1 substrate + context panels) | not started |
@@ -97,18 +97,17 @@ None.
   review workflow and repository publication transaction that commits a P1.2A
   `StagedPublication` with head CAS (context-compiler-v0 §Recommended implementation
   split, §Publication; [P1.2B completion note](p1-2b-engineering-corpus.md)).
-- Write the **P1.3 owning spec** next (owner decision 2026-10-12); LOS-B-S3 is delivered;
-  LOS-A-S2/S3 and P1.5 depend on it. The **P1.4 owning spec**
+- The **P1.3 owning spec** is merged (PR #47); its slices PCC-S1..S7 are issues #48-#54.
+  LOS-A-S2/S3 and P1.5 depend on P1.3. The **P1.4 owning spec**
   [live-operational-state-v0.md](specs/live-operational-state-v0.md) is accepted,
   covering **P1.4A** (serving + Operational State) and **P1.4B** (live plant mode).
   Owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12)
   resolve SC-1/SC-2.
-  First P1.4A slice: LOS-A-S1. P1.4B LOS-B-S1 is merged (issue #36, PR #44);
-  LOS-B-S2 is merged (issue #37, PR #45), with pacing and trusted pause/resume/stop.
-  LOS-B-S3 is delivered (issue #38), completing capacity/backpressure/failure/restart
-  and disposal. The mandatory P1.4B exit awaits owner confirmation of v2 caps, retry,
-  read lifetime and the measured sustained duration/resource envelope.
-  LOS-B-S4 follows LOS-B-S3 as scheduled work,
+  P1.4A LOS-A-S1 is delivered (issue #40) and awaits owner confirmation of its
+  proposed OD-2 values; LOS-A-S2 (#41), LOS-A-S3 (#42) and LOS-A-S4 (#43) follow.
+  **P1.4B is complete**: LOS-B-S1 (issue #36, PR #44), LOS-B-S2 (issue #37, PR #45)
+  and LOS-B-S3 (issue #38, PR #46, owner-confirmed v2 values and sustained envelope)
+  are merged. LOS-B-S4 follows LOS-B-S3 as scheduled work,
   without gating the P1.4B exit. Existing ADR-005 live plant constraints still bind.
 - **B5** is deferred until the context layer is in place; it remains required for the
   MVP exit criterion's real-model investigation (owner decision 2026-10-11).

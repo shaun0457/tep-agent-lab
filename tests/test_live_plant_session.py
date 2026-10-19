@@ -957,7 +957,12 @@ class LivePlantTests(unittest.TestCase):
         self.assertNotIn("synthetic ingestion error", str(diagnostic))
 
     def test_policy_reserves_full_session_and_reader_prefix(self):
-        self.manager.telemetry_policy = TelemetryReadPolicy(max_scan_records=4)
+        self.manager = RunManager(Path(self.temp.name) / "narrow",
+                                  revisions=self.manager.revisions,
+                                  dependency_pins=self.manager.dependency_pins,
+                                  clock=self.manager.clock,
+                                  telemetry_policy=TelemetryReadPolicy(max_scan_records=4))
+        self.manager.create("live-test", self.request)
         with self.assertRaises(PrepareError):
             self.prepare(LivePlantPolicy(step_count=4))
         for policy in (replace(LivePlantPolicy(), retained_sample_cap=1),

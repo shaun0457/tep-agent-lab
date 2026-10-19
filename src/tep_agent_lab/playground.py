@@ -669,7 +669,7 @@ class RunManager:
                                                            TelemetryReadPolicy):
             raise TypeError("TelemetryReadPolicy required")
         # Trusted host configuration of the canonical telemetry reader (not a manifest field).
-        self.telemetry_policy = telemetry_policy or TelemetryReadPolicy()
+        self._telemetry_policy = telemetry_policy or TelemetryReadPolicy()
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.revisions = revisions
@@ -683,6 +683,11 @@ class RunManager:
         self._runs: dict[str, _Run] = {}
         # OD-6 S1 retains one live attachment per manager, including stopped data.
         self._live_run_id: str | None = None
+
+    @property
+    def telemetry_policy(self) -> TelemetryReadPolicy:
+        """Read-only reader configuration; every run's reader is built from it."""
+        return self._telemetry_policy
 
     # -- identity and lookup ------------------------------------------------------------
     def _checked_id(self, run_id: Any) -> str:

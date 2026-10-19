@@ -498,6 +498,25 @@ class EventIndexTests(Fixture):
                 setattr(reader, name, 10**9)
         self.assertEqual(5, reader.max_scan_records)
 
+    def test_reader_exposes_its_per_read_index_work_bound(self) -> None:
+        block = telemetry._INDEX_BLOCK
+        for limit in (1, 5, block, block + 1, 10_000):
+            with self.subTest(limit=limit):
+                reader = self.reader_with(limit)
+                self.assertEqual(max(limit, block), reader.max_index_work)
+                self.assertEqual(reader.max_index_work, telemetry.index_work_bound(limit))
+                # The bound a read's scan budget enforces, so it is never wider.
+                self.assertEqual(reader.max_index_work,
+                                 telemetry._ScanBudget(limit).work_limit)
+        with self.assertRaises(AttributeError):
+            setattr(reader, "max_index_work", 10**9)
+        # A budget allows exactly that many probes; the next one fails.
+        budget = telemetry._ScanBudget(5)
+        for _ in range(telemetry.index_work_bound(5)):
+            budget.probe()
+        with self.assertRaises(ResourceLimitExceeded):
+            budget.probe()
+
     def test_event_frontier_and_last_event_time(self) -> None:
         self.assertIsNone(self.store.event_frontier(0))
         self.ingest(obs(0, 5), obs(0, 9, source_id="src-2"))   # K=1, frontier 9 min
