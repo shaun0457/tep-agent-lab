@@ -89,7 +89,8 @@ def _line(result) -> str:
     staleness = features[Feature.STALENESS]
     rate_text = (f"{rate.value:+.6f} {rate.detail['rate_unit']}" if rate.value is not None
                  else rate.status.value)
-    return (f"  {result.signal_id}: current={current.value:.6f} {current.quality} "
+    value = "null" if current.value is None else f"{current.value:.6f}"
+    return (f"  {result.signal_id}: current={value} {current.quality} "
             f"(seq {current.identity.sequence}, tick {current.event_ticks}); "
             f"{staleness.value} age={staleness.detail['age_ticks']}; "
             f"window=[{window['event_start_ticks']},{window['event_end_ticks']}] "

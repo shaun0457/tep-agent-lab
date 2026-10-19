@@ -1009,10 +1009,11 @@ class OperationalStateService:
                         "semantics": "event-horizon freshness only"})
         for result in (*_secant(samples, start, end, context), *_extrema(samples, context)):
             features[result.feature] = result
-        selection_ref = f"engineering-selection:{selection.as_json()['kind']}"
+        selection_kind = selection.as_json()["kind"]
+        selection_ref = f"engineering-selection:{selection_kind}"
         threshold = (FeatureStatus.UNSUPPORTED_VALUE_KIND if kind != ValueKind.NUMERIC
                      else FeatureStatus.NO_CANONICAL_LIMIT)
         features[Feature.THRESHOLD] = context.result(
             Feature.THRESHOLD, threshold, basis=AS_OF_HORIZON, citations=(selection_ref,),
-            detail={"engineering_selection": EXPLICIT_EMPTY})
+            detail={"engineering_selection": selection_kind})
         return {feature: features[feature] for feature in Feature}

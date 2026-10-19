@@ -6,6 +6,7 @@ no intervention); no evaluator fixtures, benchmark cases or scorer material.
 
 import ast
 import contextlib
+from dataclasses import replace
 from fractions import Fraction
 import io
 import json
@@ -132,6 +133,12 @@ class P0RunTests(OperationalStateIntegrationCase):
         expected = (Trend.RISING if exact > tolerance else
                     Trend.FALLING if exact < -tolerance else Trend.STABLE)
         self.assertEqual(result.features[Feature.TREND].value, expected)
+        # The demo line prints a null current value with its quality instead of failing.
+        current = result.features[Feature.CURRENT]
+        null = replace(current, value=replace(current.value, value=None, quality="BAD"))
+        line = operational_state_demo._line(
+            replace(result, features={**result.features, Feature.CURRENT: null}))
+        self.assertIn("current=null BAD (seq 180, tick 180)", line)
         values = [s["value"] for s in samples]
         self.assertEqual(result.features[Feature.WINDOW_MIN].value, min(values))
         self.assertEqual(result.features[Feature.WINDOW_MAX].value, max(values))

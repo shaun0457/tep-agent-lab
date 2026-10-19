@@ -420,6 +420,17 @@ class FeatureCorrectnessTests(OperationalStateCase):
         self.assertNotIn("e+308", str(caught.exception))
         self.assertNotIn(NUM, str(caught.exception))
 
+    def test_threshold_detail_and_citation_follow_the_engineering_selection(self):
+        context = operational_state._Context(POLICY, DESCRIPTORS[NUM], Fraction(1), "window-a",
+                                             (CONTEXT,))
+        for selection, kind in ((EMPTY, "EXPLICIT_EMPTY"),
+                                (EngineeringSelection(("rule-set-a@v1",)), "EXACT_REFS")):
+            with self.subTest(kind=kind):
+                threshold = OperationalStateService._features(
+                    (), None, 0, 0, 0, context, selection)[Feature.THRESHOLD]
+                self.assertEqual(threshold.detail["engineering_selection"], kind)
+                self.assertIn(f"engineering-selection:{kind}", threshold.citations)
+
     def test_window_ending_before_horizon_discloses_its_own_endpoint(self):
         ids = self.plant.series(NUM, [0.0, 2.0, 4.0, 6.0, 8.0])
         late = self.plant.add(NUM, 10, 100.0)
