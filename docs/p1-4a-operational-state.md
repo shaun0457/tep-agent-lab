@@ -12,7 +12,7 @@ API version or Agent tool (CL-9, CL-13); LOS-A-S4 owns transport v2.
 
 ```text
 [caller] -- run, signal, exact public snapshot (T, K), finite window, refs --> [OperationalStateService]
-[OperationalStateService] -- validate shape, policy, window bounds (no reads yet) --> [boundary]
+[OperationalStateService] -- validate shape, policy, window bounds, host index-work bound (no reads yet) --> [boundary]
 [P0OperationalStateBoundary] -- AGENT current read: snapshot, binding, source, work bound --> [public P0 reads]
 [P0OperationalStateBoundary] -- then inventory (plant context), graph view (descriptor), history --> [public P0 reads]
 [public P0 reads] -- one pinned snapshot, unreduced complete window, aggregate work bound --> [OD-1 interpreter (pure)]
@@ -60,13 +60,16 @@ Order of work in one request:
 
 1. Shape, policy ref, window bounds and the engineering selection are validated with
    no boundary call.
-2. The current read at (T, K) is the public P0 path that validates the exact snapshot
+2. The boundary reports its host reader's per-read index-work bound (host
+   configuration); it is checked against the pinned policy before any run is opened or
+   read.
+3. The current read at (T, K) is the public P0 path that validates the exact snapshot
    (run, incarnation, clock, context, visibility policy, K) and the signal binding. A
    `source_id` that differs from the answering source fails `UnknownBinding` here,
    before any other work, and so does a current prefix above the aggregate work bound.
-3. The plant context, then the signal descriptor and its policy applicability (an
+4. The plant context, then the signal descriptor and its policy applicability (an
    unpinned unit fails `IncompatiblePolicy`).
-4. The complete history read, then the aggregate work check over both reads.
+5. The complete history read, then the aggregate work check over both reads.
 
 ### Window and quality policy (OD-1)
 
@@ -86,6 +89,16 @@ Order of work in one request:
   bound the request fails `ResourceLimitExceeded`. The bound must be at least twice
   `max_input_points`, because a complete window's samples are also in the current
   prefix. Each result discloses the counts under `work`.
+- Index work: each public read also makes index probes (full-block bisections and
+  partial-tail record checks) that the views do not report. The reader enforces a
+  per-read probe ceiling, `max(max_scan_records, index block)`, exposed as
+  `TimeSeriesReader.max_index_work`; the boundary reports that host bound from its own
+  reader configuration. The policy declares `max_index_work_per_read` and
+  `max_aggregate_index_work` (at least twice the per-read bound: one current and one
+  history read per request). Before any read, a host bound above the per-read bound, or
+  two reads' worth above the aggregate bound, fails `ResourceLimitExceeded`; a malformed
+  host bound is an internal fault. `work` reports the host bound, the request bound
+  (two reads) and both policy bounds.
 - Current/quality: the reader's last eligible sample at or before T under K, whatever
   its quality or nullness. An older GOOD value is never substituted.
 - Staleness: `age_ticks = T - current.event_ticks`; FRESH when `age <= stale_after_ticks`.
@@ -154,7 +167,9 @@ returned, whichever status wins.
   are cited exactly without repeating their identities per feature), resolved detail
   (endpoint ticks, elapsed seconds, tolerance, unit, age, stale-after, oversized gap
   spans), the policy ref, the window ref for window features and context citations;
-- `work`: the current and history eligible counts, their sum and the aggregate bound;
+- `work`: the current and history eligible counts, their sum and the aggregate
+  candidate bound; reads per request, the host per-read index-work bound, the request's
+  index-work bound and both policy index-work bounds;
 - `request` (as asked, including omitted bounds as null), `derivation` (algorithm,
   numeric method, inputs) and `derivation_ref`, a SHA-256 over all of the above.
 
@@ -176,12 +191,14 @@ limits, safety gates or canonical knowledge.
 | Default window | 120 ticks (121 points) | Two simulated minutes: long enough to average per-sample noise, short enough to answer "now" and to fit early in the 300 s demo stream. |
 | Maximum window | 999 ticks | At 1 s cadence at most 1,000 points, the existing reader/application returned-point limit; far below the 2,592,000-tick reader interval bound. |
 | Maximum input points | 1,000 | Equals `TelemetryReadPolicy.max_points_limit`, so a complete window is requested in one unreduced read; more eligible points fail instead of being reduced. Also far below the 50,000-record scan bound. |
-| Aggregate candidate records per request | 50,000 | Current prefix + window eligible counts. Equals the default reader `max_scan_records`, so it stays within the existing reader bound. At the 1 s cadence a signal has T+1 records at or before T, so a full 1,000-point window is served up to T of about 49,000 s (13.6 simulated hours); later requests fail `ResourceLimitExceeded`, never truncate. Index probes are not reported by the public reads (see Known limitations). |
+| Aggregate candidate records per request | 50,000 | Current prefix + window eligible counts. Equals the default reader `max_scan_records`, so it stays within the existing reader bound. At the 1 s cadence a signal has T+1 records at or before T, so a full 1,000-point window is served up to T of about 49,000 s (13.6 simulated hours); later requests fail `ResourceLimitExceeded`, never truncate. |
+| Index work per read | 50,000 | Equals the default P0 reader's per-read probe ceiling, max(`max_scan_records` 50,000, index block 128). A host configured with a wider reader is refused before any read instead of silently doing more work than the pinned policy states. |
+| Aggregate index work per request | 100,000 | One current and one history read, each within the per-read bound. |
 | Maximum gap | 1 tick | Exactly one cadence: any missing record inside the window blocks rate/trend. Pause adds no event gap (simulation time does not advance). |
 | Stale-after | 1 tick | At most one missed cadence: a read at the frontier has age 0, and a current one record behind T is still FRESH. |
 | Signals / peers / transitions per request | 1 / 0 / 0 | Peers and transitions belong to LOS-A-S3/S2. |
 | Inline sample refs | 1,001 | Distinct full identities per result: every window identity plus current. Features cite unusable samples by position into the window list, and the bound is checked before serialization. |
-| Response bytes | 1,048,576 | Measured worst case: a 999-tick, 1,000-sample all-BAD window with 256-character source and signal ids is 586,222 bytes and returns `QUALITY_UNUSABLE` (all-GOOD: 574,321 bytes). Measured live results are 27,190 bytes for the 121-point default window and 50,466 bytes for a 301-point window. Exceeding it fails, never truncates. |
+| Response bytes | 1,048,576 | Measured worst case with this policy record: a 999-tick, 1,000-sample unusable window with 256-character source and signal ids is 586,425 bytes (alternating BAD and GOOD-null; all-BAD 586,418) and returns `QUALITY_UNUSABLE` (all-GOOD: 574,532 bytes). Measured live results (seed 17) are 27,918 to 28,339 bytes for the 121-point default window and 51,856 to 52,819 bytes for a 301-point window across the three demo signals. Exceeding it fails, never truncates. |
 
 Trend tolerance per unit (signal unit per second):
 
@@ -234,12 +251,13 @@ disagrees, or a `source_id` that differs from the run's source), `ContextUnavail
 `IncompatiblePolicy` (bad policy record or a unit without a pinned tolerance),
 `SnapshotUnavailable` (wrong run, incarnation, context, future K, tampered ref, disposed
 store), `ClockMismatch` (including a horizon clock that differs from the event clock),
-`ResourceLimitExceeded` (window, reduced input, aggregate work, inline refs, reader
-bounds, response bound), `NonfiniteDerivation`, `VisibilityViolation` (AGENT scope or
-leakage screen) and `InconsistentRead` (a public read answered another
+`ResourceLimitExceeded` (window, host index work, reduced input, aggregate work, inline
+refs, reader bounds, response bound), `NonfiniteDerivation`, `VisibilityViolation`
+(AGENT scope or leakage screen) and `InconsistentRead` (a public read answered another
 snapshot/binding/window, counts that disagree, or an internal fault). Shape, policy,
-selection and window bounds are validated before any boundary call; the snapshot and
-source are validated by the first public read, before any other work.
+selection and window bounds are validated before any boundary call, and the host
+index-work bound before any run is opened or read; the snapshot and source are
+validated by the first public read, before any other work.
 
 ### Evidence
 
@@ -253,17 +271,22 @@ source are validated by the first public read, before any other work.
   wrong run/incarnation/clock/context, future K, tampered ref, bounds before work,
   snapshot validation before context/descriptor (counting boundary), redacted boundary
   and read failures, the aggregate work bound (current alone, sum, exactly at the
-  bound), counts that disagree, reader/response bounds (exact byte boundary), a
-  maximum all-unusable window with 256-character ids, and policy validation and
-  hashing (LOS-A5); import purity.
+  bound), the host index-work bound (wider host refused with zero reads, malformed
+  host bound, exactly at the bound with real probes counted), counts that disagree,
+  reader/response bounds (exact byte boundary), a maximum all-unusable window with 256-character ids, and policy validation (strict
+  ints for every count field) and hashing (LOS-A5); import purity.
+- `tests/test_telemetry_core.py`: the reader's `max_index_work` equals the bound its
+  scan budget enforces.
 - `tests/test_operational_state_integration.py`: a real P0 run checked against the public
   current/history views and exact hand computation; all 53 served signals from the
   public graph view, each with the application read's unit; resolution parity on
   disagreeing bindings; default 60 s cadence; typed redacted failures through P0
   queries (horizon-only clock change, unknown source, future K, wrong context caught by
   snapshot validation); old-snapshot reads identical while a live stream grows, then
-  `SnapshotUnavailable` after disposal; the measurement's public reads and 1.5x margin
-  rule; the demo; no transport, API version or Agent tool change.
+  `SnapshotUnavailable` after disposal; the TEP boundary reports the real reader's
+  index-work bound and a wider host is refused before any run is opened; the
+  measurement's public reads and 1.5x margin rule; the demo; no transport, API version
+  or Agent tool change.
 
 ### Demo
 
@@ -301,12 +324,14 @@ timeline (LOS-B-S4) is what makes changes visible.
 - No dense-provenance artifact: a result above the response bound fails rather than
   spilling to a checksummed artifact.
 - Direct service only; no transport v2, client allowlist or UI panel (LOS-A-S4/MVP).
-- The aggregate work bound counts candidate records only. The public P0 views report
-  eligible counts but not index probes, so probe work stays bounded by the reader's own
-  service policy, not by the pinned interpretation policy.
-- The P0 run's telemetry source id is disclosed only by telemetry read views, so a
-  wrong `source_id` is detected on the first (current) read, before any context,
-  descriptor or history work, not before every read.
+- Index work is bounded by the host reader's declared per-read ceiling, checked against
+  the policy before any read; the public views still do not report per-read probe
+  counts, so `work` discloses the bound, not the probes actually made.
+- Design choice: the P0 run's telemetry source id is disclosed only by the telemetry
+  read views, so a wrong `source_id` is rejected by the first (current) read, which also
+  validates the snapshot, before any context, descriptor or history work. The spec
+  requires the source to be checked before derived results are served (§Serving and
+  time consistency), not before every read.
 - The policy covers only the 1 s clean simulated stream; it is not evidence about
   external-plant noise or dirty streams.
 - Only a single signal per request; aggregate peer work is declared as zero.
