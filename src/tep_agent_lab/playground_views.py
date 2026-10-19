@@ -29,7 +29,7 @@ from tep_sim.evaluator_bindings import build_evaluator_disturbance_bindings
 from .canonical_context import (CanonicalContextRegistry, ProjectionScope,
                                 inventory_checksum, visible_in)
 from .run_telemetry import TelemetryReads, sample_json, snapshot_json
-from .telemetry import TimePoint
+from .telemetry import SnapshotUnavailable, TimePoint
 from .tep_world import ARTIFACT_OWNER, leakage_findings
 
 VIEW_VERSION = "tep-agent-lab.playground-views/v0"
@@ -95,6 +95,8 @@ class RunQueries:
                 raise ViewUnavailable("live world views are unavailable while RUNNING")
             if run.session is None:
                 raise ViewUnavailable("no in-process session; world views are ephemeral in v0")
+            if run.session._live_plant is not None:
+                raise ViewUnavailable("live observation sessions have no investigation world")
             return read(run.session)
         finally:
             run.world_lock.release()
@@ -176,6 +178,9 @@ class RunQueries:
                     (live.physics_closed if live is not None else session.closed))
         body["resources"] = {"session": ("NONE" if session is None else
                                          "RELEASED" if released else "LIVE")}
+        if live is not None:
+            state, reason = live.public_status()
+            body["live_session"] = {"state": state.value, "reason": reason}
         if run.outcome is not None:
             body["outcome"] = self._outcome(run.outcome, scope)
         return self._view("RunSummaryView", scope, body)
@@ -300,6 +305,8 @@ class RunQueries:
         session = self._run.session
         telemetry = None if session is None else getattr(session, "telemetry", None)
         if telemetry is None:
+            if self._run.live_provenance_checksum is not None:
+                raise SnapshotUnavailable("live store incarnation is unavailable in this process")
             raise ViewUnavailable("canonical telemetry needs the in-process run session")
         return telemetry
 

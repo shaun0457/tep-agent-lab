@@ -42,6 +42,7 @@ from .telemetry import (TELEMETRY_CONTRACT_VERSION, AppendResult, ClockDescripto
                         TelemetryReadSnapshot, TelemetryRequestError, TimePoint, TimeSeriesReader,
                         _checked_id, _checked_int, _coerce, parse_event_resolution)
 from .tep_telemetry import TEP_SOURCE_VERSION, TEPSimulationSource
+from .persistence import canonical_json
 
 TELEMETRY_STORE_ID = "p0-reference-telemetry"
 CANONICAL_SOURCE = "P0 run-scoped canonical reference telemetry"
@@ -272,6 +273,14 @@ class RunTelemetry(TelemetryReads):
             return self._commit(batch, self._ingest_time())
 
 
+class IngestBackpressure(TelemetryError):
+    """Retryable atomic refusal: nothing was committed or allocated by the store.
+
+    This in-memory adapter never raises it; other commit adapters may explicitly
+    refuse before acceptance. Unknown commit outcomes must not use this type.
+    """
+
+
 class LiveTelemetry(TelemetryReads):
     """Explicit production attachment, independent of every sealed P0 store.
 
@@ -300,6 +309,10 @@ class LiveTelemetry(TelemetryReads):
                                        max_points_limit=policy.max_points_limit)
         self._ingestor = TelemetryIngestor(self.store)
         self._clock = clock
+        self._commit_lock = threading.Lock()
+        self.retained_samples = 0
+        self.retained_bytes = 0
+        self.sample_byte_cap: int | None = None
 
     @property
     def source_id(self) -> str:
@@ -307,5 +320,27 @@ class LiveTelemetry(TelemetryReads):
 
     def commit_batch(self, batch: Sequence[SourceObservation]) -> AppendResult:
         """Synchronous atomic delivery; caller retains the assigned batch until commit."""
-        return self._ingestor.ingest(
-            batch, ingest_time=TimePoint(INGEST_CLOCK.clock_id, utc_ticks(self._clock())))
+        with self._commit_lock:
+            stamp = TimePoint(INGEST_CLOCK.clock_id, utc_ticks(self._clock()))
+            # Bound accepted serialized records before the atomic append. The store
+            # still owns validation and deduplication; no acceptance is copied here.
+            sizes = [len(canonical_json({**to_jsonable(item), "ingest_time": stamp.as_json()}))
+                     for item in batch]
+            if self.sample_byte_cap is not None and any(n > self.sample_byte_cap for n in sizes):
+                raise TelemetryError("sample exceeds prepared record bound")
+            result = self._ingestor.ingest(batch, ingest_time=stamp)
+            accepted = [r for r in result.records if r.commit_revision == result.ingest_sequence]
+            # All-duplicate retries may resolve records from current K too.
+            if result.new_count:
+                self.retained_samples += result.new_count
+                unique = {r.sample.identity: r for r in accepted}
+                sizes_by_identity = {(item.source_id, item.signal_id, item.sequence): size
+                                     for item, size in zip(batch, sizes)}
+                self.retained_bytes += sum(sizes_by_identity[(key.source_id, key.signal_id,
+                                                             key.sequence)] for key in unique)
+            return result
+
+    def dispose(self) -> None:
+        with self._commit_lock:
+            self.store.dispose()
+            self.retained_samples = self.retained_bytes = 0

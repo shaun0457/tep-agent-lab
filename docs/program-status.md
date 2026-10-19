@@ -30,7 +30,7 @@ and the test constants. A NumPy bump edits only the JSON.
 |---|---|
 | Current product maturity | L0 Research Foundation, with L1 foundations in place (P1.0, P1.1A/B/C, P1.2A compiler contracts, P1.2B deterministic corpus-to-staged-revision path, E0.2 desktop shell on application transport v1). No L1 exit criterion is fully met. |
 | Product maturity target | L1 Portfolio MVP ([product-maturity-and-mvp.md](product-maturity-and-mvp.md)) |
-| Current product milestone | P1.4B live plant mode (LOS-B-S1 merged; LOS-B-S2 delivered, issue #37). P1.2C model-assisted extraction is deferred by owner decision 2026-10-12: the MVP exit criterion does not need it, and P1.2D publication is the remaining compiler gap for MVP item 3 |
+| Current product milestone | P1.4B live plant mode (LOS-B-S1/S2 merged, PRs #44/#45; LOS-B-S3 delivered, issue #38; mandatory exit pending owner confirmation of values). P1.2C model-assisted extraction is deferred by owner decision 2026-10-12: the MVP exit criterion does not need it, and P1.2D publication is the remaining compiler gap for MVP item 3 |
 | Parallel product milestone | P1.1C canonical telemetry integration: merged; P1.4 can read live telemetry through snapshot-bound P0/application reads once its owning spec exists |
 | Current research milestone | D0.2C and D1 paused (owner decision 2026-10-11); D0.2C1 not started (D0.2C0 design accepted in PR #20) |
 | P1 sequencing authority | [ADR-004](decisions/ADR-004-p1-milestone-rebaseline.md) |
@@ -54,7 +54,7 @@ Product track (P1 sequencing per ADR-004):
 | P1.2 Context Compiler | spec accepted (PR #24); P1.2A contracts, compiler workspace, rule-set revision and staged (non-canonical) publication merged ([note](p1-2a-compiler-contracts.md)); P1.2B merged (S1–S5, PRs #30–#33 plus the S5 completion PR): deterministic corpus, fragments, extraction, recorded human demo review and verified staged revision ([note](p1-2b-engineering-corpus.md)); P1.2C deferred (owner decision 2026-10-12, off the MVP path); P1.2D adds the real review workflow and repository transaction (one git commit, head CAS) |
 | P1.3 Canonical Context composition | no owning spec yet |
 | P1.4A serving + Operational State | owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12; implementation not started; first slice LOS-A-S1; P1.4 split by owner decision 2026-10-11 |
-| P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; LOS-B-S1 merged (issue #36, PR #44): clean continuously stepped simulated stream, atomic session commits and snapshot-bound reads; LOS-B-S2 delivered (issue #37): pinned pacing, trusted pause/resume/stop and single ownership ([note](p1-4b-live-plant-mode.md)); LOS-B-S3 (#38) is next; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
+| P1.4B live plant mode | MVP-required; TEP streams continuously through TEPSimulationSource into the canonical telemetry store; owning spec [live-operational-state-v0.md](specs/live-operational-state-v0.md) accepted with owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12), subject to ADR-005 constraints; LOS-B-S1 merged (issue #36, PR #44): clean continuously stepped simulated stream, atomic session commits and snapshot-bound reads; LOS-B-S2 merged (issue #37, PR #45): pinned pacing, trusted pause/resume/stop and single ownership; LOS-B-S3 delivered (issue #38): capacity, bounded retry, fail-closed failure, disposal/restart and measured sustained envelope ([note](p1-4b-live-plant-mode.md)); mandatory P1.4B exit pending owner confirmation of the v2 values and sustained envelope; LOS-B-S4 is scheduled after LOS-B-S3 and does not gate the P1.4B exit |
 | P1.5 ContextSnapshot + investigation integration | no owning spec yet |
 | B5 first real provider for the investigation Agent (runtime repo) | deferred until the context layer is in place (owner decision 2026-10-11); still required for the MVP exit criterion's real-model investigation (D-049) |
 | MVP integration (E1 substrate + context panels) | not started |
@@ -97,15 +97,17 @@ None.
   review workflow and repository publication transaction that commits a P1.2A
   `StagedPublication` with head CAS (context-compiler-v0 §Recommended implementation
   split, §Publication; [P1.2B completion note](p1-2b-engineering-corpus.md)).
-- Write the **P1.3 owning spec** next, after LOS-B-S3 (owner decision 2026-10-12);
+- Write the **P1.3 owning spec** next (owner decision 2026-10-12); LOS-B-S3 is delivered;
   LOS-A-S2/S3 and P1.5 depend on it. The **P1.4 owning spec**
   [live-operational-state-v0.md](specs/live-operational-state-v0.md) is accepted,
   covering **P1.4A** (serving + Operational State) and **P1.4B** (live plant mode).
   Owner decisions of 2026-10-12 and the [Playground live-mode amendment](specs/playground-backend-v0.md#live-plant-session-mode-amendment-2026-10-12)
   resolve SC-1/SC-2.
   First P1.4A slice: LOS-A-S1. P1.4B LOS-B-S1 is merged (issue #36, PR #44);
-  LOS-B-S2 is delivered (issue #37), with pacing and trusted pause/resume/stop.
-  LOS-B-S3 (#38), capacity/backpressure/failure/restart and disposal, is next.
+  LOS-B-S2 is merged (issue #37, PR #45), with pacing and trusted pause/resume/stop.
+  LOS-B-S3 is delivered (issue #38), completing capacity/backpressure/failure/restart
+  and disposal. The mandatory P1.4B exit awaits owner confirmation of v2 caps, retry,
+  read lifetime and the measured sustained duration/resource envelope.
   LOS-B-S4 follows LOS-B-S3 as scheduled work,
   without gating the P1.4B exit. Existing ADR-005 live plant constraints still bind.
 - **B5** is deferred until the context layer is in place; it remains required for the

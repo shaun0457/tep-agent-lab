@@ -923,17 +923,18 @@ class LivePlantTests(unittest.TestCase):
         self.assertEqual([c.batch_checksum for c in live.commits[1:]],
                          [checksum(to_jsonable(batch)) for batch in batches])
 
-    def test_prepared_reads_do_not_start_or_step_and_p0_store_stays_sealed(self):
+    def test_prepared_reads_do_not_start_or_step_or_assemble_p0(self):
         _, live = self.prepare()
         for _ in range(3):
             self.manager.queries("live-test").telemetry_snapshot()
         self.assertEqual(live.state, LivePlantState.PREPARED)
         self.assertEqual(live.telemetry.source.next_sequence, 1)
-        p0 = self.manager._runs["live-test"].session._telemetry
-        self.assertIsNot(p0.store, live.telemetry.store)
-        self.assertTrue(p0.sealed)
-        with self.assertRaises(TelemetrySealed):
-            p0.sync_reference_history(())
+        session = self.manager._runs["live-test"].session
+        self.assertIsNone(session._telemetry)
+        for owner in ("world", "surface", "store", "trace"):
+            self.assertFalse(hasattr(session, owner))
+        for directory in ("world", "state", "trace", "lab-artifacts"):
+            self.assertFalse((session.directory / directory).exists())
 
     def test_initial_live_ingestion_error_publishes_no_ready(self):
         with patch("tep_agent_lab.run_telemetry.LiveTelemetry.commit_batch",
