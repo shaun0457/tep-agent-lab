@@ -633,6 +633,35 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
             self.read(horizon=1)
         self.assertRedacted(caught.exception, "secret")
 
+    def test_redacted_failures_are_logged_server_side_with_their_original_type(self):
+        def leaky(error):
+            def fail(*args, **kwargs):
+                raise error
+            return fail
+
+        for target, error, family, message in (
+                ("telemetry_history", KeyError("sig-secret root cause"),
+                 operational_state.InconsistentRead,
+                 "internal fault in a boundary or public read"),
+                ("plant_context", ContextUnavailable("ctx-secret root cause"),
+                 ContextUnavailable, "plant context is unavailable")):
+            with self.subTest(target=target):
+                self.setUp()
+                self.plant.series(NUM, [1.0, 2.0])
+                owner = self.plant if target.startswith("telemetry") else self.boundary
+                setattr(owner, target, leaky(error))
+                with self.assertLogs(operational_state.__name__, level="INFO") as logs, \
+                        self.assertRaises(family) as caught:
+                    self.read(horizon=1)
+                # The caller sees only the fixed message, with nothing chained ...
+                self.assertEqual(str(caught.exception), message)
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+                # ... while the server log keeps the original type, text and traceback.
+                record = logs.records[-1]
+                self.assertIs(record.exc_info[0], type(error))
+                self.assertIn("root cause", logs.output[-1])
+
     def test_aggregate_candidate_work_is_bounded_across_the_request(self):
         policy = InterpretationPolicy(
             policy_id="policy-work", version="v0", default_window_ticks=10, max_window_ticks=100,

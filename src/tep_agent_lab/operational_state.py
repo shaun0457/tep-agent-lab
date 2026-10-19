@@ -25,6 +25,7 @@ from enum import StrEnum
 from fractions import Fraction
 import hashlib
 import json
+import logging
 import math
 from types import MappingProxyType
 from typing import Any, Protocol, TypeVar
@@ -98,6 +99,7 @@ _PUBLIC_FAILURES: tuple[tuple[type[Exception], type[Exception], str], ...] = (
     (ResourceLimitExceeded, ResourceLimitExceeded, "request exceeds a declared resource bound"),
 )
 _T = TypeVar("_T")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _guarded(call: Callable[[], _T]) -> _T:
@@ -106,10 +108,15 @@ def _guarded(call: Callable[[], _T]) -> _T:
         return call()
     except Exception as error:
         failure = error
-    # Raised outside the handler so the original is neither __cause__ nor __context__.
+    # Raised outside the handler so the original is neither __cause__ nor __context__;
+    # the server log keeps the original type, text and traceback.
     for family, public, message in _PUBLIC_FAILURES:
         if isinstance(failure, family):
+            _LOGGER.info("redacted %s as %s", type(failure).__name__, public.__name__,
+                         exc_info=failure)
             raise public(message)
+    _LOGGER.error("internal fault redacted as InconsistentRead: %s", type(failure).__name__,
+                  exc_info=failure)
     raise InconsistentRead("internal fault in a boundary or public read")
 
 
