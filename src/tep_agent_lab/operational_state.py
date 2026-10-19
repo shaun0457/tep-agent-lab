@@ -770,7 +770,9 @@ class OperationalStateService:
             raise ContextUnavailable("engineering context selection is unavailable")
         boundary = self._boundary
         # 2. The host reader's per-read index work is host configuration; it must fit the
-        #    pinned policy before any run is opened or read.
+        #    pinned policy before any run is opened or read. The policy invariant
+        #    (aggregate >= reads x per-read) implies the aggregate clause; it is kept as
+        #    the explicit request-level check. The lambda keeps attribute lookup guarded.
         host_index_work = _guarded(lambda: boundary.index_work_per_read())
         if type(host_index_work) is not int or host_index_work < 1:
             raise InconsistentRead("boundary returned an unexpected shape")

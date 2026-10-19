@@ -819,9 +819,9 @@ class TimeSeriesReader:
     (``max_scan_records``: records committed at or before K inside the requested
     history window, or at/before T for current and slow last-event reads). Index
     probes/tail checks are bounded per read by ``max_index_work``
-    (max(max_scan_records, _INDEX_BLOCK)), so
-    even sparse scans cannot run without limit. Exceeding any bound raises ResourceLimitExceeded; there is
-    no partial scan or silent truncation. ``current`` and ``last_event_time`` use the
+    (max(max_scan_records, _INDEX_BLOCK)), so even sparse scans cannot run without
+    limit. Exceeding any bound raises ResourceLimitExceeded; there is no partial scan
+    or silent truncation. ``current`` and ``last_event_time`` use the
     event-time index and read at most one record per index block.
     """
 

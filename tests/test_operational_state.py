@@ -12,7 +12,6 @@ from fractions import Fraction
 import json
 from pathlib import Path
 import unittest
-
 from unittest import mock
 
 from tep_agent_lab import operational_state, telemetry
@@ -694,12 +693,13 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                              ([], [], []))
         # Exactly at the per-read bound (this host's reader): both reads run and their
         # real index probes stay within the reported bound.
-        probes = []
+        # Patches the reader's private scan budget only to observe real probe work.
+        work_done: dict[int, tuple[int, int]] = {}   # budget -> (work done, its limit)
         probe = telemetry._ScanBudget.probe
 
         def counted(budget):
-            probes.append(budget.work_limit)
             probe(budget)
+            work_done[id(budget)] = (budget.work, budget.work_limit)
 
         with mock.patch.object(telemetry._ScanBudget, "probe", counted):
             body = self.read(snapshot=snapshot, start=251, end=299, policy=policy).as_json()
@@ -711,8 +711,14 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
             {"reads_per_request": 2, "host_index_work_per_read": 500,
              "index_work_bound": 1000, "max_index_work_per_read": 500,
              "max_aggregate_index_work": 1000})
-        self.assertEqual(set(probes), {500})
-        self.assertLessEqual(len(probes), work["index_work_bound"])
+        # One scan budget per read, as many reads as the request declares, each within
+        # the host bound, and their total within the request bound.
+        self.assertEqual(len(work_done), work["reads_per_request"])
+        self.assertEqual(len(self.plant.reads), work["reads_per_request"])
+        self.assertEqual({limit for _, limit in work_done.values()}, {500})
+        self.assertTrue(all(done <= 500 for done, _ in work_done.values()))
+        self.assertLessEqual(sum(done for done, _ in work_done.values()),
+                             work["index_work_bound"])
         self.assertEqual(body["policy"]["parameters"]["max_aggregate_index_work"], 1000)
 
     def test_wrong_run_incarnation_clock_context_and_future_k(self):
@@ -900,7 +906,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         for change in ({"max_index_work_per_read": 0}, {"max_aggregate_index_work": 9_999},
                        {"max_aggregate_index_work": 1},
                        {"max_index_work_per_read": 5001, "max_aggregate_index_work": 10_001},
-{"trend_tolerance_per_second": {"u1": -0.1}},
+                       {"trend_tolerance_per_second": {"u1": -0.1}},
                        {"trend_tolerance_per_second": {"u1": float("nan")}},
                        {"trend_tolerance_per_second": {"u1": True}},
                        {"trend_tolerance_per_second": {}},

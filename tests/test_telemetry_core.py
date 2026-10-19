@@ -510,6 +510,12 @@ class EventIndexTests(Fixture):
                                  telemetry._ScanBudget(limit).work_limit)
         with self.assertRaises(AttributeError):
             setattr(reader, "max_index_work", 10**9)
+        # A budget allows exactly that many probes; the next one fails.
+        budget = telemetry._ScanBudget(5)
+        for _ in range(telemetry.index_work_bound(5)):
+            budget.probe()
+        with self.assertRaises(ResourceLimitExceeded):
+            budget.probe()
 
     def test_event_frontier_and_last_event_time(self) -> None:
         self.assertIsNone(self.store.event_frontier(0))
