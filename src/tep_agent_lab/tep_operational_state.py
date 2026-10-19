@@ -30,7 +30,7 @@ from .operational_state import (ContextUnavailable, InterpretationPolicy,
 from .playground_views import RunQueries, ViewUnavailable
 from .playground_views import VisibilityViolation as P0VisibilityViolation
 from .run_telemetry import context_ref_for
-from .telemetry import SnapshotUnavailable, UnknownBinding
+from .telemetry import SnapshotUnavailable, UnknownBinding, index_work_bound
 from .tep_world import leakage_findings
 
 INTERIM_PROCESS_GRAPH_SOURCE = "INTERIM_PROCESS_GRAPH_SOURCE"
@@ -47,6 +47,10 @@ TEP_CLEAN_STREAM_POLICY = InterpretationPolicy(
     max_input_points=1000,
     # Current prefix + window candidates; equals the default reader scan bound.
     max_aggregate_candidates=50_000,
+    # Index probes per public read: the default P0 reader's bound, max(50,000, 128);
+    # one current and one history read per request.
+    max_index_work_per_read=50_000,
+    max_aggregate_index_work=100_000,
     max_gap_ticks=1,
     stale_after_ticks=1,
     trend_tolerance_per_second={
@@ -125,6 +129,13 @@ class P0OperationalStateBoundary:
 
     def __init__(self, manager: Any) -> None:
         self._manager = manager
+
+    def index_work_per_read(self) -> int:
+        """Per-read index-work bound of the readers this manager builds for every run.
+
+        Host configuration (the manager's TelemetryReadPolicy), not run data.
+        """
+        return index_work_bound(self._manager.telemetry_policy.max_scan_records)
 
     def queries(self, run_id: str) -> _AgentReads:
         try:

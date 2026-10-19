@@ -639,6 +639,12 @@ class _EventIndex:
         return islice(self._sorted, full), self._records[full * self._block:visible]
 
 
+def index_work_bound(max_scan_records: int) -> int:
+    """Per-read index work (full-block bisections plus partial-tail record checks) a
+    read with this candidate limit may perform before ResourceLimitExceeded."""
+    return max(max_scan_records, _INDEX_BLOCK)
+
+
 class _ScanBudget:
     """Bound both logical candidates and index work, including sparse windows.
 
@@ -650,7 +656,7 @@ class _ScanBudget:
 
     def __init__(self, limit: int) -> None:
         self.limit, self.candidates, self.work = limit, 0, 0
-        self.work_limit = max(limit, _INDEX_BLOCK)
+        self.work_limit = index_work_bound(limit)
 
     def probe(self) -> None:
         if self.work >= self.work_limit:
@@ -812,7 +818,8 @@ class TimeSeriesReader:
     Service-policy bounds: returned points, event interval and eligible candidates
     (``max_scan_records``: records committed at or before K inside the requested
     history window, or at/before T for current and slow last-event reads). Index
-    probes/tail checks are bounded by max(max_scan_records, _INDEX_BLOCK), so
+    probes/tail checks are bounded per read by ``max_index_work``
+    (max(max_scan_records, _INDEX_BLOCK)), so
     even sparse scans cannot run without limit. Exceeding any bound raises ResourceLimitExceeded; there is
     no partial scan or silent truncation. ``current`` and ``last_event_time`` use the
     event-time index and read at most one record per index block.
@@ -838,6 +845,11 @@ class TimeSeriesReader:
     @property
     def max_points_limit(self) -> int:
         return self._max_points_limit
+
+    @property
+    def max_index_work(self) -> int:
+        """Per-read index-work bound of every current, history and last-event read."""
+        return index_work_bound(self._max_scan_records)
 
     def current(self, *, source_id: str, signal_id: str,
                 snapshot: TelemetryReadSnapshot) -> CurrentResult:

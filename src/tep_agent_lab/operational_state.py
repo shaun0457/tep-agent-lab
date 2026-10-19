@@ -42,6 +42,8 @@ NUMERIC_METHOD = "operational-state.numeric.exact-rational-binary64/v0"
 WINDOW_READ_POLICY = "operational-state.window.unreduced-complete/v0"
 EXPLICIT_EMPTY = "EXPLICIT_EMPTY"
 _ID_LIMIT = 256
+# Telemetry reads one request performs: the current read and the complete-window history.
+_READS_PER_REQUEST = 2
 _SAMPLE_KEYS = frozenset({"source_id", "signal_id", "sequence", "event_ticks", "value",
                           "quality"})
 
@@ -217,7 +219,10 @@ class InterpretationPolicy:
     (complete-window points requested from the reader), ``max_aggregate_candidates``
     (candidate records across every read of one request, as the public reads report
     them: the current prefix plus the history window eligible counts),
-    ``max_response_bytes`` (one serialized result). S1 serves one signal per request
+    ``max_index_work_per_read`` (index probes and tail checks one public read may make;
+    the host reader's own bound must not exceed it) and ``max_aggregate_index_work``
+    (that host bound times the reads of one request), ``max_response_bytes`` (one
+    serialized result). S1 serves one signal per request
     with no peers or transitions.
     """
 
@@ -227,6 +232,8 @@ class InterpretationPolicy:
     max_window_ticks: int
     max_input_points: int
     max_aggregate_candidates: int
+    max_index_work_per_read: int
+    max_aggregate_index_work: int
     max_gap_ticks: int
     stale_after_ticks: int
     trend_tolerance_per_second: Mapping[str, float]
@@ -244,6 +251,7 @@ class InterpretationPolicy:
         _text("version", self.version)
         for name, minimum in (("default_window_ticks", 0), ("max_window_ticks", 0),
                               ("max_input_points", 1), ("max_aggregate_candidates", 2),
+                              ("max_index_work_per_read", 1), ("max_aggregate_index_work", 2),
                               ("max_gap_ticks", 1), ("stale_after_ticks", 0),
                               ("max_response_bytes", 1), ("max_signals_per_request", 1),
                               ("max_peers", 0), ("max_transitions", 0)):
@@ -255,6 +263,8 @@ class InterpretationPolicy:
         if self.max_aggregate_candidates < 2 * self.max_input_points:
             # A complete window's samples are also in the current prefix at or before T.
             raise IncompatiblePolicy("aggregate candidate bound cannot serve a complete window")
+        if self.max_aggregate_index_work < _READS_PER_REQUEST * self.max_index_work_per_read:
+            raise IncompatiblePolicy("aggregate index-work bound cannot serve one request")
         if (self.max_signals_per_request != 1 or self.max_peers != 0
                 or self.max_transitions != 0 or self.algorithm != OD1_ALGORITHM
                 or self.numeric_method != NUMERIC_METHOD
@@ -295,6 +305,8 @@ class InterpretationPolicy:
                 "max_window_ticks": self.max_window_ticks,
                 "max_input_points": self.max_input_points,
                 "max_aggregate_candidates": self.max_aggregate_candidates,
+                "max_index_work_per_read": self.max_index_work_per_read,
+                "max_aggregate_index_work": self.max_aggregate_index_work,
                 "max_gap_ticks": self.max_gap_ticks,
                 "stale_after_ticks": self.stale_after_ticks,
                 "trend_tolerance_per_second": dict(self.trend_tolerance_per_second),
@@ -482,6 +494,9 @@ class OperationalStateBoundary(Protocol):
     Failures should use the service families; the service replaces every boundary or
     read message with a fixed one, and maps any other exception to an internal fault.
     """
+
+    def index_work_per_read(self) -> int:
+        """Host configuration: the index-work bound of each public telemetry read."""
 
     def queries(self, run_id: str) -> TelemetryQueries: ...
 
@@ -754,9 +769,18 @@ class OperationalStateService:
             # No published engineering revision is resolvable before LOS-A-S2.
             raise ContextUnavailable("engineering context selection is unavailable")
         boundary = self._boundary
+        # 2. The host reader's per-read index work is host configuration; it must fit the
+        #    pinned policy before any run is opened or read.
+        host_index_work = _guarded(lambda: boundary.index_work_per_read())
+        if type(host_index_work) is not int or host_index_work < 1:
+            raise InconsistentRead("boundary returned an unexpected shape")
+        index_work = _READS_PER_REQUEST * host_index_work
+        if (host_index_work > policy.max_index_work_per_read
+                or index_work > policy.max_aggregate_index_work):
+            raise ResourceLimitExceeded("host index work exceeds the interpretation policy bound")
         queries = _guarded(lambda: boundary.queries(run_id))
 
-        # 2. The current read is the public path that validates the exact snapshot and
+        # 3. The current read is the public path that validates the exact snapshot and
         #    binding; the source and the aggregate work bound are checked before any
         #    context, descriptor or history work.
         current_view, current = self._read_current(queries, signal_id, source_id, snapshot,
@@ -765,7 +789,7 @@ class OperationalStateService:
         if current_view["eligible_count"] > policy.max_aggregate_candidates:
             raise ResourceLimitExceeded("request exceeds the aggregate candidate bound")
 
-        # 3. Pinned plant context, then the signal descriptor and its policy applicability.
+        # 4. Pinned plant context, then the signal descriptor and its policy applicability.
         plant = _guarded(lambda: boundary.plant_context(queries, plant_context_ref, snapshot))
         descriptor = _guarded(lambda: boundary.signal_descriptor(queries, signal_id))
         if not isinstance(descriptor, SignalDescriptor) or not isinstance(plant, Mapping):
@@ -773,14 +797,14 @@ class OperationalStateService:
         if descriptor.value_kind in policy.value_kinds:
             policy.tolerance(descriptor.unit)   # reject an unpinned unit before the window
 
-        # 4. The complete unreduced window, pinned to the same snapshot.
+        # 5. The complete unreduced window, pinned to the same snapshot.
         history, samples = self._read_history(queries, signal_id, source, snapshot, start, end,
                                               policy)
         candidates = current_view["eligible_count"] + history["eligible_count"]
         if candidates > policy.max_aggregate_candidates:
             raise ResourceLimitExceeded("request exceeds the aggregate candidate bound")
 
-        # 5. Pure OD-1 interpretation with exact provenance.
+        # 6. Pure OD-1 interpretation with exact provenance.
         identities = tuple(sample.identity for sample in samples)
         selection_checksum = _sha256([_identity_json(item) for item in identities])
         window_body = {
@@ -825,7 +849,12 @@ class OperationalStateService:
             "work": {"candidate_records": candidates,
                      "max_aggregate_candidates": policy.max_aggregate_candidates,
                      "current_eligible_count": current_view["eligible_count"],
-                     "history_eligible_count": history["eligible_count"]},
+                     "history_eligible_count": history["eligible_count"],
+                     "reads_per_request": _READS_PER_REQUEST,
+                     "host_index_work_per_read": host_index_work,
+                     "index_work_bound": index_work,
+                     "max_index_work_per_read": policy.max_index_work_per_read,
+                     "max_aggregate_index_work": policy.max_aggregate_index_work},
             "request": {"signal_id": signal_id, "source_id": source_id,
                         "event_start_ticks": start_request, "event_end_ticks": end_request,
                         "plant_context_ref": plant_context_ref.as_json(),

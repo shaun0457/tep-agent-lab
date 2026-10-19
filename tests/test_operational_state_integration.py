@@ -27,9 +27,11 @@ from tep_agent_lab.operational_state import (ContextUnavailable, EngineeringSele
 from tep_agent_lab.operational_state_demo import main as demo_main
 from tep_agent_lab.playground import (ModelSpec, RunManager, RunRequest, SourceRevisions,
                                       WorldSpec, load_dependency_pins, pinned_tep_sim_sources)
+from tep_agent_lab.run_telemetry import TelemetryReadPolicy
 from tep_agent_lab.telemetry import (ClockDescriptor, ClockKind, ClockMismatch,
-                                     SnapshotUnavailable, StoreRef, TelemetryReadSnapshot,
-                                     TimePoint, UnknownBinding, parse_event_resolution)
+                                     ResourceLimitExceeded, SnapshotUnavailable, StoreRef,
+                                     TelemetryReadSnapshot, TimePoint, UnknownBinding,
+                                     parse_event_resolution)
 from tep_agent_lab.tep_operational_state import (INTERIM_PROCESS_GRAPH_SOURCE,
                                                  TEP_CLEAN_STREAM_POLICY,
                                                  P0OperationalStateBoundary,
@@ -194,6 +196,36 @@ class P0RunTests(OperationalStateIntegrationCase):
         with self.assertRaises(UnknownBinding):
             boundary.signal_descriptor(graph(binding()), "s2")
         self.assertEqual(TEP_CLEAN_STREAM_POLICY.parameters()["max_aggregate_candidates"], 50_000)
+
+    def test_tep_boundary_reports_the_real_reader_index_work_bound(self):
+        self.prepare("p0-index", 1)
+        reader = self.manager._runs["p0-index"].session.telemetry.reader
+        boundary = P0OperationalStateBoundary(self.manager)
+        self.assertEqual(boundary.index_work_per_read(), reader.max_index_work)
+        self.assertEqual(reader.max_index_work, TEP_CLEAN_STREAM_POLICY.max_index_work_per_read)
+        parameters = TEP_CLEAN_STREAM_POLICY.parameters()
+        self.assertEqual((parameters["max_index_work_per_read"],
+                          parameters["max_aggregate_index_work"]), (50_000, 100_000))
+        snapshot = self.snapshot("p0-index")
+        work = self.read("p0-index", TEMPERATURE, snapshot).as_json()["work"]
+        self.assertEqual((work["host_index_work_per_read"], work["index_work_bound"]),
+                         (50_000, 100_000))
+        # A host whose readers are configured wider than the pinned policy is refused
+        # before any run is opened (an unknown run id would otherwise be UnknownRun).
+        with tempfile.TemporaryDirectory() as directory:
+            wide = RunManager(
+                directory, dependency_pins=PINS, clock=lambda: "2026-10-19T00:00:00Z",
+                revisions=SourceRevisions(PINS["tep-sim"], PINS["industrial-agent-runtime"],
+                                          "a" * 40),
+                telemetry_policy=TelemetryReadPolicy(max_scan_records=50_001))
+            self.assertEqual(P0OperationalStateBoundary(wide).index_work_per_read(), 50_001)
+            with self.assertRaises(ResourceLimitExceeded) as caught:
+                operational_state_service(wide).get_operational_state(
+                    "p0-missing", TEMPERATURE, snapshot=snapshot,
+                    plant_context_ref=interim_plant_context(snapshot),
+                    engineering_selection=EMPTY, interpretation_policy_refs=(POLICY_REF,))
+            self.assertNotIn("50001", str(caught.exception))
+            self.assertIsNone(caught.exception.__context__)
 
     def test_default_p0_cadence_reports_gaps_instead_of_a_trend(self):
         self.prepare("p0-coarse", 60)

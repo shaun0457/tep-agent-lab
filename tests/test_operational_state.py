@@ -13,7 +13,9 @@ import json
 from pathlib import Path
 import unittest
 
-from tep_agent_lab import operational_state
+from unittest import mock
+
+from tep_agent_lab import operational_state, telemetry
 from tep_agent_lab.operational_state import (
     ContextUnavailable, EngineeringSelection, Feature, FeatureStatus, Freshness,
     IncompatiblePolicy, InterpretationPolicy, InvalidOperationalStateRequest,
@@ -25,6 +27,8 @@ from tep_agent_lab.telemetry import (ClockDescriptor, ClockKind, ClockMismatch, 
                                      TimePoint, TimeSeriesReader, UnknownBinding,
                                      parse_event_resolution, reduce_indices)
 
+# Per-read and aggregate index-work bounds; the default test reader's host bound is 500.
+INDEX_WORK = dict(max_index_work_per_read=5000, max_aggregate_index_work=10_000)
 CLOCK = ClockDescriptor("clock-a", ClockKind.SIMULATION, Fraction(1), "origin-a")
 INGEST = ClockDescriptor("ingest-a", ClockKind.SOURCE_DEFINED, Fraction(1))
 SOURCE = "src-1"
@@ -36,7 +40,7 @@ DESCRIPTORS = {NUM: SignalDescriptor(ValueKind.NUMERIC, "u1"),
                ODD: SignalDescriptor(ValueKind.NUMERIC, "u-unpinned")}
 POLICY = InterpretationPolicy(
     policy_id="policy-a", version="v0", default_window_ticks=10, max_window_ticks=100,
-    max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+    max_input_points=50, max_aggregate_candidates=200, **INDEX_WORK, max_gap_ticks=2,
     stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
 PLANT = PlantContextRef("INTERIM_GRAPH_SOURCE", CONTEXT)
 EMPTY = EngineeringSelection.empty()
@@ -141,8 +145,14 @@ class Boundary:
         self.descriptors = dict(DESCRIPTORS)
         self.screened = []
         self.calls = []
+        self.opened = []
+
+    def index_work_per_read(self):
+        """Host configuration: the widest per-read index-work bound of its readers."""
+        return max(plant.reader.max_index_work for plant in self.plants.values())
 
     def queries(self, run_id):
+        self.opened.append(run_id)
         try:
             return self.plants[run_id]
         except KeyError:
@@ -479,7 +489,7 @@ class QualityAndFreshnessTests(OperationalStateCase):
     def test_reduced_history_with_an_omitted_spike_fails(self):
         policy = InterpretationPolicy(
             policy_id="policy-small", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=5, max_aggregate_candidates=100, max_gap_ticks=2,
+            max_input_points=5, max_aggregate_candidates=100, **INDEX_WORK, max_gap_ticks=2,
             stale_after_ticks=3,
             trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
         self.service = OperationalStateService(self.boundary, (policy,))
@@ -517,7 +527,7 @@ class TimeConsistencyTests(OperationalStateCase):
     def test_changed_policy_is_a_distinct_derivation(self):
         other = InterpretationPolicy(
             policy_id="policy-a", version="v1", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+            max_input_points=50, max_aggregate_candidates=200, **INDEX_WORK, max_gap_ticks=2,
             stale_after_ticks=3, trend_tolerance_per_second={"u1": 5.0}, max_response_bytes=262_144)
         self.service = OperationalStateService(self.boundary, (POLICY, other))
         self.plant.series(NUM, [0.0, 1.0, 2.0])
@@ -602,6 +612,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                 ("plant_context", ContextUnavailable("ctx-secret at /secret/path"),
                  ContextUnavailable),
                 ("signal_descriptor", UnknownBinding("sig-secret"), UnknownBinding),
+                ("index_work_per_read", RuntimeError("secret host path"),
+                 operational_state.InconsistentRead),
                 ("screen", RuntimeError("secret exception text"),
                  operational_state.InconsistentRead)):
             with self.subTest(target=target):
@@ -622,7 +634,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_aggregate_candidate_work_is_bounded_across_the_request(self):
         policy = InterpretationPolicy(
             policy_id="policy-work", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=5, max_aggregate_candidates=10, max_gap_ticks=2,
+            max_input_points=5, max_aggregate_candidates=10, **INDEX_WORK, max_gap_ticks=2,
             stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
             max_response_bytes=262_144)
         self.assertEqual(policy.parameters()["max_aggregate_candidates"], 10)
@@ -646,7 +658,62 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         self.assertEqual(body["work"], {"candidate_records": 10,
                                         "max_aggregate_candidates": 10,
                                         "current_eligible_count": 7,
-                                        "history_eligible_count": 3})
+                                        "history_eligible_count": 3,
+                                        "reads_per_request": 2,
+                                        "host_index_work_per_read": 500,
+                                        "index_work_bound": 1000,
+                                        "max_index_work_per_read": 5000,
+                                        "max_aggregate_index_work": 10_000})
+
+    def test_host_index_work_is_bounded_by_the_policy_before_any_read(self):
+        policy = InterpretationPolicy(
+            policy_id="policy-index", version="v0", default_window_ticks=10, max_window_ticks=100,
+            max_input_points=50, max_aggregate_candidates=1000, max_index_work_per_read=500,
+            max_aggregate_index_work=1000, max_gap_ticks=2, stale_after_ticks=3,
+            trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
+        parameters = policy.parameters()
+        self.assertEqual((parameters["max_index_work_per_read"],
+                          parameters["max_aggregate_index_work"]), (500, 1000))
+        self.service = OperationalStateService(self.boundary, (policy,))
+        self.plant.series(NUM, [float(i) for i in range(300)])
+        snapshot = self.plant.snapshot(299)
+        self.assertEqual(self.plant.reader.max_index_work, 500)
+        # A host reader configured wider than the per-read bound: refused before the run
+        # is opened or read. Malformed host bounds are internal faults, also before reads.
+        for host, error in ((501, ResourceLimitExceeded), (10**6, ResourceLimitExceeded),
+                            (0, operational_state.InconsistentRead),
+                            (True, operational_state.InconsistentRead),
+                            (500.0, operational_state.InconsistentRead),
+                            (None, operational_state.InconsistentRead)):
+            with self.subTest(host=host), \
+                    mock.patch.object(self.boundary, "index_work_per_read", lambda: host), \
+                    self.assertRaises(error) as caught:
+                self.read(snapshot=snapshot, start=251, end=299, policy=policy)
+            self.assertRedacted(caught.exception, "501", "1000000")
+            self.assertEqual((self.plant.reads, self.boundary.opened, self.boundary.calls),
+                             ([], [], []))
+        # Exactly at the per-read bound (this host's reader): both reads run and their
+        # real index probes stay within the reported bound.
+        probes = []
+        probe = telemetry._ScanBudget.probe
+
+        def counted(budget):
+            probes.append(budget.work_limit)
+            probe(budget)
+
+        with mock.patch.object(telemetry._ScanBudget, "probe", counted):
+            body = self.read(snapshot=snapshot, start=251, end=299, policy=policy).as_json()
+        self.assertEqual(self.plant.reads, [("current", NUM), ("history", NUM)])
+        work = body["work"]
+        self.assertEqual({name: work[name] for name in (
+            "reads_per_request", "host_index_work_per_read", "index_work_bound",
+            "max_index_work_per_read", "max_aggregate_index_work")},
+            {"reads_per_request": 2, "host_index_work_per_read": 500,
+             "index_work_bound": 1000, "max_index_work_per_read": 500,
+             "max_aggregate_index_work": 1000})
+        self.assertEqual(set(probes), {500})
+        self.assertLessEqual(len(probes), work["index_work_bound"])
+        self.assertEqual(body["policy"]["parameters"]["max_aggregate_index_work"], 1000)
 
     def test_wrong_run_incarnation_clock_context_and_future_k(self):
         self.plant.series(NUM, [1.0, 2.0])
@@ -701,7 +768,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         snapshot = self.plant.snapshot(4)
         wrong = InterpretationPolicy(
             policy_id="policy-a", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+            max_input_points=50, max_aggregate_candidates=200, **INDEX_WORK, max_gap_ticks=2,
             stale_after_ticks=4, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
         cases = (
             (ResourceLimitExceeded, dict(start=0, end=200, snapshot=self.plant.snapshot(200))),
@@ -735,7 +802,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_reader_bounds_still_apply_and_never_truncate(self):
         policy = InterpretationPolicy(
             policy_id="policy-wide", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=500, max_aggregate_candidates=1000, max_gap_ticks=2,
+            max_input_points=500, max_aggregate_candidates=1000, **INDEX_WORK, max_gap_ticks=2,
             stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant.series(NUM, [1.0, 2.0])
@@ -745,7 +812,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_response_bound_fails_instead_of_truncating(self):
         policy = InterpretationPolicy(
             policy_id="policy-tight", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+            max_input_points=50, max_aggregate_candidates=200, **INDEX_WORK, max_gap_ticks=2,
             stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=4096)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant.series(NUM, [float(i) for i in range(40)])
@@ -757,8 +824,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
             return InterpretationPolicy(
                 policy_id="policy-exact", version="v0", default_window_ticks=10,
                 max_window_ticks=100, max_input_points=50, max_aggregate_candidates=200,
-                max_gap_ticks=2, stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
-                max_response_bytes=limit)
+                **INDEX_WORK, max_gap_ticks=2, stale_after_ticks=3,
+                trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=limit)
 
         probe = exact_policy(99_999)   # same digit count as the measured size below
         self.service = OperationalStateService(self.boundary, (probe,))
@@ -828,9 +895,12 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_policy_record_is_validated_versioned_and_checksummed(self):
         base = dict(policy_id="policy-a", version="v0", default_window_ticks=10,
                     max_window_ticks=100, max_input_points=50, max_aggregate_candidates=200,
-                    max_gap_ticks=2, stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
-                    max_response_bytes=262_144)
-        for change in ({"trend_tolerance_per_second": {"u1": -0.1}},
+                    **INDEX_WORK, max_gap_ticks=2, stale_after_ticks=3,
+                    trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
+        for change in ({"max_index_work_per_read": 0}, {"max_aggregate_index_work": 9_999},
+                       {"max_aggregate_index_work": 1},
+                       {"max_index_work_per_read": 5001, "max_aggregate_index_work": 10_001},
+{"trend_tolerance_per_second": {"u1": -0.1}},
                        {"trend_tolerance_per_second": {"u1": float("nan")}},
                        {"trend_tolerance_per_second": {"u1": True}},
                        {"trend_tolerance_per_second": {}},
@@ -847,7 +917,9 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                             ("max_input_points", 50), ("max_aggregate_candidates", 200),
                             ("max_gap_ticks", 2), ("stale_after_ticks", 3),
                             ("max_response_bytes", 262_144), ("max_signals_per_request", 1),
-                            ("max_peers", 0), ("max_transitions", 0)):
+                            ("max_peers", 0), ("max_transitions", 0),
+                            ("max_index_work_per_read", 5000),
+                            ("max_aggregate_index_work", 10_000)):
             for wrong in (float(valid), bool(valid)):
                 with self.subTest(name=name, wrong=wrong), \
                         self.assertRaises(IncompatiblePolicy):
@@ -887,7 +959,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         policy = InterpretationPolicy(
             policy_id="policy-max", version="v0", default_window_ticks=120,
             max_window_ticks=999, max_input_points=1000, max_aggregate_candidates=2000,
-            max_gap_ticks=1, stale_after_ticks=1,
+            **INDEX_WORK, max_gap_ticks=1, stale_after_ticks=1,
             trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant = plant
