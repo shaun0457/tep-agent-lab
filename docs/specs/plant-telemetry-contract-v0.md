@@ -92,16 +92,16 @@ kinds and relationship meanings can describe process plants, CNC/discrete
 manufacturing, robotics, HVAC, and other domains. Relationships express topology
 or associations, not inferred dynamics; directed connectivity does not prove flow.
 
-`source_binding` identifies `source_id` and an adapter-native locator/ref; the generic
-reader treats the locator as opaque. `entity_refs` identifies associated entities
+`source_binding` identifies the static source definition and an adapter-native
+locator/ref; the incarnation `source_id` is carried by the StreamRegistration
+(§Source binding levels, amendment 2026-10-13). The generic reader treats the locator
+as opaque. `entity_refs` identifies associated entities
 and association roles, allowing node- and edge-associated signals. `quantity` is
 an extensible semantic identifier. `unit` is an explicit unit identifier or explicit
 unitless/unknown marker, never an implicit assumption. `value_kind` declares a
 scalar numeric, boolean, or string value; unknown/missing values may be null under
 explicit quality/status. `capability` declares READ, WRITE, or READ_WRITE source
 capability; v0 telemetry provides reads only. XMEAS/XMV are not required.
-For the two-level reading of `source_binding` used by PlantContextRevision, see
-§Source binding levels (amendment 2026-10-13) below.
 
 Candidate entities/bindings may be retained for review, but MUST remain labeled and
 separate from verified operational mapping. An unverified binding MUST NOT silently
@@ -114,9 +114,10 @@ Registry `origin × validation × authority` semantics.
 
 Owner decision of 2026-10-13, recorded with
 [Plant Context Composition v0](plant-context-composition-v0.md). This amendment is
-additive. It clarifies how `source_binding` above relates to §Identity, deduplication,
+the source-binding clarification reflected in §Canonical Plant Context above. It
+clarifies how `source_binding` relates to §Identity, deduplication,
 and acceptance ordering, where `source_id` identifies one registered stream
-incarnation. It changes no sample, identity, deduplication or snapshot semantics.
+incarnation. It changes no sample identity, deduplication or snapshot semantics.
 
 A canonical plant revision is shared by every stream over the same plant semantics,
 while a stream incarnation is created per run or session. `source_binding` therefore has
