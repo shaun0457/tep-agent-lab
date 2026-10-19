@@ -694,12 +694,15 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         # Exactly at the per-read bound (this host's reader): both reads run and their
         # real index probes stay within the reported bound.
         # Patches the reader's private scan budget only to observe real probe work.
-        work_done: dict[int, tuple[int, int]] = {}   # budget -> (work done, its limit)
+        # The budgets themselves are kept (by identity, not id()), so a freed budget's
+        # address cannot be reused and merge two reads into one.
+        budgets: list = []
         probe = telemetry._ScanBudget.probe
 
         def counted(budget):
             probe(budget)
-            work_done[id(budget)] = (budget.work, budget.work_limit)
+            if not any(seen is budget for seen in budgets):
+                budgets.append(budget)
 
         with mock.patch.object(telemetry._ScanBudget, "probe", counted):
             body = self.read(snapshot=snapshot, start=251, end=299, policy=policy).as_json()
@@ -713,12 +716,11 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
              "max_aggregate_index_work": 1000})
         # One scan budget per read, as many reads as the request declares, each within
         # the host bound, and their total within the request bound.
-        self.assertEqual(len(work_done), work["reads_per_request"])
+        self.assertEqual(len(budgets), work["reads_per_request"])
         self.assertEqual(len(self.plant.reads), work["reads_per_request"])
-        self.assertEqual({limit for _, limit in work_done.values()}, {500})
-        self.assertTrue(all(done <= 500 for done, _ in work_done.values()))
-        self.assertLessEqual(sum(done for done, _ in work_done.values()),
-                             work["index_work_bound"])
+        self.assertEqual({budget.work_limit for budget in budgets}, {500})
+        self.assertTrue(all(0 < budget.work <= 500 for budget in budgets))
+        self.assertLessEqual(sum(budget.work for budget in budgets), work["index_work_bound"])
         self.assertEqual(body["policy"]["parameters"]["max_aggregate_index_work"], 1000)
 
     def test_wrong_run_incarnation_clock_context_and_future_k(self):
