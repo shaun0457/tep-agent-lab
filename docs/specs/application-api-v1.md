@@ -86,6 +86,58 @@ get_signal_history(run_id, signal_id, *, snapshot: TelemetrySnapshot,
   policy, applied after both cutoffs.
 - Values are verbatim; no interpolation, gap fill or freshness claim.
 
+### Composed-view read (amendment 2026-10-19)
+
+Owner decision 2026-10-19 adds one transport-neutral ApplicationViewService read for
+P1.3. Composition semantics stay owned by
+[Plant Context Composition v0](plant-context-composition-v0.md) §Scope resolution and
+§Composed view. Existing reads, telemetry snapshots and transport v1 are unchanged.
+
+```python
+get_composed_view(run_id=None, *, plant_context_ref=None, composed_view_ref=None,
+                  max_items=10000, max_bytes=1048576) -> ComposedView
+```
+
+- Supply exactly one selector: an exact non-empty `run_id` whose RUN_READY pins
+  `plant_context_ref` and the composed-view identity, or both exact
+  `plant_context_ref` and `composed_view_ref` with no run id. Mixed, incomplete,
+  empty or malformed selectors fail `InvalidRequest`. There is no default run,
+  current revision or "latest" resolver.
+- Resolve through public P0/application queries, with AGENT-scope authorization before
+  assembly. The exact view identity pins the ordered engineering selection (including
+  explicit empty), every revision's input/published rule-set refs, grouping definitions,
+  policies and reachability bounds. Rebuild only from those exact retained inputs and
+  verify the resulting checksum. A missing run/READY pin, unavailable dependency,
+  checksum mismatch or plant/view identity mismatch fails `ViewUnavailable`, never an
+  empty view or fallback to a different run/revision. Visibility violations fail
+  `VisibilityViolation` without disclosing hidden refs or counts.
+- `ComposedView` is frozen with tuple collections and runtime `to_jsonable`
+  serialization. It returns the selected `run_id` (null for explicit identities),
+  `plant_context_ref`, `composed_view_ref`, ordered engineering selection and
+  per-revision rule-set refs, exact policy/definition/bound provenance, topology
+  (entities, relationships, signal attachments and unbound references), grouping,
+  applicability refs/association kinds and `TOPOLOGY_ONLY` reachability. Collections
+  follow the composition spec's deterministic ordering. Knowledge/document/rule bodies
+  and diagram layout coordinates are absent. Empty applicability is successful only
+  when it is the exact resolved result, including an explicitly empty selection.
+- `max_items` and `max_bytes` are positive integers (booleans rejected), bounded
+  respectively by 10000 and 1048576; invalid values fail `InvalidRequest`. Item count
+  includes every collection entry, including nested members, attachments and citations;
+  byte count covers the complete UTF-8 JSON result. Finite service-policy work and
+  allocation caps also apply. Exceeding any bound fails `ResourceLimitExceeded`;
+  no partial view, silent truncation or unbounded scan is permitted.
+- This is a static read pinned by immutable plant/view identities. It accepts no
+  telemetry snapshot and selects no T/K; any telemetry overlay uses a separately pinned
+  `TelemetryReadSnapshot` through the existing reads. Concurrent telemetry append,
+  preparation or publication cannot change this exact static result.
+- Failures use the existing typed families and fixed redacted messages in §Failures and
+  visibility / §Transport v1; no exception text, values, paths or hidden metadata is
+  echoed. This read grants no SIMULATE/MUTATE authority, is not an Agent tool and changes
+  no Agent tool behavior (CL-9/CL-13).
+- The method is not added to the five-method transport v1 allowlist. Desktop/portfolio
+  transport exposure requires a new protocol version under §Versioning, with its wire
+  schema and matching host/client/bridge allowlists specified before adapter delivery.
+
 ## Models
 
 All models are frozen dataclasses with tuple collections, serialized with runtime
