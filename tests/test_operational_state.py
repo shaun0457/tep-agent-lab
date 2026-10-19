@@ -16,7 +16,7 @@ from unittest import mock
 
 from tep_agent_lab import operational_state, telemetry
 from tep_agent_lab.operational_state import (
-    ContextUnavailable, EngineeringSelection, Feature, FeatureStatus, Freshness,
+    ContextUnavailable, EngineeringSelection, Feature, FeatureStatus, Freshness, HostReadLimits,
     IncompatiblePolicy, InterpretationPolicy, InvalidOperationalStateRequest,
     NonfiniteDerivation, OperationalStateService, PlantContextRef, PolicyUnavailable,
     SignalDescriptor, Trend, UnknownRun, ValueKind)
@@ -146,9 +146,12 @@ class Boundary:
         self.calls = []
         self.opened = []
 
-    def index_work_per_read(self):
-        """Host configuration: the widest per-read index-work bound of its readers."""
-        return max(plant.reader.max_index_work for plant in self.plants.values())
+    def host_read_limits(self):
+        """Host configuration: the narrowest point/interval and widest index-work limits."""
+        readers = [plant.reader for plant in self.plants.values()]
+        return HostReadLimits(min(reader.max_points_limit for reader in readers),
+                              min(reader.max_interval_ticks for reader in readers),
+                              max(reader.max_index_work for reader in readers))
 
     def queries(self, run_id):
         self.opened.append(run_id)
@@ -611,7 +614,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                 ("plant_context", ContextUnavailable("ctx-secret at /secret/path"),
                  ContextUnavailable),
                 ("signal_descriptor", UnknownBinding("sig-secret"), UnknownBinding),
-                ("index_work_per_read", RuntimeError("secret host path"),
+                ("host_read_limits", RuntimeError("secret host path"),
                  operational_state.InconsistentRead),
                 ("screen", RuntimeError("secret exception text"),
                  operational_state.InconsistentRead)):
@@ -684,8 +687,9 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                             (True, operational_state.InconsistentRead),
                             (500.0, operational_state.InconsistentRead),
                             (None, operational_state.InconsistentRead)):
+            limits = None if host is None else HostReadLimits(100, 1000, host)
             with self.subTest(host=host), \
-                    mock.patch.object(self.boundary, "index_work_per_read", lambda: host), \
+                    mock.patch.object(self.boundary, "host_read_limits", lambda: limits), \
                     self.assertRaises(error) as caught:
                 self.read(snapshot=snapshot, start=251, end=299, policy=policy)
             self.assertRedacted(caught.exception, "501", "1000000")
@@ -722,6 +726,44 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         self.assertTrue(all(0 < budget.work <= 500 for budget in budgets))
         self.assertLessEqual(sum(budget.work for budget in budgets), work["index_work_bound"])
         self.assertEqual(body["policy"]["parameters"]["max_aggregate_index_work"], 1000)
+
+    def test_host_point_and_interval_limits_are_checked_before_any_read(self):
+        self.plant.series(NUM, [1.0] * 5)
+        snapshot = self.plant.snapshot(4)
+        self.assertEqual(self.boundary.host_read_limits(), HostReadLimits(100, 1000, 500))
+
+        def policy(points, window):
+            return InterpretationPolicy(
+                policy_id=f"policy-host-{points}-{window}", version="v0",
+                default_window_ticks=10, max_window_ticks=window, max_input_points=points,
+                max_aggregate_candidates=2 * points, **INDEX_WORK, max_gap_ticks=2,
+                stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
+                max_response_bytes=262_144)
+
+        # A policy the host reader cannot serve fails before the run is opened or read,
+        # even for a small window that would itself fit.
+        for points, window in ((101, 1000), (100, 1001)):
+            narrow = policy(points, window)
+            self.service = OperationalStateService(self.boundary, (narrow,))
+            with self.subTest(points=points, window=window), \
+                    self.assertRaises(ResourceLimitExceeded) as caught:
+                self.read(snapshot=snapshot, start=2, end=4, policy=narrow)
+            self.assertRedacted(caught.exception, "101", "1001")
+            self.assertEqual((self.plant.reads, self.boundary.opened, self.boundary.calls),
+                             ([], [], []))
+        # Exactly at the host limits.
+        exact = policy(100, 1000)
+        self.service = OperationalStateService(self.boundary, (exact,))
+        self.read(snapshot=snapshot, start=0, end=4, policy=exact)
+        self.assertEqual(self.plant.reads, [("current", NUM), ("history", NUM)])
+        for limits in (HostReadLimits(0, 1000, 500), HostReadLimits(100, -1, 500),
+                       HostReadLimits(100.0, 1000, 500), HostReadLimits(100, True, 500)):
+            self.plant.reads.clear()
+            with self.subTest(limits=limits), \
+                    mock.patch.object(self.boundary, "host_read_limits", lambda: limits), \
+                    self.assertRaises(operational_state.InconsistentRead):
+                self.read(snapshot=snapshot, start=0, end=4, policy=exact)
+            self.assertEqual(self.plant.reads, [])
 
     def test_wrong_run_incarnation_clock_context_and_future_k(self):
         self.plant.series(NUM, [1.0, 2.0])
@@ -814,8 +856,16 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
             stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant.series(NUM, [1.0, 2.0])
-        with self.assertRaises(ResourceLimitExceeded):
+        with self.assertRaises(ResourceLimitExceeded):   # host limit: before any read
             self.read(horizon=1, start=0, end=1, policy=policy)
+        self.assertEqual(self.plant.reads, [])
+        # A host that misreports its limits still meets the reader's own bound, which
+        # fails instead of truncating.
+        with mock.patch.object(self.boundary, "host_read_limits",
+                               lambda: HostReadLimits(1000, 1000, 500)), \
+                self.assertRaises(ResourceLimitExceeded):
+            self.read(horizon=1, start=0, end=1, policy=policy)
+        self.assertEqual(self.plant.reads, [("current", NUM), ("history", NUM)])
 
     def test_response_bound_fails_instead_of_truncating(self):
         policy = InterpretationPolicy(
@@ -962,7 +1012,7 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_maximum_unusable_window_is_a_typed_status_within_the_response_bound(self):
         source, signal = "src-" + "x" * 252, "sig-" + "y" * 252
         plant = Plant("run-wide", 1000, source=source, signals=(signal,), max_scan_records=5000)
-        self.boundary.plants["run-wide"] = plant
+        self.boundary = Boundary(plant)   # one host whose reader serves 1,000 points
         self.boundary.descriptors[signal] = SignalDescriptor(ValueKind.NUMERIC, "u1")
         policy = InterpretationPolicy(
             policy_id="policy-max", version="v0", default_window_ticks=120,

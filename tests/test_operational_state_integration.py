@@ -21,7 +21,7 @@ from tep_agent_lab import (application_transport, operational_state_demo, tool_b
 from tep_agent_lab.application_views import ApplicationViewService
 from tep_agent_lab.live_plant import LivePlantPolicyV2
 from tep_agent_lab.operational_state import (ContextUnavailable, EngineeringSelection, Feature,
-                                             FeatureStatus, Freshness,
+                                             FeatureStatus, Freshness, HostReadLimits,
                                              InvalidOperationalStateRequest, PlantContextRef,
                                              Trend, UnknownRun)
 from tep_agent_lab.operational_state_demo import main as demo_main
@@ -201,7 +201,12 @@ class P0RunTests(OperationalStateIntegrationCase):
         self.prepare("p0-index", 1)
         reader = self.manager._runs["p0-index"].session.telemetry.reader
         boundary = P0OperationalStateBoundary(self.manager)
-        self.assertEqual(boundary.index_work_per_read(), reader.max_index_work)
+        self.assertEqual(boundary.host_read_limits(),
+                         HostReadLimits(reader.max_points_limit, reader.max_interval_ticks,
+                                        reader.max_index_work))
+        # The host configuration the readers are built from cannot be swapped afterwards.
+        with self.assertRaises(AttributeError):
+            self.manager.telemetry_policy = TelemetryReadPolicy(max_scan_records=10**6)
         self.assertEqual(reader.max_index_work, TEP_CLEAN_STREAM_POLICY.max_index_work_per_read)
         parameters = TEP_CLEAN_STREAM_POLICY.parameters()
         self.assertEqual((parameters["max_index_work_per_read"],
@@ -210,22 +215,25 @@ class P0RunTests(OperationalStateIntegrationCase):
         work = self.read("p0-index", TEMPERATURE, snapshot).as_json()["work"]
         self.assertEqual((work["host_index_work_per_read"], work["index_work_bound"]),
                          (50_000, 100_000))
-        # A host whose readers are configured wider than the pinned policy is refused
-        # before any run is opened (an unknown run id would otherwise be UnknownRun).
-        with tempfile.TemporaryDirectory() as directory:
-            wide = RunManager(
-                directory, dependency_pins=PINS, clock=lambda: "2026-10-19T00:00:00Z",
-                revisions=SourceRevisions(PINS["tep-sim"], PINS["industrial-agent-runtime"],
-                                          "a" * 40),
-                telemetry_policy=TelemetryReadPolicy(max_scan_records=50_001))
-            self.assertEqual(P0OperationalStateBoundary(wide).index_work_per_read(), 50_001)
-            with self.assertRaises(ResourceLimitExceeded) as caught:
-                operational_state_service(wide).get_operational_state(
-                    "p0-missing", TEMPERATURE, snapshot=snapshot,
-                    plant_context_ref=interim_plant_context(snapshot),
-                    engineering_selection=EMPTY, interpretation_policy_refs=(POLICY_REF,))
-            self.assertNotIn("50001", str(caught.exception))
-            self.assertIsNone(caught.exception.__context__)
+        # A host whose readers do more index work, or serve fewer points or a shorter
+        # interval, than the pinned policy needs is refused before any run is opened (an
+        # unknown run id would otherwise be UnknownRun).
+        for options in ({"max_scan_records": 50_001}, {"max_points_limit": 500},
+                        {"max_interval_ticks": 998}):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                host = RunManager(
+                    directory, dependency_pins=PINS, clock=lambda: "2026-10-19T00:00:00Z",
+                    revisions=SourceRevisions(PINS["tep-sim"], PINS["industrial-agent-runtime"],
+                                              "a" * 40),
+                    telemetry_policy=TelemetryReadPolicy(**options))
+                with self.assertRaises(ResourceLimitExceeded) as caught:
+                    operational_state_service(host).get_operational_state(
+                        "p0-missing", TEMPERATURE, snapshot=snapshot,
+                        plant_context_ref=interim_plant_context(snapshot),
+                        engineering_selection=EMPTY, interpretation_policy_refs=(POLICY_REF,))
+                for value in ("50001", "500", "998"):
+                    self.assertNotIn(value, str(caught.exception))
+                self.assertIsNone(caught.exception.__context__)
 
     def test_default_p0_cadence_reports_gaps_instead_of_a_trend(self):
         self.prepare("p0-coarse", 60)

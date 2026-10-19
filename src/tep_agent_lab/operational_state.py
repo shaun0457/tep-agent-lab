@@ -475,6 +475,20 @@ class SignalOperationalState:
 
 
 # -- injected public boundary ----------------------------------------------------------
+@dataclass(frozen=True)
+class HostReadLimits:
+    """Per-read limits of the host reader behind the public reads (host configuration).
+
+    ``max_points``: points one history read may return; ``max_interval_ticks``: the
+    largest ``end - start`` of one history read; ``max_index_work``: index probes and
+    tail checks one read may make. The service validates the values before any read.
+    """
+
+    max_points: int
+    max_interval_ticks: int
+    max_index_work: int
+
+
 class TelemetryQueries(Protocol):
     """The public snapshot-bound P0 telemetry queries (AGENT scope)."""
 
@@ -495,8 +509,8 @@ class OperationalStateBoundary(Protocol):
     read message with a fixed one, and maps any other exception to an internal fault.
     """
 
-    def index_work_per_read(self) -> int:
-        """Host configuration: the index-work bound of each public telemetry read."""
+    def host_read_limits(self) -> HostReadLimits:
+        """Host configuration: the per-read limits of the reader behind the reads."""
 
     def queries(self, run_id: str) -> TelemetryQueries: ...
 
@@ -769,17 +783,25 @@ class OperationalStateService:
             # No published engineering revision is resolvable before LOS-A-S2.
             raise ContextUnavailable("engineering context selection is unavailable")
         boundary = self._boundary
-        # 2. The host reader's per-read index work is host configuration; it must fit the
-        #    pinned policy before any run is opened or read. The policy invariant
-        #    (aggregate >= reads x per-read) implies the aggregate clause; it is kept as
-        #    the explicit request-level check. The lambda keeps attribute lookup guarded.
-        host_index_work = _guarded(lambda: boundary.index_work_per_read())
-        if type(host_index_work) is not int or host_index_work < 1:
+        # 2. The host reader's per-read limits are host configuration; the pinned policy
+        #    must fit them before any run is opened or read: every complete window is
+        #    requested with max_input_points and may span max_window_ticks. The policy
+        #    invariant (aggregate >= reads x per-read) implies the aggregate clause; it is
+        #    kept as the explicit request-level check. The lambda keeps lookup guarded.
+        limits = _guarded(lambda: boundary.host_read_limits())
+        if (not isinstance(limits, HostReadLimits)
+                or any(type(value) is not int for value in (
+                    limits.max_points, limits.max_interval_ticks, limits.max_index_work))
+                or limits.max_points < 1 or limits.max_interval_ticks < 0
+                or limits.max_index_work < 1):
             raise InconsistentRead("boundary returned an unexpected shape")
+        host_index_work = limits.max_index_work
         index_work = _READS_PER_REQUEST * host_index_work
-        if (host_index_work > policy.max_index_work_per_read
+        if (policy.max_input_points > limits.max_points
+                or policy.max_window_ticks > limits.max_interval_ticks
+                or host_index_work > policy.max_index_work_per_read
                 or index_work > policy.max_aggregate_index_work):
-            raise ResourceLimitExceeded("host index work exceeds the interpretation policy bound")
+            raise ResourceLimitExceeded("host read limits cannot serve the interpretation policy")
         queries = _guarded(lambda: boundary.queries(run_id))
 
         # 3. The current read is the public path that validates the exact snapshot and

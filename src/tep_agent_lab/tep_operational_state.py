@@ -23,7 +23,7 @@ from typing import Any, TypeVar
 
 from .application_views import AmbiguousSignal, UnknownSignal, resolve_signal_binding
 from .canonical_context import ContextSourceRef, ProjectionScope
-from .operational_state import (ContextUnavailable, InterpretationPolicy,
+from .operational_state import (ContextUnavailable, HostReadLimits, InterpretationPolicy,
                                 InvalidOperationalStateRequest, OperationalStateService,
                                 PlantContextRef, SignalDescriptor, UnknownRun, ValueKind,
                                 VisibilityViolation)
@@ -130,12 +130,16 @@ class P0OperationalStateBoundary:
     def __init__(self, manager: Any) -> None:
         self._manager = manager
 
-    def index_work_per_read(self) -> int:
-        """Per-read index-work bound of the readers this manager builds for every run.
+    def host_read_limits(self) -> HostReadLimits:
+        """Per-read limits of the readers this manager builds for every run.
 
-        Host configuration (the manager's TelemetryReadPolicy), not run data.
+        Host configuration: the manager's read-only TelemetryReadPolicy, from which each
+        run's reader is built. The reader itself is reachable only through private run
+        state, so it is not read here.
         """
-        return index_work_bound(self._manager.telemetry_policy.max_scan_records)
+        policy = self._manager.telemetry_policy
+        return HostReadLimits(policy.max_points_limit, policy.max_interval_ticks,
+                              index_work_bound(policy.max_scan_records))
 
     def queries(self, run_id: str) -> _AgentReads:
         try:
