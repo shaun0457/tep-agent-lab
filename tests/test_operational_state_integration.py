@@ -17,7 +17,7 @@ import unittest
 from industrial_agent_runtime import Budget, to_jsonable
 
 from tep_agent_lab import application_transport, tool_bridge, tool_surface
-from tep_agent_lab.application_views import UnknownSignal
+from tep_agent_lab.application_views import ApplicationViewService
 from tep_agent_lab.live_plant import LivePlantPolicyV2
 from tep_agent_lab.operational_state import (ContextUnavailable, EngineeringSelection, Feature,
                                              FeatureStatus, Freshness,
@@ -26,11 +26,14 @@ from tep_agent_lab.operational_state import (ContextUnavailable, EngineeringSele
 from tep_agent_lab.operational_state_demo import main as demo_main
 from tep_agent_lab.playground import (ModelSpec, RunManager, RunRequest, SourceRevisions,
                                       WorldSpec, load_dependency_pins, pinned_tep_sim_sources)
-from tep_agent_lab.telemetry import SnapshotUnavailable
+from tep_agent_lab.telemetry import (ClockDescriptor, ClockKind, ClockMismatch,
+                                     SnapshotUnavailable, StoreRef, TelemetryReadSnapshot,
+                                     TimePoint, UnknownBinding, parse_event_resolution)
 from tep_agent_lab.tep_operational_state import (INTERIM_PROCESS_GRAPH_SOURCE,
                                                  TEP_CLEAN_STREAM_POLICY,
+                                                 P0OperationalStateBoundary,
                                                  interim_plant_context,
-                                                 operational_state_service)
+                                                 operational_state_service, served_signals)
 from tep_agent_lab.tep_world import leakage_findings
 
 PINS = load_dependency_pins(Path(__file__).parents[1] / "dependency-pins.json")
@@ -47,6 +50,18 @@ class NoModel:
 
 def plain(view):
     return json.loads(json.dumps(to_jsonable(view)))
+
+
+def rebuilt(snapshot, **changes):
+    """A self-consistent public snapshot object with top-level fields changed."""
+    body = {**json.loads(json.dumps(snapshot)), **changes}
+    clock = body["event_clock"]
+    ref = TelemetryReadSnapshot(
+        StoreRef(**body["store"]), body["ingest_sequence"], TimePoint(**body["event_horizon"]),
+        ClockDescriptor(clock["clock_id"], ClockKind(clock["kind"]),
+                        parse_event_resolution(clock["resolution"]), clock["origin"]),
+        body["context_ref"], body["visibility_policy_ref"]).snapshot_ref
+    return {**body, "snapshot_ref": ref}
 
 
 def clean_setup(world):
@@ -136,11 +151,48 @@ class P0RunTests(OperationalStateIntegrationCase):
     def test_every_bound_signal_has_a_pinned_unit_tolerance(self):
         self.prepare("p0-units", 1)
         snapshot = self.snapshot("p0-units")
-        signals = self.manager._runs["p0-units"].session.telemetry.source.signal_ids
+        queries = self.manager.queries("p0-units")
+        signals = served_signals(queries)
+        bound = {binding["semantic_entity_id"] for category in ("nodes", "edges")
+                 for entity in plain(queries.process_graph())[category]
+                 for binding in entity["bindings"]}
+        self.assertEqual(set(signals), bound)
         self.assertEqual(len(signals), 53)
+        app = ApplicationViewService(self.manager.queries)
+        pinned = app.open_telemetry_snapshot("p0-units")
         for signal in signals:
             result = self.read("p0-units", signal, snapshot)
             self.assertEqual(result.features[Feature.TREND].status, FeatureStatus.AVAILABLE)
+            # Same resolution as the application signal read.
+            self.assertEqual(result.as_json()["descriptor"]["unit"],
+                             app.get_signal("p0-units", signal, snapshot=pinned).unit)
+
+    def test_signal_resolution_matches_the_application_read(self):
+        boundary = P0OperationalStateBoundary(None)
+
+        def graph(*bindings):
+            class Queries:
+                def process_graph(self):
+                    return {"nodes": [{"node_id": "n1", "bindings": list(bindings)}],
+                            "edges": []}
+            return Queries()
+
+        def binding(**changes):
+            return {"semantic_entity_id": "s1", "runtime_variable_id": "r1",
+                    "quantity": "temperature", "relation": "MEASURES", "unit": "deg C",
+                    **changes}
+
+        descriptor = boundary.signal_descriptor(graph(binding(), binding(runtime_variable_id="r2")),
+                                                "s1")
+        self.assertEqual(descriptor.unit, "deg C")
+        for other in (binding(quantity="pressure"), binding(relation="ACTUATES"),
+                      binding(unit="kPa")):
+            with self.subTest(other=other), self.assertRaises(UnknownBinding) as caught:
+                boundary.signal_descriptor(graph(binding(), other), "s1")
+            self.assertNotIn("s1", str(caught.exception))
+        with self.assertRaises(UnknownBinding):
+            boundary.signal_descriptor(graph(binding()), "s2")
+        self.assertEqual(TEP_CLEAN_STREAM_POLICY.parameters()["max_aggregate_candidates"], 50_000)
 
     def test_default_p0_cadence_reports_gaps_instead_of_a_trend(self):
         self.prepare("p0-coarse", 60)
@@ -155,19 +207,33 @@ class P0RunTests(OperationalStateIntegrationCase):
         self.prepare("p0-fail", 1)
         self.prepare("p0-other", 1)
         snapshot = self.snapshot("p0-fail")
+        horizon_clock = json.loads(json.dumps(snapshot))
+        horizon_clock["event_horizon"]["clock_id"] = "clock-secret"   # only the horizon clock
+        other_context = rebuilt(snapshot, context_ref="context-source:other")
         cases = ((UnknownRun, dict(run_id="p0-missing")),
                  (InvalidOperationalStateRequest, dict(run_id="Not A Run")),
-                 (UnknownSignal, dict(signal="reactor.secret_measurement")),
+                 (UnknownBinding, dict(signal="reactor.secret_measurement")),
                  (ContextUnavailable, dict(plant_context_ref=PlantContextRef(
                      INTERIM_PROCESS_GRAPH_SOURCE, "context-source:other"))),
-                 (SnapshotUnavailable, dict(run_id="p0-other")))
+                 (SnapshotUnavailable, dict(run_id="p0-other")),
+                 (ClockMismatch, dict(snapshot=horizon_clock)),
+                 (UnknownBinding, dict(source_id="tep-reference:p0-fail:secret")),
+                 (SnapshotUnavailable, dict(snapshot=rebuilt(snapshot, ingest_sequence=10**6))),
+                 # A wrong context is caught by the public snapshot validation first.
+                 (SnapshotUnavailable, dict(snapshot=other_context,
+                                            plant_context_ref=interim_plant_context(other_context))))
         for error, options in cases:
             run_id = options.pop("run_id", "p0-fail")
             signal = options.pop("signal", TEMPERATURE)
-            with self.subTest(error=error.__name__), self.assertRaises(error) as caught:
-                self.read(run_id, signal, snapshot, **options)
-            for secret in (run_id, signal, "context-source:other"):
-                self.assertNotIn(secret, str(caught.exception))
+            pinned = options.pop("snapshot", snapshot)
+            with self.subTest(error=error.__name__, options=sorted(options)), \
+                    self.assertRaises(error) as caught:
+                self.read(run_id, signal, pinned, **options)
+            text = str(caught.exception)
+            for secret in (run_id, signal, "context-source:other", "secret",
+                           snapshot["event_clock"]["clock_id"], "1000000"):
+                self.assertNotIn(secret, text)
+            self.assertIsNone(caught.exception.__cause__)
 
     def test_no_transport_method_api_version_or_agent_tool_change(self):
         self.assertEqual(application_transport.PROTOCOL_VERSION,

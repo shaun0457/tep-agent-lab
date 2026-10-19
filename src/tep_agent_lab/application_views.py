@@ -158,18 +158,7 @@ class ApplicationViewService:
                       tuple(self._binding(binding) for binding in entity["bindings"]))
 
     def _resolve(self, queries: RunQueries, run_id: str, signal_id: str):
-        graph = self._checked(queries.process_graph(), run_id)
-        matches = [(identity, self._binding(binding))
-                   for identity, _, entity in self._entities(graph)
-                   for binding in entity["bindings"]
-                   if binding["semantic_entity_id"] == signal_id]
-        if not matches:
-            raise UnknownSignal("unknown signal")
-        semantics = {(b.quantity, b.relation, b.unit) for _, b in matches}
-        if len(semantics) != 1:
-            raise AmbiguousSignal("inconsistent signal binding metadata")
-        binding = min(matches, key=lambda item: (item[0], item[1].source_locator))[1]
-        return tuple(sorted({identity for identity, _ in matches})), binding
+        return resolve_signal_binding(self._checked(queries.process_graph(), run_id), signal_id)
 
     @staticmethod
     def _same_signal(view: Mapping[str, Any], signal_id: str) -> None:
@@ -213,3 +202,24 @@ class ApplicationViewService:
                              view["returned_count"], view["reduced"], view["reduction_policy"],
                              view["coverage"], view["status"],
                              tuple(_point(sample) for sample in view["samples"]))
+
+
+def resolve_signal_binding(graph: Mapping[str, Any],
+                           signal_id: str) -> tuple[tuple[str, ...], Binding]:
+    """Entities and representative binding of a canonical signal in an AGENT graph view.
+
+    The one resolution rule for every signal read (application signal reads and the
+    Operational State descriptor): no binding is UnknownSignal; any disagreement on
+    (quantity, relation, unit) is AmbiguousSignal.
+    """
+    matches = [(identity, ApplicationViewService._binding(binding))
+               for identity, _, entity in ApplicationViewService._entities(graph)
+               for binding in entity["bindings"]
+               if binding["semantic_entity_id"] == signal_id]
+    if not matches:
+        raise UnknownSignal("unknown signal")
+    semantics = {(b.quantity, b.relation, b.unit) for _, b in matches}
+    if len(semantics) != 1:
+        raise AmbiguousSignal("inconsistent signal binding metadata")
+    binding = min(matches, key=lambda item: (item[0], item[1].source_locator))[1]
+    return tuple(sorted({identity for identity, _ in matches})), binding

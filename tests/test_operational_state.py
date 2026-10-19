@@ -18,7 +18,7 @@ from tep_agent_lab.operational_state import (
     ContextUnavailable, EngineeringSelection, Feature, FeatureStatus, Freshness,
     IncompatiblePolicy, InterpretationPolicy, InvalidOperationalStateRequest,
     NonfiniteDerivation, OperationalStateService, PlantContextRef, PolicyUnavailable,
-    SignalDescriptor, Trend, ValueKind)
+    SignalDescriptor, Trend, UnknownRun, ValueKind)
 from tep_agent_lab.telemetry import (ClockDescriptor, ClockKind, ClockMismatch, InMemoryTimeSeriesStore,
                                      ResourceLimitExceeded, SampleIdentity, SnapshotUnavailable,
                                      SourceObservation, StoreRef, TelemetryReadSnapshot,
@@ -36,8 +36,8 @@ DESCRIPTORS = {NUM: SignalDescriptor(ValueKind.NUMERIC, "u1"),
                ODD: SignalDescriptor(ValueKind.NUMERIC, "u-unpinned")}
 POLICY = InterpretationPolicy(
     policy_id="policy-a", version="v0", default_window_ticks=10, max_window_ticks=100,
-    max_input_points=50, max_gap_ticks=2, stale_after_ticks=3,
-    trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
+    max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+    stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
 PLANT = PlantContextRef("INTERIM_GRAPH_SOURCE", CONTEXT)
 EMPTY = EngineeringSelection.empty()
 
@@ -146,7 +146,7 @@ class Boundary:
         try:
             return self.plants[run_id]
         except KeyError:
-            raise LookupError("unknown run") from None
+            raise UnknownRun(f"unknown run {run_id}") from None
 
     def signal_descriptor(self, queries, signal_id):
         self.calls.append("signal_descriptor")
@@ -479,7 +479,8 @@ class QualityAndFreshnessTests(OperationalStateCase):
     def test_reduced_history_with_an_omitted_spike_fails(self):
         policy = InterpretationPolicy(
             policy_id="policy-small", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=5, max_gap_ticks=2, stale_after_ticks=3,
+            max_input_points=5, max_aggregate_candidates=100, max_gap_ticks=2,
+            stale_after_ticks=3,
             trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
         self.service = OperationalStateService(self.boundary, (policy,))
         values = [1.0] * 11
@@ -516,8 +517,8 @@ class TimeConsistencyTests(OperationalStateCase):
     def test_changed_policy_is_a_distinct_derivation(self):
         other = InterpretationPolicy(
             policy_id="policy-a", version="v1", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=50, max_gap_ticks=2, stale_after_ticks=3,
-            trend_tolerance_per_second={"u1": 5.0}, max_response_bytes=262_144)
+            max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+            stale_after_ticks=3, trend_tolerance_per_second={"u1": 5.0}, max_response_bytes=262_144)
         self.service = OperationalStateService(self.boundary, (POLICY, other))
         self.plant.series(NUM, [0.0, 1.0, 2.0])
         snapshot = self.plant.snapshot(2)
@@ -542,10 +543,109 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         with self.assertRaises(UnknownBinding) as caught:
             self.read("sig-missing", horizon=1)
         self.assertRedacted(caught.exception)
+        self.assertEqual(self.plant.reads, [("current", "sig-missing")])
+        # A wrong source is rejected on the snapshot-validating current read, before
+        # the context, descriptor or history work.
+        self.plant.reads.clear()
         with self.assertRaises(UnknownBinding) as caught:
             self.read(horizon=1, source_id="src-missing")
         self.assertRedacted(caught.exception)
         self.assertEqual(self.plant.reads, [("current", NUM)])
+        self.assertEqual(self.boundary.calls, [])
+
+    def test_snapshot_is_validated_before_context_and_descriptor(self):
+        self.plant.series(NUM, [1.0, 2.0])
+        snapshot = self.plant.snapshot(1)
+        stale = {**snapshot, "context_ref": "ctx-other"}   # its ref no longer matches
+        with self.assertRaises(SnapshotUnavailable) as caught:
+            self.read(snapshot=stale, plant=PlantContextRef("INTERIM_GRAPH_SOURCE", "ctx-other"))
+        self.assertRedacted(caught.exception)
+        self.assertEqual(self.boundary.calls, [])
+        # Context, then descriptor (including its unit compatibility), precede history.
+        self.plant.add(ODD, 0, 1.0)
+        self.plant.reads.clear()
+        with self.assertRaises(IncompatiblePolicy):
+            self.read(ODD, horizon=1)
+        self.assertEqual(self.plant.reads, [("current", ODD)])
+        self.assertEqual(self.boundary.calls, ["plant_context", "signal_descriptor"])
+
+    def test_boundary_and_public_read_failures_are_redacted_into_service_families(self):
+        self.plant.series(NUM, [1.0, 2.0])
+        snapshot = self.plant.snapshot(1)
+        horizon_clock = json.loads(json.dumps(snapshot))
+        horizon_clock["event_horizon"]["clock_id"] = "clock-secret"   # only the horizon clock
+        future = json.loads(json.dumps(snapshot))
+        future["ingest_sequence"] = 99
+
+        def leaky(error):
+            def fail(*args, **kwargs):
+                raise error
+            return fail
+
+        cases = (
+            (ClockMismatch, dict(snapshot=horizon_clock)),
+            (UnknownBinding, dict(snapshot=snapshot, source_id="src-secret")),
+            (SnapshotUnavailable, dict(snapshot=future)),
+            (UnknownRun, dict(snapshot=snapshot, run_id="run-secret")),
+        )
+        for error, options in cases:
+            with self.subTest(error=error.__name__):
+                with self.assertRaises(error) as caught:
+                    self.read(**options)
+                self.assertRedacted(caught.exception, "secret", "clock-a", "99")
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertTrue(caught.exception.__context__ is None
+                                or caught.exception.__suppress_context__)
+        # Boundary failures keep their family and lose their text; unknown ones are
+        # internal faults.
+        for target, error, family in (
+                ("plant_context", ContextUnavailable("ctx-secret at /secret/path"),
+                 ContextUnavailable),
+                ("signal_descriptor", UnknownBinding("sig-secret"), UnknownBinding),
+                ("screen", RuntimeError("secret exception text"),
+                 operational_state.InconsistentRead)):
+            with self.subTest(target=target):
+                self.setUp()
+                self.plant.series(NUM, [1.0, 2.0])
+                setattr(self.boundary, target, leaky(error))
+                with self.assertRaises(family) as caught:
+                    self.read(horizon=1)
+                self.assertRedacted(caught.exception, "secret")
+        self.setUp()
+        self.plant.series(NUM, [1.0, 2.0])
+        self.plant.telemetry_history = leaky(KeyError("sig-secret"))
+        with self.assertRaises(operational_state.InconsistentRead) as caught:
+            self.read(horizon=1)
+        self.assertRedacted(caught.exception, "secret")
+
+    def test_aggregate_candidate_work_is_bounded_across_the_request(self):
+        policy = InterpretationPolicy(
+            policy_id="policy-work", version="v0", default_window_ticks=10, max_window_ticks=100,
+            max_input_points=5, max_aggregate_candidates=10, max_gap_ticks=2,
+            stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
+            max_response_bytes=262_144)
+        self.assertEqual(policy.parameters()["max_aggregate_candidates"], 10)
+        for values, window, reads in (
+                # current prefix alone exceeds the bound: no history read is made
+                (11, (8, 10), [("current", NUM)]),
+                # current prefix (8) plus the complete window (3) exceeds it
+                (8, (5, 7), [("current", NUM), ("history", NUM)])):
+            with self.subTest(values=values):
+                self.setUp()
+                self.service = OperationalStateService(self.boundary, (policy,))
+                self.plant.series(NUM, [1.0] * values)
+                with self.assertRaises(ResourceLimitExceeded):
+                    self.read(horizon=values - 1, start=window[0], end=window[1], policy=policy)
+                self.assertEqual(self.plant.reads, reads)
+        # Exactly at the bound: 7 + 3 candidate records.
+        self.setUp()
+        self.service = OperationalStateService(self.boundary, (policy,))
+        self.plant.series(NUM, [1.0] * 7)
+        body = self.read(horizon=6, start=4, end=6, policy=policy).as_json()
+        self.assertEqual(body["work"], {"candidate_records": 10,
+                                        "max_aggregate_candidates": 10,
+                                        "current_eligible_count": 7,
+                                        "history_eligible_count": 3})
 
     def test_wrong_run_incarnation_clock_context_and_future_k(self):
         self.plant.series(NUM, [1.0, 2.0])
@@ -600,8 +700,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         snapshot = self.plant.snapshot(4)
         wrong = InterpretationPolicy(
             policy_id="policy-a", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=50, max_gap_ticks=2, stale_after_ticks=4,
-            trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
+            max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+            stale_after_ticks=4, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=262_144)
         cases = (
             (ResourceLimitExceeded, dict(start=0, end=200, snapshot=self.plant.snapshot(200))),
             (InvalidOperationalStateRequest, dict(start=0, end=5)),
@@ -615,7 +715,6 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
             (InvalidOperationalStateRequest, dict(plant=None)),
             (ContextUnavailable, dict(engineering=EngineeringSelection(("rule-set-a@v1",)))),
             (PolicyUnavailable, dict(policy=wrong)),
-            (IncompatiblePolicy, dict(signal=ODD)),
         )
         for error, options in cases:
             options.setdefault("snapshot", snapshot)
@@ -635,8 +734,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_reader_bounds_still_apply_and_never_truncate(self):
         policy = InterpretationPolicy(
             policy_id="policy-wide", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=500, max_gap_ticks=2, stale_after_ticks=3,
-            trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
+            max_input_points=500, max_aggregate_candidates=1000, max_gap_ticks=2,
+            stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant.series(NUM, [1.0, 2.0])
         with self.assertRaises(ResourceLimitExceeded):
@@ -645,8 +744,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
     def test_response_bound_fails_instead_of_truncating(self):
         policy = InterpretationPolicy(
             policy_id="policy-tight", version="v0", default_window_ticks=10, max_window_ticks=100,
-            max_input_points=50, max_gap_ticks=2, stale_after_ticks=3,
-            trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=4096)
+            max_input_points=50, max_aggregate_candidates=200, max_gap_ticks=2,
+            stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=4096)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant.series(NUM, [float(i) for i in range(40)])
         with self.assertRaises(ResourceLimitExceeded):
@@ -656,8 +755,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         def exact_policy(limit):
             return InterpretationPolicy(
                 policy_id="policy-exact", version="v0", default_window_ticks=10,
-                max_window_ticks=100, max_input_points=50, max_gap_ticks=2,
-                stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
+                max_window_ticks=100, max_input_points=50, max_aggregate_candidates=200,
+                max_gap_ticks=2, stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
                 max_response_bytes=limit)
 
         probe = exact_policy(99_999)   # same digit count as the measured size below
@@ -727,8 +826,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
 
     def test_policy_record_is_validated_versioned_and_checksummed(self):
         base = dict(policy_id="policy-a", version="v0", default_window_ticks=10,
-                    max_window_ticks=100, max_input_points=50, max_gap_ticks=2,
-                    stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
+                    max_window_ticks=100, max_input_points=50, max_aggregate_candidates=200,
+                    max_gap_ticks=2, stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
                     max_response_bytes=262_144)
         for change in ({"trend_tolerance_per_second": {"u1": -0.1}},
                        {"trend_tolerance_per_second": {"u1": float("nan")}},
@@ -737,7 +836,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                        {"trend_tolerance_per_second": {" u1": 0.5}},
                        {"default_window_ticks": 101}, {"max_window_ticks": -1},
                        {"max_input_points": 0}, {"max_gap_ticks": True},
-                       {"stale_after_ticks": -1}, {"version": ""}, {"max_response_bytes": 0}):
+                       {"stale_after_ticks": -1}, {"version": ""}, {"max_response_bytes": 0},
+                       {"max_aggregate_candidates": 99}, {"max_aggregate_candidates": True}):
             with self.subTest(change=change), self.assertRaises(IncompatiblePolicy):
                 InterpretationPolicy(**{**base, **change})
         same = InterpretationPolicy(**base)
@@ -763,7 +863,8 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         self.boundary.descriptors[signal] = SignalDescriptor(ValueKind.NUMERIC, "u1")
         policy = InterpretationPolicy(
             policy_id="policy-max", version="v0", default_window_ticks=120,
-            max_window_ticks=999, max_input_points=1000, max_gap_ticks=1, stale_after_ticks=1,
+            max_window_ticks=999, max_input_points=1000, max_aggregate_candidates=2000,
+            max_gap_ticks=1, stale_after_ticks=1,
             trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
         self.service = OperationalStateService(self.boundary, (policy,))
         self.plant = plant

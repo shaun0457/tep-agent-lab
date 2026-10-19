@@ -19,7 +19,7 @@ policy values and graph-derived signal descriptors are injected.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from fractions import Fraction
@@ -27,10 +27,11 @@ import hashlib
 import json
 import math
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
-from .telemetry import (Quality, ResourceLimitExceeded, SampleIdentity, TelemetryError,
-                        TelemetryRequestError, UnknownBinding, parse_event_resolution)
+from .telemetry import (ClockMismatch, Quality, ResourceLimitExceeded, SampleIdentity,
+                        SnapshotUnavailable, TelemetryError, TelemetryRequestError,
+                        UnknownBinding, parse_event_resolution)
 
 OPERATIONAL_STATE_VERSION = "tep-agent-lab.operational-state/v0"
 OD1_ALGORITHM = "operational-state.od1.endpoint-secant-strict-good/v0"
@@ -71,7 +72,41 @@ class NonfiniteDerivation(ArithmeticError):
 
 
 class InconsistentRead(RuntimeError):
-    """A public read answered another snapshot, binding or window (server fault)."""
+    """A public read answered another snapshot, binding or window, or a boundary failed
+    outside the service families (internal fault)."""
+
+
+class VisibilityViolation(RuntimeError):
+    """The AGENT scope or the result leakage screen rejected the request."""
+
+
+# Boundary and public-read failures keep their family and lose their text: messages never
+# echo ids, values, hidden counts, paths or exception text, and the original exception
+# is not chained. Anything outside these families is an internal fault.
+_PUBLIC_FAILURES: tuple[tuple[type[Exception], type[Exception], str], ...] = (
+    (TelemetryRequestError, InvalidOperationalStateRequest, "invalid operational state request"),
+    (UnknownRun, UnknownRun, "unknown run"),
+    (UnknownBinding, UnknownBinding, "unknown or ambiguous signal binding"),
+    (ClockMismatch, ClockMismatch, "incompatible event clock"),
+    (SnapshotUnavailable, SnapshotUnavailable, "telemetry snapshot is unavailable"),
+    (ContextUnavailable, ContextUnavailable, "plant context is unavailable"),
+    (PolicyUnavailable, PolicyUnavailable, "interpretation policy is unavailable"),
+    (IncompatiblePolicy, IncompatiblePolicy, "interpretation policy does not apply"),
+    (VisibilityViolation, VisibilityViolation, "AGENT visibility violation"),
+    (ResourceLimitExceeded, ResourceLimitExceeded, "request exceeds a declared resource bound"),
+)
+_T = TypeVar("_T")
+
+
+def _guarded(call: Callable[[], _T]) -> _T:
+    """Run one boundary or public-read call; re-raise failures redacted by family."""
+    try:
+        return call()
+    except Exception as error:
+        for family, public, message in _PUBLIC_FAILURES:
+            if isinstance(error, family):
+                raise public(message) from None
+        raise InconsistentRead("internal fault in a boundary or public read") from None
 
 
 # -- vocabulary ------------------------------------------------------------------------
@@ -177,8 +212,11 @@ class InterpretationPolicy:
     ``trend_tolerance_per_second`` maps an exact unit marker to a non-negative finite
     tolerance in that unit per second. A unit without an entry cannot borrow one.
     Bounds: ``max_window_ticks`` (inclusive span end - start), ``max_input_points``
-    (complete-window points requested from the reader), ``max_response_bytes`` (one
-    serialized result). S1 serves one signal per request with no peers or transitions.
+    (complete-window points requested from the reader), ``max_aggregate_candidates``
+    (candidate records across every read of one request, as the public reads report
+    them: the current prefix plus the history window eligible counts),
+    ``max_response_bytes`` (one serialized result). S1 serves one signal per request
+    with no peers or transitions.
     """
 
     policy_id: str
@@ -186,6 +224,7 @@ class InterpretationPolicy:
     default_window_ticks: int
     max_window_ticks: int
     max_input_points: int
+    max_aggregate_candidates: int
     max_gap_ticks: int
     stale_after_ticks: int
     trend_tolerance_per_second: Mapping[str, float]
@@ -202,11 +241,15 @@ class InterpretationPolicy:
         _text("policy_id", self.policy_id)
         _text("version", self.version)
         for name, minimum in (("default_window_ticks", 0), ("max_window_ticks", 0),
-                              ("max_input_points", 1), ("max_gap_ticks", 1),
-                              ("stale_after_ticks", 0), ("max_response_bytes", 1)):
+                              ("max_input_points", 1), ("max_aggregate_candidates", 2),
+                              ("max_gap_ticks", 1), ("stale_after_ticks", 0),
+                              ("max_response_bytes", 1)):
             _count(name, getattr(self, name), minimum)
         if self.default_window_ticks > self.max_window_ticks:
             raise IncompatiblePolicy("default window exceeds the maximum window")
+        if self.max_aggregate_candidates < 2 * self.max_input_points:
+            # A complete window's samples are also in the current prefix at or before T.
+            raise IncompatiblePolicy("aggregate candidate bound cannot serve a complete window")
         if (self.max_signals_per_request != 1 or self.max_peers != 0
                 or self.max_transitions != 0 or self.algorithm != OD1_ALGORITHM
                 or self.numeric_method != NUMERIC_METHOD
@@ -244,6 +287,7 @@ class InterpretationPolicy:
                 "default_window_ticks": self.default_window_ticks,
                 "max_window_ticks": self.max_window_ticks,
                 "max_input_points": self.max_input_points,
+                "max_aggregate_candidates": self.max_aggregate_candidates,
                 "max_gap_ticks": self.max_gap_ticks,
                 "stale_after_ticks": self.stale_after_ticks,
                 "trend_tolerance_per_second": dict(self.trend_tolerance_per_second),
@@ -428,6 +472,8 @@ class OperationalStateBoundary(Protocol):
 
     ``queries`` is the object this boundary returned from ``queries``; its other public
     projections (graph, inventory) are boundary-specific, hence typed ``Any`` here.
+    Failures should use the service families; the service replaces every boundary or
+    read message with a fixed one, and maps any other exception to an internal fault.
     """
 
     def queries(self, run_id: str) -> TelemetryQueries: ...
@@ -700,18 +746,34 @@ class OperationalStateService:
         if engineering_selection.refs:
             # No published engineering revision is resolvable before LOS-A-S2.
             raise ContextUnavailable("engineering context selection is unavailable")
-        queries = self._boundary.queries(run_id)
-        plant = self._boundary.plant_context(queries, plant_context_ref, snapshot)
-        descriptor = self._boundary.signal_descriptor(queries, signal_id)
-        if descriptor.value_kind in policy.value_kinds:
-            policy.tolerance(descriptor.unit)   # reject an unpinned unit before reading
+        boundary = self._boundary
+        queries = _guarded(lambda: boundary.queries(run_id))
 
-        # 2. Public reads, both pinned to the caller's exact snapshot.
-        current_view, history, current, samples = self._read_inputs(
-            queries, signal_id, source_id, snapshot, start, end, horizon, policy)
+        # 2. The current read is the public path that validates the exact snapshot and
+        #    binding; the source and the aggregate work bound are checked before any
+        #    context, descriptor or history work.
+        current_view, current = self._read_current(queries, signal_id, source_id, snapshot,
+                                                   horizon)
         source = current_view["source_id"]
+        if current_view["eligible_count"] > policy.max_aggregate_candidates:
+            raise ResourceLimitExceeded("request exceeds the aggregate candidate bound")
 
-        # 3. Pure OD-1 interpretation with exact provenance.
+        # 3. Pinned plant context, then the signal descriptor and its policy applicability.
+        plant = _guarded(lambda: boundary.plant_context(queries, plant_context_ref, snapshot))
+        descriptor = _guarded(lambda: boundary.signal_descriptor(queries, signal_id))
+        if not isinstance(descriptor, SignalDescriptor) or not isinstance(plant, Mapping):
+            raise InconsistentRead("boundary returned an unexpected shape")
+        if descriptor.value_kind in policy.value_kinds:
+            policy.tolerance(descriptor.unit)   # reject an unpinned unit before the window
+
+        # 4. The complete unreduced window, pinned to the same snapshot.
+        history, samples = self._read_history(queries, signal_id, source, snapshot, start, end,
+                                              policy)
+        candidates = current_view["eligible_count"] + history["eligible_count"]
+        if candidates > policy.max_aggregate_candidates:
+            raise ResourceLimitExceeded("request exceeds the aggregate candidate bound")
+
+        # 5. Pure OD-1 interpretation with exact provenance.
         identities = tuple(sample.identity for sample in samples)
         selection_checksum = _sha256([_identity_json(item) for item in identities])
         window_body = {
@@ -753,6 +815,10 @@ class OperationalStateService:
                              "sample": None if current is None else
                              _identity_json(current.identity)},
             "current": None if current is None else current.as_json(),
+            "work": {"candidate_records": candidates,
+                     "max_aggregate_candidates": policy.max_aggregate_candidates,
+                     "current_eligible_count": current_view["eligible_count"],
+                     "history_eligible_count": history["eligible_count"]},
             "request": {"signal_id": signal_id, "source_id": source_id,
                         "event_start_ticks": start_request, "event_end_ticks": end_request,
                         "plant_context_ref": plant_context_ref.as_json(),
@@ -777,29 +843,44 @@ class OperationalStateService:
             raise ResourceLimitExceeded("result exceeds the response bound")
         result = SignalOperationalState(run_id, source, signal_id, MappingProxyType(features),
                                         window, frozen, derivation_ref)
-        self._boundary.screen({**content, "derivation_ref": derivation_ref})
+        _guarded(lambda: boundary.screen({**content, "derivation_ref": derivation_ref}))
         return result
 
     @staticmethod
-    def _read_inputs(queries: TelemetryQueries, signal_id: str, source_id: str | None,
-                     snapshot: Mapping[str, Any], start: int, end: int, horizon: int,
-                     policy: InterpretationPolicy
-                     ) -> tuple[Mapping[str, Any], Mapping[str, Any], PublicSample | None,
-                                tuple[PublicSample, ...]]:
-        """Current then complete history; any malformed answer is a server fault."""
-        current_view = queries.telemetry_current(signal_id, snapshot=snapshot)
+    def _read_current(queries: TelemetryQueries, signal_id: str, source_id: str | None,
+                      snapshot: Mapping[str, Any], horizon: int
+                      ) -> tuple[Mapping[str, Any], PublicSample | None]:
+        """Current read at (T, K); any malformed answer is a server fault."""
+        view = _guarded(lambda: queries.telemetry_current(signal_id, snapshot=snapshot))
         try:
-            OperationalStateService._consistent(current_view, snapshot, signal_id)
-            if source_id is not None and current_view["source_id"] != source_id:
-                raise UnknownBinding("unregistered source/signal binding")
-            source = current_view["source_id"]
-            current = (None if current_view["sample"] is None
-                       else _public_sample(current_view["sample"]))
+            OperationalStateService._consistent(view, snapshot, signal_id)
+            if not {"view", "view_version", "eligible_count", "coverage"} <= set(view):
+                raise InconsistentRead("public read has an unexpected shape")
+            source, count = view["source_id"], view["eligible_count"]
+            current = None if view["sample"] is None else _public_sample(view["sample"])
         except (KeyError, TypeError):
             raise InconsistentRead("public current read has an unexpected shape") from None
-        history = queries.telemetry_history(signal_id, snapshot=snapshot,
-                                            event_start_ticks=start, event_end_ticks=end,
-                                            max_points=policy.max_input_points)
+        if (not isinstance(source, str) or type(count) is not int or count < 0
+                or (current is None) != (count == 0)):
+            raise InconsistentRead("public current read has an unexpected shape")
+        if current is not None and (
+                current.event_ticks > horizon
+                or (current.identity.source_id, current.identity.signal_id)
+                != (source, signal_id)):
+            raise InconsistentRead("public read violated its snapshot or binding")
+        if source_id is not None and source != source_id:
+            raise UnknownBinding("unknown or ambiguous signal binding")
+        return view, current
+
+    @staticmethod
+    def _read_history(queries: TelemetryQueries, signal_id: str, source: str,
+                      snapshot: Mapping[str, Any], start: int, end: int,
+                      policy: InterpretationPolicy
+                      ) -> tuple[Mapping[str, Any], tuple[PublicSample, ...]]:
+        """Complete unreduced history of the window; malformed answers are server faults."""
+        history = _guarded(lambda: queries.telemetry_history(
+            signal_id, snapshot=snapshot, event_start_ticks=start, event_end_ticks=end,
+            max_points=policy.max_input_points))
         try:
             OperationalStateService._consistent(history, snapshot, signal_id, source)
             if (history["event_start_ticks"], history["event_end_ticks"]) != (start, end):
@@ -815,20 +896,17 @@ class OperationalStateService:
                 raise ResourceLimitExceeded("complete window exceeds the unreduced input bound")
             samples = tuple(_public_sample(item) for item in history["samples"])
             if not ({"view", "view_version", "max_points", "reduction_policy", "coverage"}
-                    <= set(history)
-                    and {"view", "view_version", "eligible_count", "coverage"}
-                    <= set(current_view)):
+                    <= set(history)):
                 raise InconsistentRead("public read has an unexpected shape")
         except (KeyError, TypeError):
             raise InconsistentRead("public history read has an unexpected shape") from None
         ticks = [sample.event_ticks for sample in samples]
-        if (ticks != sorted(ticks) or any(not start <= tick <= end for tick in ticks)
-                or (current is not None and current.event_ticks > horizon)):
+        if ticks != sorted(ticks) or any(not start <= tick <= end for tick in ticks):
             raise InconsistentRead("public read violated its window or read order")
-        for sample in (*samples, *(() if current is None else (current,))):
+        for sample in samples:
             if (sample.identity.source_id, sample.identity.signal_id) != (source, signal_id):
                 raise InconsistentRead("read returned another binding")
-        return current_view, history, current, samples
+        return history, samples
 
     @staticmethod
     def _consistent(view: Mapping[str, Any], snapshot: Mapping[str, Any], signal_id: str,
