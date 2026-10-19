@@ -227,6 +227,15 @@ class InterpretationPolicy:
         object.__setattr__(self, "value_kinds", tuple(self.value_kinds))
         object.__setattr__(self, "_checksum", _sha256(self.parameters()))
 
+    def __hash__(self) -> int:
+        # Equal policies have equal parameter checksums; the tolerance mapping is not hashed.
+        return hash(self._checksum)
+
+    @property
+    def max_inline_sample_refs(self) -> int:
+        """Distinct full sample identities one result may emit: the window plus current."""
+        return self.max_input_points + 1
+
     def parameters(self) -> dict[str, Any]:
         """Typed parameters, applicable value kinds/units and method versions (JSON)."""
         return {"policy_id": self.policy_id, "version": self.version,
@@ -242,7 +251,7 @@ class InterpretationPolicy:
                 "applicable_units": sorted(self.trend_tolerance_per_second),
                 "max_signals_per_request": self.max_signals_per_request,
                 "max_peers": self.max_peers, "max_transitions": self.max_transitions,
-                "max_inline_sample_refs": self.max_input_points + 1,
+                "max_inline_sample_refs": self.max_inline_sample_refs,
                 "max_response_bytes": self.max_response_bytes}
 
     @property
@@ -333,9 +342,10 @@ def _identity_json(identity: SampleIdentity) -> dict[str, Any]:
 class FeatureResult:
     """One typed feature: a value only when AVAILABLE, with exact refs either way.
 
-    ``value_samples`` are the samples whose values define the value; ``reason_samples``
-    are those that made the feature unavailable. Window features evaluate every sample
-    of ``window_ref``; AS_OF_HORIZON features describe T.
+    ``value_samples`` are the samples whose values define the value. ``reason_positions``
+    index the window's ``sample_identities`` (the single list of full identities) and
+    cite the samples that made the feature unavailable. Window features evaluate every
+    sample of ``window_ref``; AS_OF_HORIZON features describe T.
     """
 
     feature: Feature
@@ -343,7 +353,7 @@ class FeatureResult:
     basis: str
     value: Any
     value_samples: tuple[SampleIdentity, ...]
-    reason_samples: tuple[SampleIdentity, ...]
+    reason_positions: tuple[int, ...]
     detail: Mapping[str, Any]
     policy_ref: str
     window_ref: str | None
@@ -355,7 +365,7 @@ class FeatureResult:
         return {"feature": str(self.feature), "status": str(self.status), "basis": self.basis,
                 "value": value,
                 "value_samples": [_identity_json(item) for item in self.value_samples],
-                "reason_samples": [_identity_json(item) for item in self.reason_samples],
+                "reason_sample_positions": list(self.reason_positions),
                 "detail": _thaw(self.detail), "policy_ref": self.policy_ref,
                 "window_ref": self.window_ref, "citations": list(self.citations)}
 
@@ -388,6 +398,11 @@ class SignalOperationalState:
     window: WindowSelection
     body: Mapping[str, Any]
     derivation_ref: str
+
+    def reason_samples(self, feature: Feature) -> tuple[SampleIdentity, ...]:
+        """Exact identities a feature cites as unusable, resolved from the window list."""
+        return tuple(self.window.sample_identities[position]
+                     for position in self.features[feature].reason_positions)
 
     def as_json(self) -> dict[str, Any]:
         return {**_thaw(self.body), "window": self.window.as_json(),
@@ -456,53 +471,73 @@ class _Context:
 
     def result(self, feature: Feature, status: FeatureStatus, *, value: Any = None,
                value_samples: Sequence[SampleIdentity] = (),
-               reason_samples: Sequence[SampleIdentity] = (),
+               reason_positions: Sequence[int] = (),
                detail: Mapping[str, Any] | None = None, basis: str = WINDOW,
                citations: Sequence[str] = ()) -> FeatureResult:
         return FeatureResult(feature, status, basis, value, tuple(value_samples),
-                             tuple(reason_samples), _freeze(detail or {}),
+                             tuple(reason_positions), _freeze(detail or {}),
                              self.policy.ref.ref,
                              self.window_ref if basis == WINDOW else None,
                              (*self.citations, *citations))
 
 
 def _window_status(samples: Sequence[PublicSample], kind: ValueKind
-                   ) -> tuple[FeatureStatus, tuple[SampleIdentity, ...]] | None:
-    """OD-1 precedence before sample-count checks: kind, no data, observed kind, quality."""
+                   ) -> tuple[FeatureStatus, tuple[int, ...]] | None:
+    """OD-1 precedence before sample-count checks: declared kind, no data, unusable
+    quality/null, then the observed kind of the remaining GOOD non-null samples."""
     if kind != ValueKind.NUMERIC:
         return FeatureStatus.UNSUPPORTED_VALUE_KIND, ()
     if not samples:
         return FeatureStatus.NO_DATA, ()
-    wrong = tuple(s.identity for s in samples if s.value is not None and not _is_number(s.value))
-    if wrong:
-        return FeatureStatus.UNSUPPORTED_VALUE_KIND, wrong
-    unusable = tuple(s.identity for s in samples
+    unusable = tuple(position for position, s in enumerate(samples)
                      if s.quality != Quality.GOOD or s.value is None)
     if unusable:
         return FeatureStatus.QUALITY_UNUSABLE, unusable
+    wrong = tuple(position for position, s in enumerate(samples) if not _is_number(s.value))
+    if wrong:
+        return FeatureStatus.UNSUPPORTED_VALUE_KIND, wrong
     return None
 
 
-def _secant(samples: Sequence[PublicSample], context: _Context) -> list[FeatureResult]:
+def _spans(samples: Sequence[PublicSample], start: int, end: int, max_gap: int
+           ) -> tuple[list[dict[str, Any]], tuple[int, ...]]:
+    """Unobserved spans above ``max_gap`` over the full window, with bounding positions.
+
+    Leading (window start to first observed tick) and trailing (last observed tick to
+    window end) spans count like adjacent gaps; their window boundary is in the detail.
+    """
+    ticks = sorted({sample.event_ticks for sample in samples})
+    edges = [("LEADING", start, ticks[0]),
+             *(("INTERIOR", left, right) for left, right in zip(ticks, ticks[1:])),
+             ("TRAILING", ticks[-1], end)]
+    gaps, positions = [], []
+    for kind, left, right in edges:
+        if right - left <= max_gap:
+            continue
+        gaps.append({"kind": kind, "from_event_ticks": left, "to_event_ticks": right,
+                     "span_ticks": right - left})
+        if kind != "LEADING":   # last read-order sample at the left tick
+            positions.append(max(i for i, s in enumerate(samples) if s.event_ticks == left))
+        if kind != "TRAILING":  # first read-order sample at the right tick
+            positions.append(min(i for i, s in enumerate(samples) if s.event_ticks == right))
+    return gaps, tuple(sorted(set(positions)))
+
+
+def _secant(samples: Sequence[PublicSample], start: int, end: int,
+            context: _Context) -> list[FeatureResult]:
     blocked = _window_status(samples, context.descriptor.value_kind)
+    detail: dict[str, Any] = {}
     if blocked is None:
-        ticks = sorted({sample.event_ticks for sample in samples})
-        if len(ticks) < 2:
+        if len({sample.event_ticks for sample in samples}) < 2:
             blocked = FeatureStatus.INSUFFICIENT_DATA, ()
         else:
-            gaps = tuple(pair for pair in zip(ticks, ticks[1:])
-                         if pair[1] - pair[0] > context.policy.max_gap_ticks)
+            gaps, bounding = _spans(samples, start, end, context.policy.max_gap_ticks)
             if gaps:
-                # Cite the samples bounding each oversized span, in read order.
-                bounding = []
-                for left, right in gaps:
-                    bounding.append(next(s.identity for s in reversed(samples)
-                                         if s.event_ticks == left))
-                    bounding.append(next(s.identity for s in samples if s.event_ticks == right))
-                blocked = FeatureStatus.GAP_EXCEEDS_POLICY, tuple(dict.fromkeys(bounding))
+                blocked = FeatureStatus.GAP_EXCEEDS_POLICY, bounding
+                detail = {"gaps": gaps, "max_gap_ticks": context.policy.max_gap_ticks}
     if blocked is not None:
         status, reasons = blocked
-        return [context.result(feature, status, reason_samples=reasons)
+        return [context.result(feature, status, reason_positions=reasons, detail=detail)
                 for feature in (Feature.RATE_OF_CHANGE, Feature.TREND)]
     first_tick, last_tick = samples[0].event_ticks, samples[-1].event_ticks
     # Last canonical read-order sample at each endpoint tick.
@@ -539,7 +574,7 @@ def _extrema(samples: Sequence[PublicSample], context: _Context) -> list[Feature
     blocked = _window_status(samples, context.descriptor.value_kind)
     if blocked is not None:
         status, reasons = blocked
-        return [context.result(feature, status, reason_samples=reasons)
+        return [context.result(feature, status, reason_positions=reasons)
                 for feature in (Feature.WINDOW_MIN, Feature.WINDOW_MAX)]
     results = []
     for feature, better in ((Feature.WINDOW_MIN, lambda a, b: a < b),
@@ -698,7 +733,8 @@ class OperationalStateService:
                                  _freeze(window_body),
                                  _freeze(_diagnostics(samples, start, end, policy)))
         context = _Context(policy, descriptor, resolution, window_ref, (context_ref,))
-        features = self._features(samples, current, horizon, context, engineering_selection)
+        features = self._features(samples, current, horizon, start, end, context,
+                                  engineering_selection)
         body = {
             "schema_version": OPERATIONAL_STATE_VERSION, "run_id": run_id,
             "source_id": source, "signal_id": signal_id,
@@ -724,18 +760,24 @@ class OperationalStateService:
                         "interpretation_policy_refs": [policy.ref.ref]},
             "derivation": {"algorithm": policy.algorithm, "numeric_method": policy.numeric_method,
                            "inputs": [snapshot["snapshot_ref"], window_ref]}}
+        emitted = {*identities, *(() if current is None else (current.identity,)),
+                   *(item for result in features.values() for item in result.value_samples)}
+        if len(emitted) > policy.max_inline_sample_refs:
+            raise ResourceLimitExceeded("result exceeds the inline sample-ref bound")
         frozen = _freeze(json.loads(_canonical(body)))
         provisional = SignalOperationalState(run_id, source, signal_id,
                                              MappingProxyType(features), window, frozen, "")
         content = provisional.as_json()
         del content["derivation_ref"]
-        derivation_ref = "operational-state:sha256:" + _sha256(content)
+        encoded = _canonical(content)
+        derivation_ref = "operational-state:sha256:" + hashlib.sha256(encoded).hexdigest()
+        # The size check counts the derivation ref too: one fixed-length JSON member.
+        size = len(encoded) + len(_canonical({"derivation_ref": derivation_ref})) - 1
+        if size > policy.max_response_bytes:
+            raise ResourceLimitExceeded("result exceeds the response bound")
         result = SignalOperationalState(run_id, source, signal_id, MappingProxyType(features),
                                         window, frozen, derivation_ref)
-        serialized = result.as_json()
-        if len(_canonical(serialized)) > policy.max_response_bytes:
-            raise ResourceLimitExceeded("result exceeds the response bound")
-        self._boundary.screen(serialized)
+        self._boundary.screen({**content, "derivation_ref": derivation_ref})
         return result
 
     @staticmethod
@@ -762,8 +804,14 @@ class OperationalStateService:
             OperationalStateService._consistent(history, snapshot, signal_id, source)
             if (history["event_start_ticks"], history["event_end_ticks"]) != (start, end):
                 raise InconsistentRead("history answered another window")
-            if (history["reduced"] or history["returned_count"] != history["eligible_count"]
-                    or len(history["samples"]) != history["eligible_count"]):
+            eligible, returned = history["eligible_count"], history["returned_count"]
+            if (any(type(count) is not int or count < 0 for count in (eligible, returned))
+                    or type(history["reduced"]) is not bool
+                    or len(history["samples"]) != returned or returned > eligible
+                    or returned > policy.max_input_points
+                    or history["reduced"] != (returned < eligible)):
+                raise InconsistentRead("history counts disagree with its samples")
+            if history["reduced"]:
                 raise ResourceLimitExceeded("complete window exceeds the unreduced input bound")
             samples = tuple(_public_sample(item) for item in history["samples"])
             if not ({"view", "view_version", "max_points", "reduction_policy", "coverage"}
@@ -792,7 +840,7 @@ class OperationalStateService:
 
     @staticmethod
     def _features(samples: Sequence[PublicSample], current: PublicSample | None, horizon: int,
-                  context: _Context, selection: EngineeringSelection
+                  start: int, end: int, context: _Context, selection: EngineeringSelection
                   ) -> dict[Feature, FeatureResult]:
         policy, kind = context.policy, context.descriptor.value_kind
         features: dict[Feature, FeatureResult] = {}
@@ -814,7 +862,7 @@ class OperationalStateService:
                         "current_event_ticks": current.event_ticks,
                         "as_of_event_ticks": horizon,
                         "semantics": "event-horizon freshness only"})
-        for result in (*_secant(samples, context), *_extrema(samples, context)):
+        for result in (*_secant(samples, start, end, context), *_extrema(samples, context)):
             features[result.feature] = result
         selection_ref = f"engineering-selection:{selection.as_json()['kind']}"
         threshold = (FeatureStatus.UNSUPPORTED_VALUE_KIND if kind != ValueKind.NUMERIC

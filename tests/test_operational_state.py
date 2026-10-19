@@ -57,14 +57,17 @@ class Plant:
 
     scope = "AGENT"
 
-    def __init__(self, run_id="run-a", max_points_limit=100):
+    def __init__(self, run_id="run-a", max_points_limit=100, *, source=SOURCE,
+                 signals=(NUM, FLAG, TEXT, ODD), max_scan_records=500):
         self.run_id = run_id
+        self.source = source
         self.store = InMemoryTimeSeriesStore(
             store_id="store-a", namespace=f"ns-{run_id}", context_ref=CONTEXT,
             visibility_policy_ref="vis-a", event_clock=CLOCK, ingest_clock=INGEST,
-            bindings={SOURCE: (NUM, FLAG, TEXT, ODD)}, incarnation=f"inc-{run_id}")
+            bindings={source: signals}, incarnation=f"inc-{run_id}")
         self.reader = TimeSeriesReader(self.store, max_interval_ticks=1000,
-                                       max_scan_records=500, max_points_limit=max_points_limit)
+                                       max_scan_records=max_scan_records,
+                                       max_points_limit=max_points_limit)
         self.sequences = defaultdict(int)
         self.reads = []
 
@@ -72,10 +75,10 @@ class Plant:
         sequence = self.sequences[signal]
         self.sequences[signal] += 1
         self.store.append(SourceObservation(
-            signal_id=signal, source_id=SOURCE, event_time=TimePoint(CLOCK.clock_id, ticks),
+            signal_id=signal, source_id=self.source, event_time=TimePoint(CLOCK.clock_id, ticks),
             sequence=sequence, value=value, quality=quality),
             ingest_time=TimePoint(INGEST.clock_id, len(self.reads) + sequence))
-        return SampleIdentity(SOURCE, signal, sequence)
+        return SampleIdentity(self.source, signal, sequence)
 
     def series(self, signal, values, start=0):
         return [self.add(signal, start + index, value) for index, value in enumerate(values)]
@@ -103,10 +106,10 @@ class Plant:
     def telemetry_current(self, signal_id, *, snapshot):
         self.reads.append(("current", signal_id))
         pinned = self._resolve(snapshot)
-        result = self.reader.current(source_id=SOURCE, signal_id=signal_id, snapshot=pinned)
+        result = self.reader.current(source_id=self.source, signal_id=signal_id, snapshot=pinned)
         return self._view("CanonicalCurrentView", {
             "source": "test stream", "snapshot": snapshot_body(pinned),
-            "source_id": SOURCE, "signal_id": signal_id, "status": str(result.status),
+            "source_id": self.source, "signal_id": signal_id, "status": str(result.status),
             "eligible_count": result.eligible_count,
             "sample": None if result.sample is None else public_sample(result.sample),
             "coverage": str(result.coverage)})
@@ -116,12 +119,12 @@ class Plant:
         self.reads.append(("history", signal_id))
         pinned = self._resolve(snapshot)
         result = self.reader.history(
-            source_id=SOURCE, signal_id=signal_id,
+            source_id=self.source, signal_id=signal_id,
             event_start=TimePoint(CLOCK.clock_id, event_start_ticks),
             event_end=TimePoint(CLOCK.clock_id, event_end_ticks), max_points=max_points,
             snapshot=pinned)
         return self._view("CanonicalHistoryView", {
-            "source": "test stream", "snapshot": snapshot_body(pinned), "source_id": SOURCE,
+            "source": "test stream", "snapshot": snapshot_body(pinned), "source_id": self.source,
             "signal_id": signal_id, "event_start_ticks": event_start_ticks,
             "event_end_ticks": event_end_ticks, "max_points": result.max_points,
             "eligible_count": result.eligible_count, "returned_count": result.returned_count,
@@ -135,7 +138,9 @@ class Boundary:
 
     def __init__(self, *plants):
         self.plants = {plant.run_id: plant for plant in plants}
+        self.descriptors = dict(DESCRIPTORS)
         self.screened = []
+        self.calls = []
 
     def queries(self, run_id):
         try:
@@ -144,11 +149,13 @@ class Boundary:
             raise LookupError("unknown run") from None
 
     def signal_descriptor(self, queries, signal_id):
-        if signal_id not in DESCRIPTORS:
+        self.calls.append("signal_descriptor")
+        if signal_id not in self.descriptors:
             raise UnknownBinding("unregistered source/signal binding")
-        return DESCRIPTORS[signal_id]
+        return self.descriptors[signal_id]
 
     def plant_context(self, queries, ref, snapshot):
+        self.calls.append("plant_context")
         if ref.kind != "INTERIM_GRAPH_SOURCE" or ref.ref != snapshot["context_ref"]:
             raise ContextUnavailable("plant context is unavailable")
         return {"kind": ref.kind, "context_ref": ref.ref, "source": {"source_id": "graph-a"}}
@@ -177,6 +184,9 @@ class OperationalStateCase(unittest.TestCase):
 
     def feature(self, result, feature):
         return result.features[feature]
+
+    def reasons(self, result, feature):
+        return result.reason_samples(feature)
 
     def assertStatus(self, result, status, *features):
         for feature in features:
@@ -290,8 +300,10 @@ class FeatureCorrectnessTests(OperationalStateCase):
         ids = [self.plant.add(NUM, tick, float(tick)) for tick in ticks]
         result = self.read(horizon=6, start=0, end=6)
         self.assertStatus(result, FeatureStatus.GAP_EXCEEDS_POLICY, *SECANT)
-        self.assertEqual(self.feature(result, Feature.RATE_OF_CHANGE).reason_samples,
-                         (ids[1], ids[2]))
+        self.assertEqual(self.reasons(result, Feature.RATE_OF_CHANGE), (ids[1], ids[2]))
+        self.assertEqual(self.feature(result, Feature.TREND).detail["gaps"],
+                         ({"kind": "INTERIOR", "from_event_ticks": 1, "to_event_ticks": 5,
+                           "span_ticks": 4},))
         self.assertEqual(self.feature(result, Feature.WINDOW_MAX).value, 6.0)
         diagnostics = result.window.diagnostics
         self.assertEqual(diagnostics["max_adjacent_gap_ticks"], 4)
@@ -312,6 +324,39 @@ class FeatureCorrectnessTests(OperationalStateCase):
                           diagnostics["trailing_unobserved_ticks"]), (2, 3))
         self.assertEqual(diagnostics["quality_counts"], {"GOOD": 3, "UNCERTAIN": 0, "BAD": 0})
 
+    def test_leading_and_trailing_silence_gate_rate_and_trend(self):
+        # max_gap_ticks is 2. The span from the window start to the first observed tick
+        # and from the last observed tick to the window end are checked like gaps.
+        cases = (
+            # trailing silence: the signal stops at tick 5, window [0, 8]
+            ((0, 1, 2, 3, 4, 5), (0, 8), "TRAILING", (5, 8)),
+            # leading silence: the signal starts at tick 3, window [0, 8]
+            ((3, 4, 5, 6, 7, 8), (0, 8), "LEADING", (0, 3)),
+            # one tick over the bound at each end
+            ((2, 3, 4, 5, 6), (0, 9), "TRAILING", (6, 9)),
+            ((3, 4, 5, 6), (0, 8), "LEADING", (0, 3)),
+        )
+        for ticks, (start, end), kind, span in cases:
+            with self.subTest(ticks=ticks, window=(start, end)):
+                self.setUp()
+                ids = [self.plant.add(NUM, tick, 1.0) for tick in ticks]
+                result = self.read(horizon=end, start=start, end=end)
+                self.assertStatus(result, FeatureStatus.GAP_EXCEEDS_POLICY, *SECANT)
+                self.assertStatus(result, FeatureStatus.AVAILABLE, *EXTREMA)
+                nearest = ids[-1] if kind == "TRAILING" else ids[0]
+                self.assertEqual(self.reasons(result, Feature.TREND), (nearest,))
+                self.assertEqual(self.feature(result, Feature.RATE_OF_CHANGE).detail["gaps"],
+                                 ({"kind": kind, "from_event_ticks": span[0],
+                                   "to_event_ticks": span[1], "span_ticks": span[1] - span[0]},))
+        # Both ends exactly at the bound pass.
+        self.setUp()
+        for tick in (2, 3, 4, 5, 6):
+            self.plant.add(NUM, tick, 1.0)
+        result = self.read(horizon=8, start=0, end=8)
+        self.assertStatus(result, FeatureStatus.AVAILABLE, *SECANT)
+        self.assertEqual((result.window.diagnostics["leading_unobserved_ticks"],
+                          result.window.diagnostics["trailing_unobserved_ticks"]), (2, 2))
+
     def test_status_precedence(self):
         # Declared kind applicability precedes no data; threshold too.
         result = self.read(FLAG, horizon=3, start=0, end=3)
@@ -321,16 +366,25 @@ class FeatureCorrectnessTests(OperationalStateCase):
         # Canonical-limit availability precedes no data for a numeric threshold.
         self.assertStatus(self.read(horizon=3, start=0, end=3), FeatureStatus.NO_CANONICAL_LIMIT,
                           Feature.THRESHOLD)
-        # Observed value kind precedes quality; quality precedes insufficiency and gaps.
-        self.plant.add(NUM, 0, 1.0, quality="BAD")
-        self.plant.add(NUM, 9, "not-numeric")
-        result = self.read(horizon=9, start=0, end=9)
+        # Unusable quality/null precedes the observed value kind (spec order).
+        bad = self.plant.add(NUM, 0, 1.0, quality="BAD")
+        self.plant.add(NUM, 1, "not-numeric")
+        result = self.read(horizon=1, start=0, end=1)
+        self.assertStatus(result, FeatureStatus.QUALITY_UNUSABLE, *WINDOW_FEATURES)
+        self.assertEqual(self.reasons(result, Feature.TREND), (bad,))
+        # A GOOD, non-null, non-numeric sample in a numeric window is an unsupported kind.
+        self.setUp()
+        self.plant.add(NUM, 0, 1.0)
+        odd = self.plant.add(NUM, 1, "not-numeric")
+        result = self.read(horizon=1, start=0, end=1)
         self.assertStatus(result, FeatureStatus.UNSUPPORTED_VALUE_KIND, *WINDOW_FEATURES)
+        self.assertEqual(self.reasons(result, Feature.WINDOW_MIN), (odd,))
+        # Quality precedes insufficiency and gaps.
         self.setUp()
         bad = self.plant.add(NUM, 0, 1.0, quality="BAD")
         result = self.read(horizon=0, start=0, end=0)
         self.assertStatus(result, FeatureStatus.QUALITY_UNUSABLE, *WINDOW_FEATURES)
-        self.assertEqual(self.feature(result, Feature.TREND).reason_samples, (bad,))
+        self.assertEqual(self.reasons(result, Feature.TREND), (bad,))
         self.plant.add(NUM, 9, 2.0)
         self.assertStatus(self.read(horizon=9, start=0, end=9), FeatureStatus.QUALITY_UNUSABLE,
                           *WINDOW_FEATURES)
@@ -409,7 +463,7 @@ class QualityAndFreshnessTests(OperationalStateCase):
         self.plant.add(NUM, 2, 100.0)
         result = self.read(horizon=2, start=0, end=2)
         trend = self.feature(result, Feature.TREND)
-        self.assertEqual((trend.status, trend.value, trend.reason_samples),
+        self.assertEqual((trend.status, trend.value, self.reasons(result, Feature.TREND)),
                          (FeatureStatus.QUALITY_UNUSABLE, None, (uncertain,)))
         self.assertEqual(result.window.diagnostics["quality_counts"],
                          {"GOOD": 2, "UNCERTAIN": 1, "BAD": 0})
@@ -598,6 +652,29 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         with self.assertRaises(ResourceLimitExceeded):
             self.read(horizon=39, start=0, end=39, policy=policy)
         self.assertEqual(self.boundary.screened, [])
+        # The bound applies to the exact canonical result, derivation ref included.
+        def exact_policy(limit):
+            return InterpretationPolicy(
+                policy_id="policy-exact", version="v0", default_window_ticks=10,
+                max_window_ticks=100, max_input_points=50, max_gap_ticks=2,
+                stale_after_ticks=3, trend_tolerance_per_second={"u1": 0.5},
+                max_response_bytes=limit)
+
+        probe = exact_policy(99_999)   # same digit count as the measured size below
+        self.service = OperationalStateService(self.boundary, (probe,))
+        size = len(json.dumps(self.read(horizon=39, start=0, end=39, policy=probe).as_json(),
+                              sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False).encode())
+        self.assertTrue(10_001 <= size <= 99_999)
+        for limit, fits in ((size, True), (size - 1, False)):
+            exact = exact_policy(limit)
+            self.service = OperationalStateService(self.boundary, (exact,))
+            with self.subTest(limit=limit):
+                if fits:
+                    self.read(horizon=39, start=0, end=39, policy=exact)
+                else:
+                    with self.assertRaises(ResourceLimitExceeded):
+                        self.read(horizon=39, start=0, end=39, policy=exact)
 
     def test_malformed_or_out_of_order_public_reads_are_server_faults(self):
         self.plant.series(NUM, [1.0, 2.0, 3.0])
@@ -612,6 +689,9 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
             return read
 
         changes = (lambda view: view["samples"].reverse(),
+                   # unreduced answers whose counts disagree are server faults
+                   lambda view: view["samples"].pop(),
+                   lambda view: view.update(eligible_count=view["eligible_count"] + 1),
                    lambda view: view["samples"][0].update(event_ticks=9),
                    lambda view: view["samples"][0].update(value=float("nan")),
                    lambda view: view["samples"][0].update(quality="MAYBE"),
@@ -670,6 +750,52 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
         tolerance = POLICY.parameters()["trend_tolerance_per_second"]
         self.assertEqual(tolerance, {"u1": 0.5})
         self.assertEqual(Fraction(POLICY.tolerance("u1")), Fraction(1, 2))
+        # Hashable by content: equal policies hash equal and work as dict keys.
+        self.assertEqual(same, POLICY)
+        self.assertEqual(hash(same), hash(POLICY))
+        self.assertEqual({POLICY: "a"}[same], "a")
+        self.assertEqual(len({POLICY, same, changed}), 2)
+
+    def test_maximum_unusable_window_is_a_typed_status_within_the_response_bound(self):
+        source, signal = "src-" + "x" * 252, "sig-" + "y" * 252
+        plant = Plant("run-wide", 1000, source=source, signals=(signal,), max_scan_records=5000)
+        self.boundary.plants["run-wide"] = plant
+        self.boundary.descriptors[signal] = SignalDescriptor(ValueKind.NUMERIC, "u1")
+        policy = InterpretationPolicy(
+            policy_id="policy-max", version="v0", default_window_ticks=120,
+            max_window_ticks=999, max_input_points=1000, max_gap_ticks=1, stale_after_ticks=1,
+            trend_tolerance_per_second={"u1": 0.5}, max_response_bytes=1_048_576)
+        self.service = OperationalStateService(self.boundary, (policy,))
+        self.plant = plant
+        # 999 ticks, 1,000 samples: alternating BAD numeric and GOOD null, 256-char ids.
+        ids = tuple(plant.add(signal, tick, None if tick % 2 else 1.0,
+                              quality="GOOD" if tick % 2 else "BAD") for tick in range(1000))
+        result = self.read(signal, horizon=999, start=0, end=999, policy=policy,
+                           run_id="run-wide")
+        self.assertStatus(result, FeatureStatus.QUALITY_UNUSABLE, *WINDOW_FEATURES)
+        for feature in WINDOW_FEATURES:
+            self.assertEqual(self.reasons(result, feature), ids)
+        body = result.as_json()
+        size = len(json.dumps(body, sort_keys=True, separators=(",", ":"),
+                              ensure_ascii=False).encode())
+        self.assertLessEqual(size, policy.max_response_bytes)
+        # Full identities are emitted once, in the window; features cite positions into it.
+        self.assertEqual(body["features"]["trend"]["reason_sample_positions"], list(range(1000)))
+        self.assertNotIn("reason_samples", body["features"]["trend"])
+        emitted = set()
+
+        def collect(value):
+            if isinstance(value, dict):
+                if {"source_id", "signal_id", "sequence"} <= set(value):
+                    emitted.add((value["source_id"], value["signal_id"], value["sequence"]))
+                for item in value.values():
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(body)
+        self.assertLessEqual(len(emitted), policy.parameters()["max_inline_sample_refs"])
 
 
 class GenericBoundaryTests(unittest.TestCase):
