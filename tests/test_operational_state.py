@@ -841,6 +841,20 @@ class SelectionBoundsAndFailureTests(OperationalStateCase):
                        {"max_aggregate_candidates": 99}, {"max_aggregate_candidates": True}):
             with self.subTest(change=change), self.assertRaises(IncompatiblePolicy):
                 InterpretationPolicy(**{**base, **change})
+        # Every count/bound field is a strict int: a bool or float that compares equal
+        # to a valid value would otherwise change the checksum but not equality.
+        for name, valid in (("default_window_ticks", 10), ("max_window_ticks", 100),
+                            ("max_input_points", 50), ("max_aggregate_candidates", 200),
+                            ("max_gap_ticks", 2), ("stale_after_ticks", 3),
+                            ("max_response_bytes", 262_144), ("max_signals_per_request", 1),
+                            ("max_peers", 0), ("max_transitions", 0)):
+            for wrong in (float(valid), bool(valid)):
+                with self.subTest(name=name, wrong=wrong), \
+                        self.assertRaises(IncompatiblePolicy):
+                    InterpretationPolicy(**{**base, name: wrong})
+        explicit = InterpretationPolicy(**base, max_signals_per_request=1, max_peers=0,
+                                        max_transitions=0)
+        self.assertEqual((explicit, hash(explicit)), (POLICY, hash(POLICY)))
         same = InterpretationPolicy(**base)
         self.assertEqual(same.ref, POLICY.ref)
         self.assertTrue(POLICY.ref.ref.startswith("interpretation-policy:policy-a@v0:sha256:"))

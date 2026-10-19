@@ -245,7 +245,10 @@ class InterpretationPolicy:
         for name, minimum in (("default_window_ticks", 0), ("max_window_ticks", 0),
                               ("max_input_points", 1), ("max_aggregate_candidates", 2),
                               ("max_gap_ticks", 1), ("stale_after_ticks", 0),
-                              ("max_response_bytes", 1)):
+                              ("max_response_bytes", 1), ("max_signals_per_request", 1),
+                              ("max_peers", 0), ("max_transitions", 0)):
+            # Strict int: a bool or float equal to a valid value would change the
+            # checksum (and hash) without changing equality.
             _count(name, getattr(self, name), minimum)
         if self.default_window_ticks > self.max_window_ticks:
             raise IncompatiblePolicy("default window exceeds the maximum window")
