@@ -4,7 +4,7 @@ Rules for coding agents working on `tep-agent-lab`. The product is the industria
 
 ## Session protocol
 
-Start every planning, review or implementation session with `docs/program-status.md`: current main, open PRs, next gate and the step-by-step protocol it owns. Record only merged facts there; the PR that delivers a slice may record that slice as merged, since the status change ships with it and becomes true when that PR merges.
+Start every planning, review or implementation session with `docs/program-status.md`: current main, open PRs, next gate and the step-by-step protocol it owns. Update it in the PR that lands the change, and record only facts that will be true once that PR merges (its Session protocol, step 9).
 
 ## Product and boundary
 
